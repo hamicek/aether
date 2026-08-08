@@ -22,6 +22,8 @@ import (
 	"flag"
 	"math/rand"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/soak"
 	"github.com/hamicek/aether/internal/wire"
 	"github.com/hamicek/aether/sdk/go/thrall"
@@ -48,6 +51,15 @@ const (
 	soakDurableWorkers = 2
 	soakDurablePace    = 5 * time.Millisecond
 	soakDrainStall     = 20 // consecutive no-progress polls (~10s) that end the drain
+
+	// Leak sampling: how many samples to aim for over the run (bounding the interval),
+	// the warm-up fraction discarded before comparing, and the fraction of the retained
+	// samples averaged at each end to smooth GC sawtooth.
+	soakLeakSamples = 100
+	soakLeakWarmup  = 0.10
+	soakLeakEndFrac = 0.25
+	soakLeakMinIval = 1 * time.Second
+	soakLeakMaxIval = 60 * time.Second
 )
 
 var (
@@ -375,6 +387,148 @@ func drainDurable(nc *nats.Conn, app, name string, stored int) durableResult {
 	return res
 }
 
+// --- leak detection ---
+
+// leakSample is one point-in-time snapshot of the runtime's resource use: the in-
+// process lord's goroutines and heap, plus each sampled thrall's RSS (KB, via ps).
+type leakSample struct {
+	goroutines int
+	heapInUse  uint64
+	rss        map[string]int64
+}
+
+// readRSS returns a process's resident set size in KB via ps. ok is false if the
+// process is gone or ps output cannot be parsed.
+func readRSS(pid int) (int64, bool) {
+	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0, false
+	}
+	kb, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return kb, true
+}
+
+// sampleRuntime snapshots the lord's goroutines and heap (this process) and the RSS
+// of each named thrall (a separate OS process).
+func sampleRuntime(pids map[string]int) leakSample {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	s := leakSample{goroutines: runtime.NumGoroutine(), heapInUse: ms.HeapInuse, rss: map[string]int64{}}
+	for name, pid := range pids {
+		if kb, ok := readRSS(pid); ok {
+			s.rss[name] = kb
+		}
+	}
+	return s
+}
+
+// runLeakSampler snapshots resource use at a steady interval for the whole run. It
+// runs concurrently with the load and durable phases, so the test's own goroutine
+// population is constant across samples and any growth reflects the runtime, not the
+// harness.
+func runLeakSampler(ctx context.Context, pids map[string]int, interval time.Duration) []leakSample {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	samples := []leakSample{sampleRuntime(pids)}
+	for {
+		select {
+		case <-ctx.Done():
+			return append(samples, sampleRuntime(pids))
+		case <-ticker.C:
+			samples = append(samples, sampleRuntime(pids))
+		}
+	}
+}
+
+// samplerInterval spreads roughly soakLeakSamples snapshots across the run, clamped
+// to a sane range.
+func samplerInterval(d time.Duration) time.Duration {
+	iv := d / soakLeakSamples
+	if iv < soakLeakMinIval {
+		iv = soakLeakMinIval
+	}
+	if iv > soakLeakMaxIval {
+		iv = soakLeakMaxIval
+	}
+	return iv
+}
+
+// fillLeak reduces the sample series to start/end resource figures on the report. It
+// discards a warm-up prefix, then averages the first and last soakLeakEndFrac of the
+// remaining samples so a single GC sawtooth does not skew the comparison.
+func fillLeak(report *soak.Report, samples []leakSample) {
+	if len(samples) < 2 {
+		return
+	}
+	retained := samples[int(float64(len(samples))*soakLeakWarmup):]
+	if len(retained) < 2 {
+		retained = samples
+	}
+	n := len(retained)
+	w := int(float64(n) * soakLeakEndFrac)
+	if w < 1 {
+		w = 1
+	}
+	start := retained[:w]
+	end := retained[n-w:]
+
+	report.GoroutineStart = int(meanInt(start, func(s leakSample) int { return s.goroutines }))
+	report.GoroutineEnd = int(meanInt(end, func(s leakSample) int { return s.goroutines }))
+	report.HeapStart = uint64(meanInt(start, func(s leakSample) int { return int(s.heapInUse) }))
+	report.HeapEnd = uint64(meanInt(end, func(s leakSample) int { return int(s.heapInUse) }))
+	report.ThrallRSSStart = meanRSS(start)
+	report.ThrallRSSEnd = meanRSS(end)
+}
+
+func meanInt(samples []leakSample, pick func(leakSample) int) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sum int64
+	for _, s := range samples {
+		sum += int64(pick(s))
+	}
+	return float64(sum) / float64(len(samples))
+}
+
+// meanRSS averages each thrall's RSS across the samples.
+func meanRSS(samples []leakSample) map[string]int64 {
+	sums := map[string]int64{}
+	counts := map[string]int{}
+	for _, s := range samples {
+		for name, kb := range s.rss {
+			sums[name] += kb
+			counts[name]++
+		}
+	}
+	out := map[string]int64{}
+	for name, sum := range sums {
+		out[name] = sum / int64(counts[name])
+	}
+	return out
+}
+
+// probePIDs looks up the OS pids of the given thralls from the registry, for RSS
+// sampling.
+func probePIDs(t *testing.T, nc *nats.Conn, names ...string) map[string]int {
+	t.Helper()
+	reg, err := registry.Open(nc)
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	pids := map[string]int{}
+	for _, name := range names {
+		e, ok, err := reg.Get(name)
+		if err == nil && ok && e.PID > 0 {
+			pids[name] = e.PID
+		}
+	}
+	return pids
+}
+
 // resolveSoakConfig turns the profile plus any flag/env overrides into a concrete
 // run configuration. Precedence: explicit flag > env var > profile default.
 func resolveSoakConfig(t *testing.T) soakConfig {
@@ -444,16 +598,20 @@ func TestSoak(t *testing.T) {
 		Bars:     soak.DefaultBars(),
 	}
 
-	// Run the sustained-load and durable-no-loss phases together for the whole window:
-	// a concurrent call stream (latency bars) against `probe` and a durable cast stream
-	// (zero-loss bar) against `probe-dur`.
+	// Run the sustained-load, durable-no-loss and leak-sampling phases together for the
+	// whole window: a concurrent call stream (latency bars) against `probe`, a durable
+	// cast stream (zero-loss bar) against `probe-dur`, and a resource sampler behind
+	// both (leak bars). Sampling alongside the steady load keeps the harness's own
+	// goroutine population constant, so growth reflects the runtime.
+	pids := probePIDs(t, nc, "probe", "probe-dur")
 	rec := soak.NewLatencyRecorder(cfg.duration, soakTrendWindows)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
 
 	var load loadResult
 	var durStored, durAttempted int64
+	var samples []leakSample
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		load = runLoad(ctx, nc, app, []string{"probe"}, cfg.loadWorkers, cfg.seed, rec)
@@ -461,6 +619,10 @@ func TestSoak(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		durStored, durAttempted = runDurable(ctx, nc, app, "probe-dur", soakDurableWorkers, soakDurablePace)
+	}()
+	go func() {
+		defer wg.Done()
+		samples = runLeakSampler(ctx, pids, samplerInterval(cfg.duration))
 	}()
 	wg.Wait()
 	cancel()
@@ -483,15 +645,23 @@ func TestSoak(t *testing.T) {
 		t.Logf("durable: %d/%d publishes failed (gaps, excluded from no-loss)", durAttempted-durStored, durAttempted)
 	}
 
-	// The leak section is filled in the next step before the verdict.
-	finishSoak(t, report)
+	// Leak: reduce the sample series to start/end resource figures.
+	fillLeak(&report, samples)
+
+	finishSoak(t, report, cfg.reportPath)
 }
 
-// finishSoak formats the report, logs it and fails the run on any bar breach (a
-// non-zero exit, per the story). Later steps extend it to also persist the report.
-func finishSoak(t *testing.T, report soak.Report) {
+// finishSoak formats the report, logs it, optionally writes it to reportPath and
+// fails the run on any bar breach (a non-zero exit, per the story).
+func finishSoak(t *testing.T, report soak.Report, reportPath string) {
 	t.Helper()
-	t.Logf("\n%s", report.Format())
+	out := report.Format()
+	t.Logf("\n%s", out)
+	if reportPath != "" {
+		if err := os.WriteFile(reportPath, []byte(out), 0o644); err != nil {
+			t.Errorf("write report to %s: %v", reportPath, err)
+		}
+	}
 	if b := report.Breaches(); len(b) > 0 {
 		t.Fatalf("soak bars breached:\n  %s", strings.Join(b, "\n  "))
 	}
