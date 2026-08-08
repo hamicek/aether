@@ -1,5 +1,7 @@
 # aether
 
+[![CI](https://github.com/hamicek/aether/actions/workflows/ci.yml/badge.svg)](https://github.com/hamicek/aether/actions/workflows/ci.yml)
+
 Polyglotní distribuovaný actor/OTP runtime nad NATS. **Lord** (supervizor) spawnuje
 **thrally** (genservery) jako OS procesy a nechává je komunikovat v **éteru** (NATS).
 
@@ -7,7 +9,8 @@ Cíl: SDK, kterým se velice jednoduše tvoří thrally a pouští lord. Ne BEAM
 (miliony procesů), ale desítky procesů, které spolu spolehlivě komunikují - zato
 v libovolném jazyce a se skutečnou izolací OS procesů.
 
-Kompletní návrh: [DESIGN.md](./DESIGN.md).
+Kompletní návrh: [DESIGN.md](./DESIGN.md). Licence: [MIT](./LICENSE). Přispívání:
+[CONTRIBUTING.md](./CONTRIBUTING.md). Plán a vědomě odložené věci: [ROADMAP.md](./ROADMAP.md).
 
 ## Slovník
 
