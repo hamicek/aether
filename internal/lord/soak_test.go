@@ -123,7 +123,6 @@ type soakState struct {
 	ahead    map[int]bool // seen sequence numbers >= next, not yet contiguous
 	distinct int
 	dups     int
-	max      int
 }
 
 // record folds one cast sequence number into the state: first sight counts as
@@ -135,9 +134,6 @@ func (s *soakState) record(seq int) {
 		return
 	}
 	s.distinct++
-	if seq > s.max {
-		s.max = seq
-	}
 	if seq == s.next {
 		s.next++
 		for s.ahead[s.next] {
@@ -165,7 +161,7 @@ func runSoakProbe() {
 				return s.distinct, s, nil
 			},
 			"stats": func(_ json.RawMessage, s *soakState, _ *thrall.Ctx) (any, *soakState, error) {
-				return map[string]int{"distinct": s.distinct, "dups": s.dups, "max": s.max}, s, nil
+				return map[string]int{"distinct": s.distinct, "dups": s.dups}, s, nil
 			},
 		},
 		HandleCast: map[string]thrall.CastFn[*soakState]{
@@ -209,7 +205,6 @@ func soakManifest(t *testing.T, app string, specs ...ThrallSpec) *Manifest {
 type probeStats struct {
 	Distinct int `json:"distinct"`
 	Dups     int `json:"dups"`
-	Max      int `json:"max"`
 }
 
 // trySoakStats calls `stats` and returns the counters; ok is false on any transport
@@ -481,23 +476,34 @@ func fillLeak(report *soak.Report, samples []leakSample) {
 	start := retained[:w]
 	end := retained[n-w:]
 
-	report.GoroutineStart = int(meanInt(start, func(s leakSample) int { return s.goroutines }))
-	report.GoroutineEnd = int(meanInt(end, func(s leakSample) int { return s.goroutines }))
-	report.HeapStart = uint64(meanInt(start, func(s leakSample) int { return int(s.heapInUse) }))
-	report.HeapEnd = uint64(meanInt(end, func(s leakSample) int { return int(s.heapInUse) }))
+	report.GoroutineStart = meanInt(start, func(s leakSample) int { return s.goroutines })
+	report.GoroutineEnd = meanInt(end, func(s leakSample) int { return s.goroutines })
+	report.HeapStart = meanUint64(start, func(s leakSample) uint64 { return s.heapInUse })
+	report.HeapEnd = meanUint64(end, func(s leakSample) uint64 { return s.heapInUse })
 	report.ThrallRSSStart = meanRSS(start)
 	report.ThrallRSSEnd = meanRSS(end)
 }
 
-func meanInt(samples []leakSample, pick func(leakSample) int) float64 {
+func meanInt(samples []leakSample, pick func(leakSample) int) int {
 	if len(samples) == 0 {
 		return 0
 	}
-	var sum int64
+	var sum int
 	for _, s := range samples {
-		sum += int64(pick(s))
+		sum += pick(s)
 	}
-	return float64(sum) / float64(len(samples))
+	return sum / len(samples)
+}
+
+func meanUint64(samples []leakSample, pick func(leakSample) uint64) uint64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	var sum uint64
+	for _, s := range samples {
+		sum += pick(s)
+	}
+	return sum / uint64(len(samples))
 }
 
 // meanRSS averages each thrall's RSS across the samples.
