@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -238,4 +239,55 @@ func TestOneForAllRestart(t *testing.T) {
 		vb, okb := tryCallInt(nc, app, "b", "pid")
 		return oka && okb && va != pidA1 && vb != pidB1
 	})
+}
+
+func TestSingletonFencing(t *testing.T) {
+	const app = "itest"
+	eth1 := startEmbedded(t)
+
+	// A second lord against the SAME NATS, connected as an external client.
+	eth2, err := ether.Start(context.Background(), ether.Config{Mode: "external", URL: eth1.URL()})
+	if err != nil {
+		t.Fatalf("second ether: %v", err)
+	}
+	t.Cleanup(eth2.Stop)
+
+	// Count how many singleton instances actually boot, and how many lords win the lock.
+	var started, acquired int32
+	if _, err := eth1.Conn().Subscribe("test.probe.started", func(*nats.Msg) {
+		atomic.AddInt32(&started, 1)
+	}); err != nil {
+		t.Fatalf("subscribe started: %v", err)
+	}
+	if _, err := eth1.Conn().Subscribe(wire.Events, func(m *nats.Msg) {
+		var ev struct {
+			Event string `json:"event"`
+			Name  string `json:"name"`
+		}
+		if json.Unmarshal(m.Data, &ev) == nil && ev.Event == "lock_acquired" && ev.Name == "counter-single" {
+			atomic.AddInt32(&acquired, 1)
+		}
+	}); err != nil {
+		t.Fatalf("subscribe events: %v", err)
+	}
+	_ = eth1.Conn().Flush()
+
+	startLord(t, eth1, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
+	startLord(t, eth2, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
+
+	// One instance must come up (whichever lord wins the distributed KV lock).
+	waitFor(t, 5*time.Second, "singleton instance to start", func() bool {
+		return atomic.LoadInt32(&started) >= 1
+	})
+
+	// Prove the negative: the other lord is fenced out. Bounded grace, since asserting that a
+	// second instance never appears is inherently a wait for absence.
+	time.Sleep(1 * time.Second)
+
+	if n := atomic.LoadInt32(&started); n != 1 {
+		t.Fatalf("singleton fencing: expected exactly 1 instance, got %d", n)
+	}
+	if n := atomic.LoadInt32(&acquired); n != 1 {
+		t.Fatalf("singleton fencing: expected exactly 1 lock acquisition, got %d", n)
+	}
 }
