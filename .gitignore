@@ -1,0 +1,20 @@
+# Go
+/bin/
+*.test
+.aether-endpoint
+
+# Node / Bun
+node_modules/
+dist/
+bun.lockb
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+
+# Harness
+.claude/

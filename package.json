@@ -1,0 +1,8 @@
+{
+  "name": "aether-repo",
+  "private": true,
+  "workspaces": [
+    "sdk/ts",
+    "examples/counter"
+  ]
+}
