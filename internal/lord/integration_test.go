@@ -191,3 +191,51 @@ func TestStartRegisterAndCall(t *testing.T) {
 		return ok && v == 1
 	})
 }
+
+func TestOneForOneRestart(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+	cast(t, nc, app, "probe", "crash")
+
+	var pid2 int
+	waitFor(t, 10*time.Second, "one_for_one restart with a fresh pid", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		if ok && v != pid1 {
+			pid2 = v
+			return true
+		}
+		return false
+	})
+	if pid2 == 0 || pid2 == pid1 {
+		t.Fatalf("expected a restarted thrall with a new pid, got %d (was %d)", pid2, pid1)
+	}
+}
+
+func TestOneForAllRestart(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_all",
+		spec("a", "permanent", "local"),
+		spec("b", "permanent", "local"),
+	))
+	nc := eth.Conn()
+	waitReady(t, eth, "a")
+	waitReady(t, eth, "b")
+
+	pidA1 := callInt(t, nc, app, "a", "pid")
+	pidB1 := callInt(t, nc, app, "b", "pid")
+
+	// Crash one sibling; one_for_all must restart the whole group.
+	cast(t, nc, app, "a", "crash")
+
+	waitFor(t, 15*time.Second, "one_for_all restart of both siblings", func() bool {
+		va, oka := tryCallInt(nc, app, "a", "pid")
+		vb, okb := tryCallInt(nc, app, "b", "pid")
+		return oka && okb && va != pidA1 && vb != pidB1
+	})
+}
