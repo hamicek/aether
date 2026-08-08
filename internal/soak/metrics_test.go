@@ -110,6 +110,15 @@ func TestTrendSingleWindowIsFlat(t *testing.T) {
 	}
 }
 
+func TestAddDoesNotDivideByZeroOnTinyTotal(t *testing.T) {
+	// total < windows would round the window width to 0; Add must not panic.
+	r := NewLatencyRecorder(5, 10) // 5ns over 10 windows
+	r.Add(1 * time.Millisecond)
+	if r.Count() != 1 {
+		t.Fatalf("Count = %d, want 1", r.Count())
+	}
+}
+
 func TestGrowthOK(t *testing.T) {
 	cases := []struct {
 		name            string
