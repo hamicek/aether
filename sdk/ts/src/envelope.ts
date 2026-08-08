@@ -1,0 +1,34 @@
+// Envelope = the uniform JSON envelope for all communication in the ether.
+// Must stay in sync with the Go side (internal/wire/envelope.go).
+
+export type Kind = "call" | "cast" | "reply" | "hb" | "ctl";
+
+export interface Envelope {
+  v: 1;
+  id?: string;
+  kind: Kind;
+  from?: string;
+  to?: string;
+  op?: string;
+  payload?: unknown;
+  status?: "ok" | "error";
+  error?: WireError;
+  ts?: number;
+}
+
+export interface WireError {
+  type: string;
+  message: string;
+  retryable: boolean;
+}
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+export function encode(e: Envelope): Uint8Array {
+  return encoder.encode(JSON.stringify(e));
+}
+
+export function decode(data: Uint8Array): Envelope {
+  return JSON.parse(decoder.decode(data)) as Envelope;
+}
