@@ -17,10 +17,15 @@
 package lord
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
+	"math/rand"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +34,13 @@ import (
 	"github.com/hamicek/aether/internal/soak"
 	"github.com/hamicek/aether/internal/wire"
 	"github.com/hamicek/aether/sdk/go/thrall"
+)
+
+// Number of trend windows the run's latency is split across for the first-vs-last
+// comparison, and the per-call request timeout used by the load generator.
+const (
+	soakTrendWindows = 10
+	soakCallTimeout  = 1 * time.Second
 )
 
 var (
@@ -210,6 +222,85 @@ func trySoakStats(nc *nats.Conn, app, name string) (probeStats, bool) {
 	return st, true
 }
 
+// --- sustained load ---
+
+// loadResult is the outcome of the sustained-load phase.
+type loadResult struct {
+	calls  int64
+	errors int64
+	p99    time.Duration
+	max    time.Duration
+	trend  soak.Trend
+}
+
+// callLatency issues one `getlat` request and returns the round-trip time. ok is
+// false on a transport or handler error; the elapsed time is returned either way so
+// a timeout still counts against the latency bars (a slow runtime is a failing one).
+func callLatency(nc *nats.Conn, subject string, req []byte) (time.Duration, bool) {
+	start := time.Now()
+	msg, err := nc.Request(subject, req, soakCallTimeout)
+	elapsed := time.Since(start)
+	if err != nil {
+		return elapsed, false
+	}
+	var reply wire.Envelope
+	if json.Unmarshal(msg.Data, &reply) != nil || reply.Status == "error" {
+		return elapsed, false
+	}
+	return elapsed, true
+}
+
+// runLoad drives a concurrent `getlat` request/reply stream against the targets for
+// the whole run and records every latency. Each worker has its own seeded RNG (so a
+// run is reproducible) and picks a target with it. The recorder's memory is bounded,
+// so this is safe to run for hours.
+func runLoad(ctx context.Context, nc *nats.Conn, app string, targets []string, workers int, seed int64, rec *soak.LatencyRecorder) loadResult {
+	type target struct {
+		subject string
+		req     []byte
+	}
+	tmpls := make([]target, len(targets))
+	for i, name := range targets {
+		e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: "getlat",
+			Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+		data, _ := json.Marshal(e)
+		tmpls[i] = target{subject: wire.Call(app, name), req: data}
+	}
+
+	var calls, errors int64
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			rng := rand.New(rand.NewSource(seed + int64(w)))
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				tmpl := tmpls[rng.Intn(len(tmpls))]
+				elapsed, ok := callLatency(nc, tmpl.subject, tmpl.req)
+				rec.Add(elapsed)
+				atomic.AddInt64(&calls, 1)
+				if !ok {
+					atomic.AddInt64(&errors, 1)
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	return loadResult{
+		calls:  calls,
+		errors: errors,
+		p99:    rec.Percentile(99),
+		max:    rec.Max(),
+		trend:  rec.Trend(99),
+	}
+}
+
 // resolveSoakConfig turns the profile plus any flag/env overrides into a concrete
 // run configuration. Precedence: explicit flag > env var > profile default.
 func resolveSoakConfig(t *testing.T) soakConfig {
@@ -259,7 +350,8 @@ func resolveSoakConfig(t *testing.T) soakConfig {
 
 func TestSoak(t *testing.T) {
 	cfg := resolveSoakConfig(t)
-	t.Logf("soak: profile=%s duration=%s seed=%d", cfg.profile, cfg.duration, cfg.seed)
+	t.Logf("soak: profile=%s duration=%s workers=%d seed=%d",
+		cfg.profile, cfg.duration, cfg.loadWorkers, cfg.seed)
 
 	const app = "soak"
 	eth := startEmbedded(t)
@@ -267,32 +359,39 @@ func TestSoak(t *testing.T) {
 	nc := eth.Conn()
 	waitReady(t, eth, "probe")
 
-	// Scaffold check: the soak probe's idempotent counting works end to end - two
-	// distinct sequences and one duplicate. The load/durable/leak phases build on
-	// this in the following steps.
-	soakCast(t, nc, app, "probe", "seq", map[string]int{"seq": 1})
-	soakCast(t, nc, app, "probe", "seq", map[string]int{"seq": 1}) // duplicate
-	soakCast(t, nc, app, "probe", "seq", map[string]int{"seq": 2})
-
-	var st probeStats
-	waitFor(t, 2*time.Second, "soak probe to record two distinct sequences", func() bool {
-		var ok bool
-		st, ok = trySoakStats(nc, app, "probe")
-		return ok && st.Distinct == 2
-	})
-	if st.Dups != 1 {
-		t.Fatalf("idempotent counting: expected 1 duplicate, got %d", st.Dups)
-	}
-
 	report := soak.Report{
 		Profile:  cfg.profile,
 		Duration: cfg.duration,
 		Seed:     cfg.seed,
 		Bars:     soak.DefaultBars(),
 	}
-	// Later steps fill the load, durable and leak sections before formatting.
+
+	// Sustained load: a concurrent call stream for the whole run, with the call
+	// latency measured against the p99 and no-upward-trend bars.
+	rec := soak.NewLatencyRecorder(cfg.duration, soakTrendWindows)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
+	load := runLoad(ctx, nc, app, []string{"probe"}, cfg.loadWorkers, cfg.seed, rec)
+	cancel()
+
+	report.CallCount = int(load.calls)
+	report.LatP99 = load.p99
+	report.LatMax = load.max
+	report.LatP99First = load.trend.First
+	report.LatP99Last = load.trend.Last
+	if load.errors > 0 {
+		t.Logf("sustained load: %d/%d calls errored", load.errors, load.calls)
+	}
+
+	// Later steps fill the durable and leak sections before the verdict.
+	finishSoak(t, report)
+}
+
+// finishSoak formats the report, logs it and fails the run on any bar breach (a
+// non-zero exit, per the story). Later steps extend it to also persist the report.
+func finishSoak(t *testing.T, report soak.Report) {
+	t.Helper()
 	t.Logf("\n%s", report.Format())
-	if b := report.Breaches(); len(b) != 0 {
-		t.Fatalf("unexpected breaches in scaffold run: %v", b)
+	if b := report.Breaches(); len(b) > 0 {
+		t.Fatalf("soak bars breached:\n  %s", strings.Join(b, "\n  "))
 	}
 }

@@ -5,38 +5,54 @@ import (
 	"time"
 )
 
+// nearBucket asserts got is within one histogram resolution above want (percentiles
+// report a bucket upper bound, a conservative over-estimate).
+func nearBucket(t *testing.T, label string, got, want time.Duration) {
+	t.Helper()
+	if got < want || got > want+2*histResolution {
+		t.Errorf("%s = %s, want ~%s (within +%s)", label, got, want, 2*histResolution)
+	}
+}
+
 func TestPercentileNearestRank(t *testing.T) {
-	r := NewLatencyRecorder(100)
-	// Samples 1ms..100ms in a deliberately shuffled order to prove sorting.
-	for _, v := range []int{50, 1, 100, 2, 99, 3, 98, 51} {
+	r := NewLatencyRecorder(time.Hour, 1)
+	// Samples 1ms..100ms, added out of order to prove the histogram sorts by bucket.
+	for _, v := range []int{50, 1, 100, 2, 99} {
 		r.Add(time.Duration(v) * time.Millisecond)
 	}
-	for i := 4; i <= 97; i++ {
-		if i == 50 || i == 51 || i == 98 || i == 99 {
+	for i := 3; i <= 98; i++ {
+		if i == 50 || i == 99 {
 			continue
 		}
 		r.Add(time.Duration(i) * time.Millisecond)
 	}
-	if got, want := r.Count(), 100; got != want {
+	if got, want := r.Count(), uint64(100); got != want {
 		t.Fatalf("Count = %d, want %d", got, want)
 	}
-	// nearest-rank: p99 -> ceil(0.99*100)=99 -> the 99th smallest = 99ms.
-	if got, want := r.Percentile(99), 99*time.Millisecond; got != want {
-		t.Errorf("p99 = %s, want %s", got, want)
-	}
-	if got, want := r.Percentile(50), 50*time.Millisecond; got != want {
-		t.Errorf("p50 = %s, want %s", got, want)
-	}
-	if got, want := r.Percentile(100), 100*time.Millisecond; got != want {
-		t.Errorf("p100 = %s, want %s", got, want)
-	}
+	// nearest-rank: p99 -> the 99th smallest = 99ms, p50 -> 50ms.
+	nearBucket(t, "p99", r.Percentile(99), 99*time.Millisecond)
+	nearBucket(t, "p50", r.Percentile(50), 50*time.Millisecond)
 	if got, want := r.Max(), 100*time.Millisecond; got != want {
-		t.Errorf("Max = %s, want %s", got, want)
+		t.Errorf("Max = %s, want %s (exact)", got, want)
+	}
+}
+
+func TestPercentileOverflowUsesExactMax(t *testing.T) {
+	r := NewLatencyRecorder(time.Hour, 1)
+	// A sample past the histogram ceiling must still report an exact max and a
+	// percentile that reaches it rather than silently capping at histMax.
+	r.Add(5 * time.Millisecond)
+	r.Add(2 * time.Second) // overflow
+	if got := r.Max(); got != 2*time.Second {
+		t.Errorf("Max = %s, want 2s", got)
+	}
+	if got := r.Percentile(100); got != 2*time.Second {
+		t.Errorf("p100 = %s, want 2s (from overflow max)", got)
 	}
 }
 
 func TestPercentileEmpty(t *testing.T) {
-	r := NewLatencyRecorder(0)
+	r := NewLatencyRecorder(time.Hour, 1)
 	if got := r.Percentile(99); got != 0 {
 		t.Errorf("empty p99 = %s, want 0", got)
 	}
@@ -45,19 +61,17 @@ func TestPercentileEmpty(t *testing.T) {
 	}
 }
 
-func TestTrendFlatAndRising(t *testing.T) {
-	// First half at 10ms, second half at 30ms -> a clear upward trend.
-	r := NewLatencyRecorder(20)
+func TestTrendRisingAndFlat(t *testing.T) {
+	// Window 0 at 10ms, the last window at 30ms -> a clear upward trend. addAt lets
+	// the test place samples in windows without waiting on wall-clock time.
+	r := NewLatencyRecorder(time.Hour, 10)
 	for i := 0; i < 10; i++ {
-		r.Add(10 * time.Millisecond)
+		r.addAt(0, 10*time.Millisecond)
+		r.addAt(9, 30*time.Millisecond)
 	}
-	for i := 0; i < 10; i++ {
-		r.Add(30 * time.Millisecond)
-	}
-	tr := r.Trend(99, 0.5)
-	if tr.First != 10*time.Millisecond || tr.Last != 30*time.Millisecond {
-		t.Fatalf("Trend = %+v, want first=10ms last=30ms", tr)
-	}
+	tr := r.Trend(99)
+	nearBucket(t, "trend.First", tr.First, 10*time.Millisecond)
+	nearBucket(t, "trend.Last", tr.Last, 30*time.Millisecond)
 	if tr.OK(0.10) {
 		t.Errorf("rising trend must fail a 10%% tolerance")
 	}
@@ -65,20 +79,34 @@ func TestTrendFlatAndRising(t *testing.T) {
 		t.Errorf("rising trend within a 300%% tolerance must pass")
 	}
 
-	// A flat run must pass any non-negative tolerance.
-	flat := NewLatencyRecorder(20)
+	// A flat run must pass a 0% tolerance.
+	flat := NewLatencyRecorder(time.Hour, 10)
 	for i := 0; i < 20; i++ {
-		flat.Add(15 * time.Millisecond)
+		flat.addAt(0, 15*time.Millisecond)
+		flat.addAt(9, 15*time.Millisecond)
 	}
-	if ft := flat.Trend(99, 0.25); !ft.OK(0) {
+	if ft := flat.Trend(99); !ft.OK(0) {
 		t.Errorf("flat trend must pass a 0%% tolerance, got %+v", ft)
 	}
 }
 
 func TestTrendEmptyPasses(t *testing.T) {
-	r := NewLatencyRecorder(0)
-	if !r.Trend(99, 0.1).OK(0) {
+	r := NewLatencyRecorder(time.Hour, 10)
+	if !r.Trend(99).OK(0) {
 		t.Errorf("empty trend must pass (nothing to regress against)")
+	}
+}
+
+func TestTrendSingleWindowIsFlat(t *testing.T) {
+	// Only one window saw traffic -> First == Last, always passes.
+	r := NewLatencyRecorder(time.Hour, 10)
+	r.addAt(3, 42*time.Millisecond)
+	tr := r.Trend(99)
+	if tr.First != tr.Last {
+		t.Errorf("single populated window must give First==Last, got %+v", tr)
+	}
+	if !tr.OK(0) {
+		t.Errorf("single populated window must pass, got %+v", tr)
 	}
 }
 
