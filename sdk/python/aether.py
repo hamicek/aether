@@ -1,0 +1,225 @@
+"""aether - the Python SDK for thralls (genservers) in the ether (NATS).
+
+Mirrors the TS and Go SDKs: the same JSON envelope, the same subjects and the same
+GenServer semantics. A non-durable thrall reads call/cast/info from a single wildcard
+subscription; a durable thrall (AETHER_DURABLE=1) reads call/info over core, but cast
+from a durable JetStream consumer with ack (survives a crash). State is protected by a
+single asyncio lock = a serialized mailbox.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
+
+import nats
+from nats.js.api import ConsumerConfig, DeliverPolicy
+
+
+# --- subjects (must match the Go and TS sides) ---
+def _sub_data(app: str, name: str) -> str:
+    return f"aether.{app}.{name}.*"
+
+
+def _sub_call(app: str, name: str) -> str:
+    return f"aether.{app}.{name}.call"
+
+
+def _sub_cast(app: str, name: str) -> str:
+    return f"aether.{app}.{name}.cast"
+
+
+def _sub_info(app: str, name: str) -> str:
+    return f"aether.{app}.{name}.info"
+
+
+def _sub_ctl(name: str) -> str:
+    return f"aether._lord.{name}.ctl"
+
+
+def _sub_hb(name: str) -> str:
+    return f"aether._lord.{name}.hb"
+
+
+def _stream(app: str, name: str) -> str:
+    return f"aether_{app}_{name}"
+
+
+def _encode(e: dict) -> bytes:
+    return json.dumps(e).encode()
+
+
+def _decode(data: bytes) -> dict:
+    return json.loads(data)
+
+
+# Handler shapes hold the GenServer semantics:
+#   handle_call: (payload, state, ctx) -> (reply, new_state)
+#   handle_cast: (payload, state, ctx) -> new_state
+CallHandler = Callable[[Any, Any, "Ctx"], Any]
+CastHandler = Callable[[Any, Any, "Ctx"], Any]
+
+
+@dataclass
+class Ctx:
+    # WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
+    nats: Any
+    name: str
+    app: str
+
+
+@dataclass
+class ThrallDef:
+    name: str
+    init: Callable[["Ctx"], Any]
+    handle_call: dict[str, CallHandler] = field(default_factory=dict)
+    handle_cast: dict[str, CastHandler] = field(default_factory=dict)
+    terminate: Optional[Callable[[str, Any], None]] = None
+
+
+def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None) -> ThrallDef:
+    return ThrallDef(name, init, handle_call or {}, handle_cast or {}, terminate)
+
+
+async def _maybe(v):
+    return await v if asyncio.iscoroutine(v) else v
+
+
+def _ok_reply(req: dict, payload: Any) -> dict:
+    return {"v": 1, "id": req.get("id"), "kind": "reply", "status": "ok", "payload": payload}
+
+
+def _err_reply(req: dict, type_: str, message: str) -> dict:
+    return {
+        "v": 1,
+        "id": req.get("id"),
+        "kind": "reply",
+        "status": "error",
+        "error": {"type": type_, "message": message, "retryable": False},
+    }
+
+
+async def start(defn: ThrallDef) -> None:
+    """Connect the thrall to the ether and run its lifecycle."""
+    url = os.environ.get("AETHER_NATS_URL")
+    app = os.environ.get("AETHER_APP")
+    env_name = os.environ.get("AETHER_NAME", "")
+    if not url or not app:
+        raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
+    name = defn.name or env_name
+    durable = os.environ.get("AETHER_DURABLE") == "1"
+
+    nc = await nats.connect(url, name=name)
+    ctx = Ctx(nats=nc, name=name, app=app)
+    state = await _maybe(defn.init(ctx))
+
+    stop = asyncio.Event()
+    lock = asyncio.Lock()  # serialized mailbox: 1 handler changes state at a time
+
+    async def process_call(e: dict, msg) -> None:
+        nonlocal state
+        async with lock:
+            handler = defn.handle_call.get(e.get("op"))
+            if handler is None:
+                await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
+                return
+            try:
+                reply, state = await _maybe(handler(e.get("payload"), state, ctx))
+                await msg.respond(_encode(_ok_reply(e, reply)))
+            except Exception as ex:  # noqa: BLE001
+                await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+
+    async def process_cast(e: dict) -> None:
+        nonlocal state
+        async with lock:
+            handler = defn.handle_cast.get(e.get("op"))
+            if handler is not None:
+                try:
+                    state = await _maybe(handler(e.get("payload"), state, ctx))
+                except Exception as ex:  # noqa: BLE001
+                    print(f"[{name}] cast {e.get('op')} failed: {ex}")
+
+    tasks: list[asyncio.Task] = []
+
+    if durable:
+        # Durable: call/info over core (synchronous), cast via a durable JetStream consumer.
+        call_sub = await nc.subscribe(_sub_call(app, name))
+        info_sub = await nc.subscribe(_sub_info(app, name))
+
+        async def call_loop() -> None:
+            async for msg in call_sub.messages:
+                await process_call(_decode(msg.data), msg)
+
+        async def info_loop() -> None:
+            async for _msg in info_sub.messages:
+                pass  # TODO handle_info
+
+        async def cast_pull_loop() -> None:
+            js = nc.jetstream()
+            psub = await js.pull_subscribe(
+                _sub_cast(app, name),
+                durable=name,
+                stream=_stream(app, name),
+                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
+            )
+            while not stop.is_set():
+                try:
+                    msgs = await psub.fetch(1, timeout=1)
+                except Exception:  # noqa: BLE001  (timeout / no messages)
+                    continue
+                for m in msgs:
+                    await process_cast(_decode(m.data))  # process ...
+                    await m.ack()  #                       ... and only then ack
+
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+    else:
+        # Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
+        data_sub = await nc.subscribe(_sub_data(app, name))
+
+        async def data_loop() -> None:
+            async for msg in data_sub.messages:
+                verb = msg.subject.rsplit(".", 1)[1]
+                e = _decode(msg.data)
+                if verb == "call":
+                    await process_call(e, msg)
+                elif verb == "cast":
+                    await process_cast(e)
+
+        tasks.append(asyncio.create_task(data_loop()))
+
+    # ctl: controlled shutdown from the lord (drain / shutdown)
+    ctl_sub = await nc.subscribe(_sub_ctl(name))
+
+    async def ctl_loop() -> None:
+        async for msg in ctl_sub.messages:
+            e = _decode(msg.data)
+            if e.get("op") in ("drain", "shutdown"):
+                if defn.terminate:
+                    defn.terminate(e.get("op"), state)
+                stop.set()
+                return
+
+    async def heartbeat() -> None:
+        while not stop.is_set():
+            hb = {"v": 1, "kind": "hb", "to": name, "ts": int(time.time() * 1000)}
+            await nc.publish(_sub_hb(name), _encode(hb))
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+
+    tasks += [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
+
+    await stop.wait()
+    for t in tasks:
+        t.cancel()
+    await nc.drain()
+
+
+def run(defn: ThrallDef) -> None:
+    """Convenient entry point: asyncio.run(start(defn))."""
+    asyncio.run(start(defn))
