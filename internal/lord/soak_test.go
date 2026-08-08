@@ -41,6 +41,13 @@ import (
 const (
 	soakTrendWindows = 10
 	soakCallTimeout  = 1 * time.Second
+
+	// Durable publishers and their per-cast pacing. Paced well below the single-message
+	// durable consumer's drain rate so the JetStream backlog stays near empty and the
+	// end-of-run drain is quick.
+	soakDurableWorkers = 2
+	soakDurablePace    = 5 * time.Millisecond
+	soakDrainStall     = 20 // consecutive no-progress polls (~10s) that end the drain
 )
 
 var (
@@ -88,36 +95,41 @@ func runSoakDispatch() bool {
 	return true
 }
 
-// soakState is the soak probe's state: a set of seen sequence numbers for idempotent
-// (at-least-once) counting, plus a duplicate tally and the observed range. Held
-// behind a pointer so the serialized-mailbox handlers mutate it in place.
+// soakState is the soak probe's state for idempotent (at-least-once) cast counting.
+// The publisher sends a contiguous 0..N-1 sequence, so instead of a full seen-set
+// (which would grow to N entries and inflate the probe's RSS on a long run) the state
+// tracks the contiguous watermark plus a small set of out-of-order arrivals above it.
+// Memory is bounded by the reorder/redelivery window, not by the total cast count.
+// Held behind a pointer so the serialized-mailbox handlers mutate it in place.
 type soakState struct {
-	seen     map[int]bool
+	next     int          // every sequence number in [0, next) has been seen
+	ahead    map[int]bool // seen sequence numbers >= next, not yet contiguous
 	distinct int
 	dups     int
-	min, max int
+	max      int
 }
 
 // record folds one cast sequence number into the state: first sight counts as
 // distinct, a re-delivery counts as a duplicate. This is what lets the suite assert
-// zero loss (distinct == published) while tolerating finite duplicates.
+// zero loss (distinct == stored) while tolerating a finite number of duplicates.
 func (s *soakState) record(seq int) {
-	if s.seen[seq] {
+	if seq < s.next || s.ahead[seq] {
 		s.dups++
 		return
 	}
-	s.seen[seq] = true
-	if s.distinct == 0 {
-		s.min, s.max = seq, seq
-	} else {
-		if seq < s.min {
-			s.min = seq
-		}
-		if seq > s.max {
-			s.max = seq
-		}
-	}
 	s.distinct++
+	if seq > s.max {
+		s.max = seq
+	}
+	if seq == s.next {
+		s.next++
+		for s.ahead[s.next] {
+			delete(s.ahead, s.next)
+			s.next++
+		}
+	} else {
+		s.ahead[seq] = true
+	}
 }
 
 // runSoakProbe runs the richer thrall through the real Go SDK. `getlat` is a cheap
@@ -129,14 +141,14 @@ func runSoakProbe() {
 		Init: func(ctx *thrall.Ctx) (*soakState, error) {
 			_ = ctx.NATS.Publish("test.probe.started", []byte(ctx.Name))
 			_ = ctx.NATS.Flush()
-			return &soakState{seen: make(map[int]bool)}, nil
+			return &soakState{ahead: make(map[int]bool)}, nil
 		},
 		HandleCall: map[string]thrall.CallFn[*soakState]{
 			"getlat": func(_ json.RawMessage, s *soakState, _ *thrall.Ctx) (any, *soakState, error) {
 				return s.distinct, s, nil
 			},
 			"stats": func(_ json.RawMessage, s *soakState, _ *thrall.Ctx) (any, *soakState, error) {
-				return map[string]int{"distinct": s.distinct, "dups": s.dups, "min": s.min, "max": s.max}, s, nil
+				return map[string]int{"distinct": s.distinct, "dups": s.dups, "max": s.max}, s, nil
 			},
 		},
 		HandleCast: map[string]thrall.CastFn[*soakState]{
@@ -177,27 +189,9 @@ func soakManifest(t *testing.T, app string, specs ...ThrallSpec) *Manifest {
 	return &Manifest{App: app, Strategy: "one_for_one", Thralls: specs}
 }
 
-// soakCast publishes a cast with a JSON payload (the AE-003 `cast` helper only sends
-// an empty body).
-func soakCast(t *testing.T, nc *nats.Conn, app, name, op string, payload any) {
-	t.Helper()
-	body, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatalf("marshal %s.%s payload: %v", name, op, err)
-	}
-	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op,
-		Payload: body, TS: time.Now().UnixMilli()}
-	data, _ := json.Marshal(e)
-	if err := nc.Publish(wire.Cast(app, name), data); err != nil {
-		t.Fatalf("cast %s.%s: %v", name, op, err)
-	}
-	_ = nc.Flush()
-}
-
 type probeStats struct {
 	Distinct int `json:"distinct"`
 	Dups     int `json:"dups"`
-	Min      int `json:"min"`
 	Max      int `json:"max"`
 }
 
@@ -301,6 +295,86 @@ func runLoad(ctx context.Context, nc *nats.Conn, app string, targets []string, w
 	}
 }
 
+// --- durable no-loss ---
+
+// durableResult is the outcome of the durable-no-loss phase after the stream drains.
+type durableResult struct {
+	stored     int // casts the server acked into the stream (the no-loss denominator)
+	attempted  int // publishes tried (stored plus any publish failures -> gaps)
+	distinct   int // distinct casts the durable thrall received
+	duplicates int
+}
+
+// runDurable publishes a contiguous 0..N-1 sequence of casts through JetStream (with
+// publish acks, so a counted cast is a persisted one) for the whole run. Publishers
+// share an atomic sequence counter; the returned counts feed the zero-loss check.
+func runDurable(ctx context.Context, nc *nats.Conn, app, name string, workers int, pace time.Duration) (stored, attempted int64) {
+	js, err := nc.JetStream()
+	if err != nil {
+		return 0, 0
+	}
+	subject := wire.Cast(app, name)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				seq := atomic.AddInt64(&attempted, 1) - 1
+				body, _ := json.Marshal(struct {
+					Seq int64 `json:"seq"`
+				}{seq})
+				e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: "seq",
+					Payload: body, TS: time.Now().UnixMilli()}
+				data, _ := json.Marshal(e)
+				if _, err := js.Publish(subject, data); err == nil {
+					atomic.AddInt64(&stored, 1)
+				}
+				// A publish failure leaves a gap at this seq; it was never stored, so
+				// it is excluded from the no-loss denominator (stored) by design.
+				if pace > 0 {
+					time.Sleep(pace)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return atomic.LoadInt64(&stored), atomic.LoadInt64(&attempted)
+}
+
+// drainDurable waits for the durable thrall to consume the stream, polling its stats
+// until every stored cast is delivered or progress stalls (a genuine loss). It
+// returns the final counts.
+func drainDurable(nc *nats.Conn, app, name string, stored int) durableResult {
+	res := durableResult{stored: stored}
+	lastDistinct := -1
+	stall := 0
+	for stall < soakDrainStall {
+		st, ok := trySoakStats(nc, app, name)
+		if ok {
+			res.distinct = st.Distinct
+			res.duplicates = st.Dups
+			if st.Distinct >= stored {
+				return res
+			}
+			if st.Distinct == lastDistinct {
+				stall++
+			} else {
+				stall = 0
+				lastDistinct = st.Distinct
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return res
+}
+
 // resolveSoakConfig turns the profile plus any flag/env overrides into a concrete
 // run configuration. Precedence: explicit flag > env var > profile default.
 func resolveSoakConfig(t *testing.T) soakConfig {
@@ -354,10 +428,14 @@ func TestSoak(t *testing.T) {
 		cfg.profile, cfg.duration, cfg.loadWorkers, cfg.seed)
 
 	const app = "soak"
+	durSpec := spec("probe-dur", "permanent", "local")
+	durSpec.Durable = true
+
 	eth := startEmbedded(t)
-	startLord(t, eth, soakManifest(t, app, spec("probe", "permanent", "local")))
+	startLord(t, eth, soakManifest(t, app, spec("probe", "permanent", "local"), durSpec))
 	nc := eth.Conn()
 	waitReady(t, eth, "probe")
+	waitReady(t, eth, "probe-dur")
 
 	report := soak.Report{
 		Profile:  cfg.profile,
@@ -366,11 +444,25 @@ func TestSoak(t *testing.T) {
 		Bars:     soak.DefaultBars(),
 	}
 
-	// Sustained load: a concurrent call stream for the whole run, with the call
-	// latency measured against the p99 and no-upward-trend bars.
+	// Run the sustained-load and durable-no-loss phases together for the whole window:
+	// a concurrent call stream (latency bars) against `probe` and a durable cast stream
+	// (zero-loss bar) against `probe-dur`.
 	rec := soak.NewLatencyRecorder(cfg.duration, soakTrendWindows)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
-	load := runLoad(ctx, nc, app, []string{"probe"}, cfg.loadWorkers, cfg.seed, rec)
+
+	var load loadResult
+	var durStored, durAttempted int64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		load = runLoad(ctx, nc, app, []string{"probe"}, cfg.loadWorkers, cfg.seed, rec)
+	}()
+	go func() {
+		defer wg.Done()
+		durStored, durAttempted = runDurable(ctx, nc, app, "probe-dur", soakDurableWorkers, soakDurablePace)
+	}()
+	wg.Wait()
 	cancel()
 
 	report.CallCount = int(load.calls)
@@ -382,7 +474,16 @@ func TestSoak(t *testing.T) {
 		t.Logf("sustained load: %d/%d calls errored", load.errors, load.calls)
 	}
 
-	// Later steps fill the durable and leak sections before the verdict.
+	// Wait for the durable stream to drain, then record delivered vs stored.
+	dur := drainDurable(nc, app, "probe-dur", int(durStored))
+	report.Published = dur.stored
+	report.Distinct = dur.distinct
+	report.Duplicates = dur.duplicates
+	if durAttempted != durStored {
+		t.Logf("durable: %d/%d publishes failed (gaps, excluded from no-loss)", durAttempted-durStored, durAttempted)
+	}
+
+	// The leak section is filled in the next step before the verdict.
 	finishSoak(t, report)
 }
 
