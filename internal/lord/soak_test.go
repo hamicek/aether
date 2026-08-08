@@ -60,6 +60,11 @@ const (
 	soakLeakEndFrac = 0.25
 	soakLeakMinIval = 1 * time.Second
 	soakLeakMaxIval = 60 * time.Second
+	// Minimum retained (post-warm-up) samples for the leak bars to be enforced. Below
+	// this the run is too short for warm-up to have settled, so the deltas are reported
+	// but not held to the bars - a cold-start ramp is not a leak. Real profiles produce
+	// far more; only very short ad-hoc duration overrides fall under it.
+	soakLeakMinEval = 20
 )
 
 var (
@@ -467,6 +472,7 @@ func fillLeak(report *soak.Report, samples []leakSample) {
 	if len(retained) < 2 {
 		retained = samples
 	}
+	report.LeakEvaluated = len(retained) >= soakLeakMinEval
 	n := len(retained)
 	w := int(float64(n) * soakLeakEndFrac)
 	if w < 1 {

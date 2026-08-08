@@ -48,11 +48,13 @@ internal/
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
   singleton/          distributed lock over KV (Create/CAS + TTL failover)
+  soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
 sdk/ts/               @hamicek/aether (Bun/TS): defThrall, start, call, cast
 sdk/python/           aether.py: def_thrall, start, run
 sdk/go/thrall/        thrall.Def[S], thrall.Start, thrall.Call/Cast
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
+scripts/soak.sh       run the soak/chaos suite (out of CI)
 ```
 
 ## Subject convention
@@ -148,9 +150,37 @@ Sample manifests in `examples/counter/`: `aether.toml` (polyglot TS/Py/Go),
 `aether-durable.toml`, `aether-external.toml`, `aether-singleton.toml`,
 `aether-one-for-all.toml`, `aether-rest-for-one.toml`.
 
+## Reliability testing (soak)
+
+For high-reliability use (e.g. SCADA) the functional integration tests are not enough - they run for
+seconds and cannot surface leaks, message loss under pressure or latency drift. The soak suite drives
+the runtime under an hours-long load and checks it against concrete bars. It lives behind the `soak`
+build tag, so normal CI (`go test ./...`) never runs it; you invoke it explicitly:
+
+```bash
+scripts/soak.sh smoke        # ~2 min   - a quick end-to-end check
+scripts/soak.sh default      # ~45 min
+scripts/soak.sh overnight    # ~8 h
+scripts/soak.sh smoke 12345  # a fixed seed for a reproducible run
+
+# ad-hoc: override the length, write the report to a file
+AETHER_SOAK_DURATION=30s AETHER_SOAK_REPORT=soak.txt scripts/soak.sh smoke
+```
+
+Each run measures, concurrently for the whole window:
+
+- **Sustained load** - a concurrent `call` stream; bar: p99 < 50ms and no upward latency trend.
+- **Durable no-loss** - a durable cast stream over JetStream; bar: every stored cast delivered
+  (zero loss); duplicates are counted and tolerated.
+- **Leak detection** - the lord's goroutines and heap plus a sample of thrall RSS; bar: < 10% growth
+  after warm-up. (On a run too short to warm up, the deltas are reported but not enforced.)
+
+It ends with a structured report and a **non-zero exit on any bar breach**. Chaos (killing thralls),
+singleton failover and drain-under-load are the next step, tracked in [ROADMAP.md](./ROADMAP.md).
+
 ## Deliberately deferred
 
 The runtime has conscious gaps, tracked in [ROADMAP.md](./ROADMAP.md): liveness beyond heartbeats
 (`$SYS` events), full thrall-level fencing for orphaned singletons, `temporary` semantics inside
-group strategies, thrall state persistence (today durability covers the mailbox, not the state),
-and monitoring plus long-running soak testing for high-reliability use.
+group strategies, thrall state persistence (today durability covers the mailbox, not the state), and
+chaos/failover coverage on top of the soak suite for high-reliability use.

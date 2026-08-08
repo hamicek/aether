@@ -33,10 +33,11 @@ remain before it is production-grade. They are listed here so the trade-offs are
 ## Testing
 
 - **Long-running soak and chaos testing.** For high-reliability use (for example SCADA-style
-  always-on deployments), a soak suite that runs for hours: sustained call/cast load with bounded
-  latency and zero loss on durable mailboxes, repeated induced crashes with deterministic recovery,
-  singleton failover under churn, and leak detection (goroutine and memory trend). Kept separate
-  from CI and run nightly or on demand.
+  always-on deployments), a soak suite that runs for hours, kept separate from CI (`soak` build tag)
+  and run on demand via `scripts/soak.sh`. The core is in place: sustained call/cast load with a p99
+  and no-trend bar, zero loss on durable mailboxes, leak detection (goroutine, heap and thrall RSS
+  trend), and a structured report that fails on any breach. Still to add: repeated induced crashes
+  with deterministic recovery, singleton failover under churn, and graceful drain under load.
 
 ## Not on the roadmap (by design)
 
