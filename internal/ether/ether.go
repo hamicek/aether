@@ -1,0 +1,105 @@
+// Package ether manages the bus (the ether): an embedded NATS server, or a
+// connection to an external cluster. The interface is the same for both modes -
+// neither thrall nor lord can tell the difference, because both speak only NATS.
+package ether
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	natsserver "github.com/nats-io/nats-server/v2/server"
+	"github.com/nats-io/nats.go"
+)
+
+// Config corresponds to the [nats] section in the manifest.
+type Config struct {
+	Mode string `toml:"mode"` // "embedded" | "external"
+	URL  string `toml:"url"`  // for external: "nats://a:4222,nats://b:4222"
+}
+
+// Ether holds the running bus and the system connection for the lord and registry.
+type Ether struct {
+	mode     string
+	srv      *natsserver.Server // embedded mode only
+	nc       *nats.Conn
+	url      string
+	storeDir string // JetStream storage (embedded); removed on Stop
+}
+
+// Start brings up an embedded NATS server (default), or connects to an external URL.
+func Start(ctx context.Context, cfg Config) (*Ether, error) {
+	switch cfg.Mode {
+	case "", "embedded":
+		return startEmbedded(ctx)
+	case "external":
+		return startExternal(ctx, cfg.URL)
+	default:
+		return nil, fmt.Errorf("unknown nats mode %q", cfg.Mode)
+	}
+}
+
+func startEmbedded(_ context.Context) (*Ether, error) {
+	storeDir, err := os.MkdirTemp("", "aether-js-")
+	if err != nil {
+		return nil, err
+	}
+	opts := &natsserver.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,       // -1 = pick a free port
+		JetStream: true,     // durable mailbox / KV registry
+		StoreDir:  storeDir, // JetStream storage
+		NoSigs:    true,     // our runtime handles signals; otherwise the server would call Shutdown()
+		//        a second time concurrently with our eth.Stop() -> panic "close of nil channel".
+	}
+	srv, err := natsserver.NewServer(opts)
+	if err != nil {
+		os.RemoveAll(storeDir)
+		return nil, err
+	}
+	go srv.Start()
+	if !srv.ReadyForConnections(5 * time.Second) {
+		os.RemoveAll(storeDir)
+		return nil, fmt.Errorf("embedded NATS did not start in time")
+	}
+	url := srv.ClientURL()
+	nc, err := nats.Connect(url)
+	if err != nil {
+		srv.Shutdown()
+		os.RemoveAll(storeDir)
+		return nil, err
+	}
+	return &Ether{mode: "embedded", srv: srv, nc: nc, url: url, storeDir: storeDir}, nil
+}
+
+func startExternal(_ context.Context, url string) (*Ether, error) {
+	nc, err := nats.Connect(url,
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &Ether{mode: "external", nc: nc, url: url}, nil
+}
+
+// Conn returns the system NATS connection (lord, registry, observability).
+func (e *Ether) Conn() *nats.Conn { return e.nc }
+
+// URL returns the bus address; injected into thralls as AETHER_NATS_URL.
+func (e *Ether) URL() string { return e.url }
+
+// Stop closes the connection and (in embedded mode) stops the server and removes storage.
+func (e *Ether) Stop() {
+	if e.nc != nil {
+		_ = e.nc.Drain()
+	}
+	if e.srv != nil {
+		e.srv.Shutdown()
+		e.srv.WaitForShutdown()
+	}
+	if e.storeDir != "" {
+		os.RemoveAll(e.storeDir)
+	}
+}
