@@ -21,9 +21,18 @@ import (
 // binary with AETHER_PROBE=1, which runs a minimal thrall through the actual Go SDK. That way
 // the tests exercise the whole stack (lord -> ether -> registry -> SDK), not a mock.
 
+// soakDispatch is a seam for the soak suite (build tag `soak`): its file registers
+// a richer probe here in an init(). When the re-exec is a soak probe, the hook runs
+// it and reports true so TestMain returns without entering the test runner. Nil
+// without the tag, so this file's behavior is unchanged in normal CI.
+var soakDispatch func() bool
+
 func TestMain(m *testing.M) {
 	if os.Getenv("AETHER_PROBE") == "1" {
 		runProbe()
+		return
+	}
+	if soakDispatch != nil && soakDispatch() {
 		return
 	}
 	os.Exit(m.Run())
