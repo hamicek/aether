@@ -1,101 +1,183 @@
 // Package soak provides the pure metric primitives for the aether soak/chaos suite:
-// latency percentiles, a windowed latency-trend check and a growth (leak) check.
-// Nothing here touches NATS or an OS process, so it is fast to unit-test in normal
-// CI, while the long-running orchestration that uses it lives behind the `soak`
-// build tag in internal/lord.
+// bounded-memory latency percentiles, a windowed latency-trend check and a growth
+// (leak) check. Nothing here touches NATS or an OS process, so it is fast to
+// unit-test in normal CI, while the long-running orchestration that uses it lives
+// behind the `soak` build tag in internal/lord.
+//
+// Latencies are kept in fixed-bucket histograms rather than a growing slice: a soak
+// run makes an unbounded number of calls, and because the lord runs in the same
+// process as the test, an unbounded recorder would inflate the process heap and
+// corrupt the very leak measurement the suite performs. Histograms make the
+// recorder's footprint constant.
 package soak
 
 import (
 	"math"
-	"sort"
 	"sync"
 	"time"
 )
 
-// LatencyRecorder collects call latencies and computes percentiles over them. It is
-// safe for concurrent use: the soak load generator records from many goroutines at
-// once. Samples are kept in arrival order so a windowed trend can compare an early
-// slice of the run against a late one.
+// Histogram resolution and ceiling. Buckets are histResolution wide up to histMax;
+// anything above lands in an overflow tally and is reported via the exact max. The
+// ceiling comfortably clears the sustained-load bar (p99 < 50ms) while the 100us
+// resolution keeps percentiles near the bar precise.
+const (
+	histResolution = 100 * time.Microsecond
+	histMax        = 200 * time.Millisecond
+	histBuckets    = int(histMax / histResolution)
+)
+
+// hist is a fixed-bucket latency histogram with constant memory.
+type hist struct {
+	counts   []uint64
+	total    uint64
+	overflow uint64
+	max      time.Duration
+}
+
+func newHist() *hist {
+	return &hist{counts: make([]uint64, histBuckets)}
+}
+
+func (h *hist) add(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	if d > h.max {
+		h.max = d
+	}
+	h.total++
+	idx := int(d / histResolution)
+	if idx >= len(h.counts) {
+		h.overflow++
+		return
+	}
+	h.counts[idx]++
+}
+
+// percentile returns the p-th percentile (0..100) using nearest-rank over the
+// bucket counts. It returns a bucket's upper bound (a conservative, never-under
+// estimate for an SLO); a rank landing in the overflow returns the exact max.
+func (h *hist) percentile(p float64) time.Duration {
+	if h.total == 0 {
+		return 0
+	}
+	rank := uint64(math.Ceil(p / 100 * float64(h.total)))
+	if rank < 1 {
+		rank = 1
+	}
+	var cum uint64
+	for i, c := range h.counts {
+		cum += c
+		if cum >= rank {
+			return time.Duration(i+1) * histResolution
+		}
+	}
+	return h.max // rank falls in the overflow -> exact largest sample
+}
+
+// LatencyRecorder collects call latencies into an overall histogram plus per-window
+// histograms so a trend (early vs late in the run) can be computed. It is safe for
+// concurrent use: the load generator records from many goroutines at once. Memory is
+// bounded by (windows+1) * histBuckets regardless of how many calls are recorded.
 type LatencyRecorder struct {
 	mu      sync.Mutex
-	samples []time.Duration
+	start   time.Time
+	window  time.Duration
+	overall *hist
+	windows []*hist
 }
 
-// NewLatencyRecorder returns a recorder pre-sized for capacity samples (a hint; it
-// grows as needed).
-func NewLatencyRecorder(capacity int) *LatencyRecorder {
-	if capacity < 0 {
-		capacity = 0
+// NewLatencyRecorder returns a recorder that spreads samples across `windows` equal
+// time windows over the expected total run duration. Samples arriving after the last
+// window fold into it, so an over-running phase never panics.
+func NewLatencyRecorder(total time.Duration, windows int) *LatencyRecorder {
+	if windows < 1 {
+		windows = 1
 	}
-	return &LatencyRecorder{samples: make([]time.Duration, 0, capacity)}
+	if total <= 0 {
+		total = time.Second
+	}
+	ws := make([]*hist, windows)
+	for i := range ws {
+		ws[i] = newHist()
+	}
+	return &LatencyRecorder{
+		start:   time.Now(),
+		window:  total / time.Duration(windows),
+		overall: newHist(),
+		windows: ws,
+	}
 }
 
-// Add records one latency sample.
+// Add records one latency sample, placing it in the window for the current elapsed
+// time.
 func (r *LatencyRecorder) Add(d time.Duration) {
 	r.mu.Lock()
-	r.samples = append(r.samples, d)
+	r.addAt(int(time.Since(r.start)/r.window), d)
 	r.mu.Unlock()
 }
 
-// Count returns the number of recorded samples.
-func (r *LatencyRecorder) Count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.samples)
+// addAt records a sample into a specific window (and the overall histogram). It
+// assumes the caller holds the lock; tests call it to populate windows
+// deterministically without waiting for wall-clock time to pass.
+func (r *LatencyRecorder) addAt(window int, d time.Duration) {
+	r.overall.add(d)
+	if window < 0 {
+		window = 0
+	}
+	if window >= len(r.windows) {
+		window = len(r.windows) - 1
+	}
+	r.windows[window].add(d)
 }
 
-// Percentile returns the p-th percentile (p in 0..100) using the nearest-rank
-// method. An empty recorder returns 0.
+// Count returns the number of recorded samples.
+func (r *LatencyRecorder) Count() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.overall.total
+}
+
+// Percentile returns the p-th percentile (0..100) over all samples.
 func (r *LatencyRecorder) Percentile(p float64) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return percentile(r.samples, p)
+	return r.overall.percentile(p)
 }
 
 // Max returns the largest recorded sample, or 0 when empty.
 func (r *LatencyRecorder) Max() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var max time.Duration
-	for _, d := range r.samples {
-		if d > max {
-			max = d
-		}
-	}
-	return max
+	return r.overall.max
 }
 
 // Trend describes how a percentile moved from the start of the run to the end.
 type Trend struct {
-	First time.Duration // percentile of the leading window
-	Last  time.Duration // percentile of the trailing window
+	First time.Duration // percentile of the first window that saw traffic
+	Last  time.Duration // percentile of the last window that saw traffic
 }
 
-// Trend splits the recorded samples into a leading and a trailing window, each
-// holding `fraction` of the samples (0 < fraction <= 0.5), and reports the p-th
-// percentile of each. Samples are in arrival order, so this compares the early part
-// of the run against the late part - a rising Last is a degradation signal.
-func (r *LatencyRecorder) Trend(p, fraction float64) Trend {
+// Trend reports the p-th percentile of the earliest and latest windows that received
+// samples. Comparing them surfaces a runtime that degrades over time. A run short
+// enough to fill only one window yields First == Last (a flat, passing trend).
+func (r *LatencyRecorder) Trend(p float64) Trend {
 	r.mu.Lock()
-	n := len(r.samples)
-	window := make([]time.Duration, n)
-	copy(window, r.samples)
-	r.mu.Unlock()
-
-	if n == 0 {
+	defer r.mu.Unlock()
+	var first, last *hist
+	for _, h := range r.windows {
+		if h.total > 0 {
+			if first == nil {
+				first = h
+			}
+			last = h
+		}
+	}
+	if first == nil {
 		return Trend{}
 	}
-	w := int(float64(n) * fraction)
-	if w < 1 {
-		w = 1
-	}
-	if w > n {
-		w = n
-	}
-	return Trend{
-		First: percentile(window[:w], p),
-		Last:  percentile(window[n-w:], p),
-	}
+	return Trend{First: first.percentile(p), Last: last.percentile(p)}
 }
 
 // OK reports whether the trailing window stayed within tolerance of the leading one
@@ -126,26 +208,4 @@ func GrowthPct(start, end float64) float64 {
 		return 0
 	}
 	return (end - start) / start * 100
-}
-
-// percentile returns the p-th percentile of the samples using nearest-rank. It
-// operates on a copy, so it never reorders the caller's slice (windows share a
-// backing array).
-func percentile(samples []time.Duration, p float64) time.Duration {
-	n := len(samples)
-	if n == 0 {
-		return 0
-	}
-	sorted := make([]time.Duration, n)
-	copy(sorted, samples)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-
-	rank := int(math.Ceil(p / 100 * float64(n)))
-	if rank < 1 {
-		rank = 1
-	}
-	if rank > n {
-		rank = n
-	}
-	return sorted[rank-1]
 }
