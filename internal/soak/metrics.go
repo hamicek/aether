@@ -102,9 +102,15 @@ func NewLatencyRecorder(total time.Duration, windows int) *LatencyRecorder {
 	for i := range ws {
 		ws[i] = newHist()
 	}
+	// Floor the window width at 1ns: an absurdly short total (e.g. total < windows)
+	// would otherwise round to 0 and divide-by-zero in Add.
+	width := total / time.Duration(windows)
+	if width < 1 {
+		width = 1
+	}
 	return &LatencyRecorder{
 		start:   time.Now(),
-		window:  total / time.Duration(windows),
+		window:  width,
 		overall: newHist(),
 		windows: ws,
 	}
