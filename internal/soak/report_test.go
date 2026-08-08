@@ -24,6 +24,7 @@ func goodReport() Report {
 		Distinct:   5000,
 		Duplicates: 7,
 
+		LeakEvaluated:  true,
 		GoroutineStart: 40,
 		GoroutineEnd:   41,
 		HeapStart:      10 << 20,
@@ -77,6 +78,21 @@ func TestBreachesThrallRSSGrowth(t *testing.T) {
 	r := goodReport()
 	r.ThrallRSSEnd = map[string]int64{"probe": 20000} // +66%
 	assertSingleBreach(t, r, "thrall probe RSS growth")
+}
+
+func TestBreachesSkipsLeakWhenNotEvaluated(t *testing.T) {
+	// A run too short to evaluate leaks reports the deltas but must not breach on them.
+	r := goodReport()
+	r.LeakEvaluated = false
+	r.GoroutineEnd = 200 // huge growth, but leak bars are not enforced
+	r.HeapEnd = 100 << 20
+	r.ThrallRSSEnd = map[string]int64{"probe": 99000}
+	if b := r.Breaches(); len(b) != 0 {
+		t.Fatalf("leak bars must be skipped when not evaluated, got %v", b)
+	}
+	if out := r.Format(); !strings.Contains(out, "informational only") {
+		t.Errorf("Format() should flag leak as informational when not evaluated\n%s", out)
+	}
 }
 
 func TestBreachesSkipsPhasesThatDidNotRun(t *testing.T) {

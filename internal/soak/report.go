@@ -46,7 +46,10 @@ type Report struct {
 	Distinct   int
 	Duplicates int
 
-	// Leak deltas.
+	// Leak deltas. LeakEvaluated is false when the run was too short for a valid
+	// warm-up: the deltas are then reported for information but not held to the growth
+	// bars (a cold-start ramp is not a leak).
+	LeakEvaluated  bool
 	GoroutineStart int
 	GoroutineEnd   int
 	HeapStart      uint64           // bytes
@@ -83,26 +86,28 @@ func (r Report) Breaches() []string {
 			r.Published, r.Distinct, r.Published-r.Distinct))
 	}
 
-	if r.GoroutineStart > 0 && !GrowthOK(float64(r.GoroutineStart), float64(r.GoroutineEnd), r.Bars.GrowthTol) {
-		breaches = append(breaches, fmt.Sprintf(
-			"goroutine growth: %d -> %d (+%.1f%%, bar +%.0f%%)",
-			r.GoroutineStart, r.GoroutineEnd,
-			GrowthPct(float64(r.GoroutineStart), float64(r.GoroutineEnd)), r.Bars.GrowthTol*100))
-	}
-	if r.HeapStart > 0 && !GrowthOK(float64(r.HeapStart), float64(r.HeapEnd), r.Bars.GrowthTol) {
-		breaches = append(breaches, fmt.Sprintf(
-			"lord heap growth: %s -> %s (+%.1f%%, bar +%.0f%%)",
-			bytes(r.HeapStart), bytes(r.HeapEnd),
-			GrowthPct(float64(r.HeapStart), float64(r.HeapEnd)), r.Bars.GrowthTol*100))
-	}
-	for _, name := range sortedRSSNames(r.ThrallRSSStart) {
-		start := r.ThrallRSSStart[name]
-		end := r.ThrallRSSEnd[name]
-		if start > 0 && !GrowthOK(float64(start), float64(end), r.Bars.GrowthTol) {
+	if r.LeakEvaluated {
+		if r.GoroutineStart > 0 && !GrowthOK(float64(r.GoroutineStart), float64(r.GoroutineEnd), r.Bars.GrowthTol) {
 			breaches = append(breaches, fmt.Sprintf(
-				"thrall %s RSS growth: %d -> %d KB (+%.1f%%, bar +%.0f%%)",
-				name, start, end,
-				GrowthPct(float64(start), float64(end)), r.Bars.GrowthTol*100))
+				"goroutine growth: %d -> %d (+%.1f%%, bar +%.0f%%)",
+				r.GoroutineStart, r.GoroutineEnd,
+				GrowthPct(float64(r.GoroutineStart), float64(r.GoroutineEnd)), r.Bars.GrowthTol*100))
+		}
+		if r.HeapStart > 0 && !GrowthOK(float64(r.HeapStart), float64(r.HeapEnd), r.Bars.GrowthTol) {
+			breaches = append(breaches, fmt.Sprintf(
+				"lord heap growth: %s -> %s (+%.1f%%, bar +%.0f%%)",
+				bytes(r.HeapStart), bytes(r.HeapEnd),
+				GrowthPct(float64(r.HeapStart), float64(r.HeapEnd)), r.Bars.GrowthTol*100))
+		}
+		for _, name := range sortedRSSNames(r.ThrallRSSStart) {
+			start := r.ThrallRSSStart[name]
+			end := r.ThrallRSSEnd[name]
+			if start > 0 && !GrowthOK(float64(start), float64(end), r.Bars.GrowthTol) {
+				breaches = append(breaches, fmt.Sprintf(
+					"thrall %s RSS growth: %d -> %d KB (+%.1f%%, bar +%.0f%%)",
+					name, start, end,
+					GrowthPct(float64(start), float64(end)), r.Bars.GrowthTol*100))
+			}
 		}
 	}
 
@@ -139,6 +144,9 @@ func (r Report) Format() string {
 		end := r.ThrallRSSEnd[name]
 		fmt.Fprintf(&b, "  thrall %s RSS: %d -> %d KB (%+.1f%%)\n",
 			name, start, end, GrowthPct(float64(start), float64(end)))
+	}
+	if r.GoroutineStart > 0 && !r.LeakEvaluated {
+		b.WriteString("  leak: informational only (run too short to hold the growth bars)\n")
 	}
 
 	if breaches := r.Breaches(); len(breaches) == 0 {
