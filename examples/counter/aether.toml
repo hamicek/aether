@@ -1,0 +1,29 @@
+app = "demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts"
+restart = "permanent"
+scope   = "local"
+
+[[thrall]]
+name = "counter-py"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
+restart = "permanent"
+scope   = "local"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+scope   = "local"
+
+[[thrall]]
+name = "gateway"
+cmd  = "bun run ./gateway.ts"
+restart = "transient"

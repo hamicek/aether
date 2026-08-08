@@ -1,0 +1,28 @@
+# one_for_all: when ANY thrall crashes, ALL siblings are restarted.
+# Three counters (a/b/c) from the same counter.ts; the gateway probes all three.
+# The argument (a/b/c) only serves to distinguish the processes in `pkill`.
+app = "demo"
+strategy = "one_for_all"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "counter-a"
+cmd  = "bun run ./counter.ts a"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-b"
+cmd  = "bun run ./counter.ts b"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-c"
+cmd  = "bun run ./counter.ts c"
+restart = "permanent"
+
+[[thrall]]
+name = "gateway"
+cmd  = "AETHER_TARGETS=counter-a,counter-b,counter-c bun run ./gateway.ts"
+restart = "transient"

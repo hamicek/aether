@@ -1,0 +1,7 @@
+{
+  "name": "counter-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}

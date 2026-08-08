@@ -1,0 +1,20 @@
+# Durable mailbox demo: counter (core) vs counter-dur (durable).
+# Both run from the SAME counter.ts - durability is just configuration (durable = true).
+# `restart = temporary` -> after a kill the lord does not restart them (a clean window to inject casts).
+# The argument (tag-core / tag-durable) only serves to distinguish the processes in `pkill`.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "temporary"
+
+[[thrall]]
+name = "counter-dur"
+cmd  = "bun run ./counter.ts tag-durable"
+restart = "temporary"
+durable = true

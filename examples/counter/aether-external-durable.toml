@@ -1,0 +1,19 @@
+# Durable mailbox against a STANDALONE NATS cluster (7390). Both the stream and the KV live
+# on the external server - durability does not depend on the runtime being up.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7390"
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "temporary"
+
+[[thrall]]
+name = "counter-dur"
+cmd  = "bun run ./counter.ts tag-durable"
+restart = "temporary"
+durable = true

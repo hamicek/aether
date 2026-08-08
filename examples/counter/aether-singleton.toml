@@ -1,0 +1,15 @@
+# Singleton thrall against an external cluster. When several lords run (multi-node)
+# against the same NATS, `counter-single` may run only ONCE - the other lords wait
+# on the distributed KV lock and take it over only when the holder crashes (failover).
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7390"
+
+[[thrall]]
+name = "counter-single"
+cmd  = "bun run ./counter.ts tag-single"
+restart = "permanent"
+scope   = "singleton"

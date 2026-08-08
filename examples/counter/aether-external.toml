@@ -1,0 +1,29 @@
+# The same polyglot stack as aether.toml - the ONLY difference is the [nats] section.
+# Instead of an embedded server, the runtime connects to a standalone NATS cluster.
+# The thralls, SDKs, lord and observability do not change (they speak only NATS).
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7390"
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-py"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+
+[[thrall]]
+name = "gateway"
+cmd  = "bun run ./gateway.ts"
+restart = "transient"

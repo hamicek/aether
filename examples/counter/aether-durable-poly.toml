@@ -1,0 +1,19 @@
+# Durable mailbox in both Python and Go. Both are durable purely thanks to configuration
+# (durable = true) - the code of the counter_py.py / counter_go.go thralls does not change.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "counter-py"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
+restart = "temporary"
+durable = true
+
+[[thrall]]
+name = "counter-go"
+cmd  = "../../bin/counter-go"
+restart = "temporary"
+durable = true
