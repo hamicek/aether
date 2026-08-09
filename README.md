@@ -172,6 +172,9 @@ nkey_seed = "/etc/aether/user.nk"  # authenticate (nkey)
 Secrets are passed by **file path**, never as an env value - the nkey seed never appears in `ps` or
 the process environment. A full example is `examples/counter/aether-secure-external.toml`.
 
+Python thralls using nkey auth need the optional `nkeys` package (plain `nats-py` omits it):
+`pip install 'nats-py[nkeys]'`.
+
 Scope: this secures the client side against an already-secured external NATS (server TLS + nkeys).
 Securing the embedded server itself (for a networked `0.0.0.0` bind), mutual TLS, JWT/account
 isolation, token auth and the operator CLI against a secured cluster are follow-ups tracked in
