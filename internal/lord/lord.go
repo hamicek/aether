@@ -51,6 +51,11 @@ type Lord struct {
 	procCancel context.CancelFunc
 	draining   atomic.Bool
 
+	// childrenMu guards the children slice. Static children are appended once in New;
+	// dynamic children (ctx.StartChild) are appended/removed at runtime from the control
+	// callback goroutine, so every reader/writer of the slice takes this lock.
+	childrenMu sync.RWMutex
+
 	mu    sync.Mutex
 	ready map[string]bool
 }
@@ -104,6 +109,13 @@ func (l *Lord) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Inbound control channel: thralls ask the lord to spawn/stop children at runtime.
+	if _, err := l.ether.Conn().Subscribe(wire.LordCtl(), func(m *nats.Msg) {
+		l.handleControl(m)
+	}); err != nil {
+		return err
+	}
+
 	go l.supervisorLoop()
 
 	for _, ch := range l.children {
@@ -117,29 +129,38 @@ func (l *Lord) Start(ctx context.Context) error {
 }
 
 func (l *Lord) provisionStreams() error {
+	for _, ch := range l.children {
+		if err := l.provisionStream(ch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// provisionStream idempotently creates the durable mailbox stream for one child. Used
+// both at startup and when a durable child is spawned at runtime.
+func (l *Lord) provisionStream(ch *child) error {
+	if !ch.spec.Durable {
+		return nil
+	}
 	js, err := l.ether.Conn().JetStream()
 	if err != nil {
 		return err
 	}
-	for _, ch := range l.children {
-		if !ch.spec.Durable {
-			continue
-		}
-		stream := wire.Stream(l.manifest.App, ch.spec.Name)
-		subject := wire.Cast(l.manifest.App, ch.spec.Name)
-		if _, err := js.StreamInfo(stream); err == nil {
-			continue
-		}
-		if _, err := js.AddStream(&nats.StreamConfig{
-			Name:      stream,
-			Subjects:  []string{subject},
-			Retention: nats.WorkQueuePolicy,
-			Storage:   nats.FileStorage,
-		}); err != nil {
-			return err
-		}
-		log.Printf("[lord] durable mailbox: stream %q for subject %q", stream, subject)
+	stream := wire.Stream(l.manifest.App, ch.spec.Name)
+	subject := wire.Cast(l.manifest.App, ch.spec.Name)
+	if _, err := js.StreamInfo(stream); err == nil {
+		return nil
 	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:      stream,
+		Subjects:  []string{subject},
+		Retention: nats.WorkQueuePolicy,
+		Storage:   nats.FileStorage,
+	}); err != nil {
+		return err
+	}
+	log.Printf("[lord] durable mailbox: stream %q for subject %q", stream, subject)
 	return nil
 }
 
@@ -177,6 +198,10 @@ func (l *Lord) supervisorLoop() {
 		if ev.gen != ev.ch.currentGen() {
 			continue
 		}
+		// Retired on purpose (StopChild): the exit is expected, not a crash.
+		if ev.ch.retired.Load() {
+			continue
+		}
 		l.setStatus(ev.ch.spec.Name, 0, "down")
 		log.Printf("[lord] thrall %q exited (abnormal=%v)", ev.ch.spec.Name, ev.abnormal)
 		l.emit("down", ev.ch.spec.Name, 0)
@@ -186,7 +211,14 @@ func (l *Lord) supervisorLoop() {
 
 // handleCrash selects, per strategy, which thralls to restart.
 func (l *Lord) handleCrash(ch *child, abnormal bool) {
-	switch decide(ch.spec.Restart, l.manifest.Strategy, abnormal) {
+	action := decide(ch.spec.Restart, l.manifest.Strategy, abnormal)
+	// A dynamic child is supervised one_for_one: it never pulls the manifest group
+	// (and is itself excluded from localChildren/groupRest), so a group action on it
+	// degrades to restarting just itself.
+	if ch.dynamic && (action == RestartAll || action == RestartRest) {
+		action = RestartOne
+	}
+	switch action {
 	case DontRestart:
 		log.Printf("[lord] thrall %q is not restarted (policy=%s)", ch.spec.Name, ch.spec.Restart)
 	case RestartOne:
@@ -266,11 +298,15 @@ func (l *Lord) overIntensity(ch *child) bool {
 // backoff waits restartBackoff; returns true if shutdown arrived in the meantime.
 func (l *Lord) backoff() bool { return l.sleep(restartBackoff) }
 
-// localChildren returns non-singleton thralls in manifest order (singletons have their own lifecycle).
+// localChildren returns the static non-singleton thralls in manifest order. Singletons
+// have their own lifecycle; dynamic children are supervised one_for_one and never
+// participate in a manifest group strategy, so both are excluded here.
 func (l *Lord) localChildren() []*child {
+	l.childrenMu.RLock()
+	defer l.childrenMu.RUnlock()
 	out := make([]*child, 0, len(l.children))
 	for _, ch := range l.children {
-		if ch.spec.Scope != "singleton" {
+		if ch.spec.Scope != "singleton" && !ch.dynamic {
 			out = append(out, ch)
 		}
 	}
@@ -404,8 +440,14 @@ func (l *Lord) Stop() {
 	l.draining.Store(true)
 	nc := l.ether.Conn()
 
+	// Snapshot under the lock; drain both static and dynamic children.
+	l.childrenMu.RLock()
+	all := make([]*child, len(l.children))
+	copy(all, l.children)
+	l.childrenMu.RUnlock()
+
 	var wg sync.WaitGroup
-	for _, ch := range l.children {
+	for _, ch := range all {
 		wg.Add(1)
 		go func(ch *child) {
 			defer wg.Done()
@@ -451,6 +493,8 @@ func (l *Lord) emit(event, name string, pid int) {
 }
 
 func (l *Lord) childByName(name string) *child {
+	l.childrenMu.RLock()
+	defer l.childrenMu.RUnlock()
 	for _, ch := range l.children {
 		if ch.spec.Name == name {
 			return ch

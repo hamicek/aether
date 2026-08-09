@@ -1,0 +1,161 @@
+package lord
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
+
+	"github.com/hamicek/aether/internal/registry"
+	"github.com/hamicek/aether/internal/wire"
+)
+
+// control sends a spawn/stop request on the lord's control channel and returns the
+// reply envelope.
+func control(t *testing.T, nc *nats.Conn, op string, payload any) wire.Envelope {
+	t.Helper()
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCtl, Op: op,
+		Payload: mustJSON(payload), TS: time.Now().UnixMilli()}
+	msg, err := nc.Request(wire.LordCtl(), mustJSON(req), 2*time.Second)
+	if err != nil {
+		t.Fatalf("control %s request: %v", op, err)
+	}
+	var reply wire.Envelope
+	if err := json.Unmarshal(msg.Data, &reply); err != nil {
+		t.Fatalf("control %s reply: %v", op, err)
+	}
+	return reply
+}
+
+func spawnDynamic(t *testing.T, nc *nats.Conn, spec wire.SpawnSpec) wire.Envelope {
+	t.Helper()
+	return control(t, nc, wire.OpSpawn, spec)
+}
+
+// TestDynamicSpawnAndSupervise: a thrall started at runtime (not in the manifest) comes
+// up, is on the ether, answers a call, and is recorded ready in the registry.
+func TestDynamicSpawnAndSupervise(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	reply := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"})
+	if reply.Status != "ok" {
+		t.Fatalf("spawn reply status = %q, want ok (err=%+v)", reply.Status, reply.Error)
+	}
+	waitReady(t, eth, "dyn")
+	if _, ok := tryCallInt(nc, "demo", "dyn", "pid"); !ok {
+		t.Fatal("dynamic thrall does not answer call")
+	}
+}
+
+// TestDynamicRestartAfterCrash: a permanent dynamic child is restarted on crash, just
+// like a static one.
+func TestDynamicRestartAfterCrash(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+	pid := callInt(t, nc, "demo", "dyn", "pid")
+
+	cast(t, nc, "demo", "dyn", "crash")
+	waitFor(t, 5*time.Second, "dynamic child restarted", func() bool {
+		p, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return ok && p != pid
+	})
+}
+
+// TestDynamicStop: a runtime stop drains the child and it is not restarted afterwards.
+func TestDynamicStop(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	if r := control(t, nc, wire.OpStop, wire.StopSpec{Name: "dyn"}); r.Status != "ok" {
+		t.Fatalf("stop reply: %+v", r.Error)
+	}
+	// It must go down and stay down (no restart).
+	reg, _ := registry.Open(eth.Conn())
+	waitFor(t, 5*time.Second, "dynamic child down after stop", func() bool {
+		e, ok, err := reg.Get("dyn")
+		return err == nil && ok && e.Status == "down"
+	})
+	time.Sleep(500 * time.Millisecond)
+	if _, ok := tryCallInt(nc, "demo", "dyn", "pid"); ok {
+		t.Fatal("stopped dynamic thrall still answers - it was restarted")
+	}
+}
+
+// TestDynamicStopRejectsStatic: static children are owned by the manifest and cannot be
+// stopped via the runtime API.
+func TestDynamicStopRejectsStatic(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := control(t, nc, wire.OpStop, wire.StopSpec{Name: "static"}); r.Status != "error" {
+		t.Fatalf("stopping a static child should be refused, got status %q", r.Status)
+	}
+}
+
+// TestDynamicOutsideGroupStrategy: under one_for_all, a static child's crash restarts the
+// static group but leaves a dynamic child untouched - the dynamic child is supervised
+// one_for_one, outside the manifest group.
+func TestDynamicOutsideGroupStrategy(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_all",
+		spec("s1", "permanent", "local"), spec("s2", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "s1")
+	waitReady(t, eth, "s2")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+	dynPid := callInt(t, nc, "demo", "dyn", "pid")
+	s2Pid := callInt(t, nc, "demo", "s2", "pid")
+
+	// Crash s1 -> one_for_all restarts the static group (s2 gets a new pid)...
+	cast(t, nc, "demo", "s1", "crash")
+	waitFor(t, 5*time.Second, "static group restarted", func() bool {
+		p, ok := tryCallInt(nc, "demo", "s2", "pid")
+		return ok && p != s2Pid
+	})
+	// ...but the dynamic child, outside the group, keeps its pid.
+	if p, ok := tryCallInt(nc, "demo", "dyn", "pid"); !ok || p != dynPid {
+		t.Fatalf("dynamic child pid changed (%d -> %d, ok=%v) - it was pulled into the group", dynPid, p, ok)
+	}
+}
+
+// TestDynamicDuplicateNameRejected and the others cover the spawn/stop lifecycle.
+
+// TestDynamicDuplicateNameRejected: a spawn with an existing name (static or dynamic) fails.
+func TestDynamicDuplicateNameRejected(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "static", Cmd: probeCmd(t)}); r.Status != "error" {
+		t.Fatalf("duplicate of a static name should be refused, got %q", r.Status)
+	}
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t)}); r.Status != "ok" {
+		t.Fatalf("first dyn spawn: %+v", r.Error)
+	}
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t)}); r.Status != "error" {
+		t.Fatalf("duplicate of a dynamic name should be refused, got %q", r.Status)
+	}
+}

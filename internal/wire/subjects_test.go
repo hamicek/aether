@@ -25,6 +25,9 @@ func TestSubjects(t *testing.T) {
 	if HeartbeatAll() != "aether._lord.*.hb" {
 		t.Errorf("HeartbeatAll: got %q, want %q", HeartbeatAll(), "aether._lord.*.hb")
 	}
+	if LordCtl() != "aether._lord.ctl" {
+		t.Errorf("LordCtl: got %q, want %q", LordCtl(), "aether._lord.ctl")
+	}
 	if Events != "aether._lord.events" {
 		t.Errorf("Events: got %q, want %q", Events, "aether._lord.events")
 	}

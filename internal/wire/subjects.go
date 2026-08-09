@@ -22,5 +22,10 @@ func Heartbeat(name string) string { return fmt.Sprintf("aether._lord.%s.hb", na
 // HeartbeatAll = wildcard for the lord to listen to heartbeats of all thralls.
 func HeartbeatAll() string { return "aether._lord.*.hb" }
 
+// LordCtl = the lord's inbound control channel (thrall -> lord), request/reply. Unlike
+// Ctl (lord -> thrall), this is where a thrall asks the lord to spawn or stop a child
+// at runtime (a ctl envelope with Op "spawn" | "stop").
+func LordCtl() string { return "aether._lord.ctl" }
+
 // Events = lifecycle stream (started/crashed/restarted) for the dashboard.
 const Events = "aether._lord.events"

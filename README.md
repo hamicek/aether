@@ -35,6 +35,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
+| **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go) -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
 

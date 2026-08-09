@@ -29,7 +29,9 @@ type child struct {
 	caPath   string // TLS CA path injected to the thrall (empty = none)
 	nkeySeed string // nkey seed path injected to the thrall (empty = none)
 
-	live atomic.Bool // the process is currently running
+	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
+	live    atomic.Bool // the process is currently running
+	retired atomic.Bool // stopped on purpose (StopChild) -> must not be restarted
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
@@ -61,6 +63,16 @@ func (c *child) spawn(ctx context.Context) (gen uint64, err error) {
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
+	// Run the thrall in its own process group: the command is `sh -c <cmd>`, so the real
+	// thrall is a grandchild of the lord. Killing only `sh` would orphan it (and leave it
+	// holding the inherited stdout/stderr). We put the whole tree in one group and signal
+	// the group (negative pid) on cancel/drain, so no thrall survives its lord.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Context cancel (procCancel = hard shutdown) kills the group, not just sh; WaitDelay
+	// bounds how long Wait blocks on inherited pipes if a process ignores the signal.
+	cmd.Cancel = func() error { killGroup(cmd.Process, syscall.SIGKILL); return nil }
+	cmd.WaitDelay = sigtermGrace
 
 	done := make(chan struct{})
 	c.mu.Lock()
@@ -102,13 +114,23 @@ func (c *child) currentGen() uint64 {
 // running reports whether the process is currently running.
 func (c *child) running() bool { return c.live.Load() }
 
-// kill hard-terminates the process (SIGKILL) - used when the lord loses the singleton lock.
+// kill hard-terminates the process group (SIGKILL) - used when the lord loses the singleton lock.
 func (c *child) kill() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+		killGroup(c.cmd.Process, syscall.SIGKILL)
 	}
+}
+
+// killGroup signals the whole process group of a spawned thrall (negative pid). Thralls
+// are spawned with Setpgid, so the group holds `sh` and the real thrall grandchild; a
+// plain Process.Kill would hit only `sh` and orphan the thrall.
+func killGroup(proc *os.Process, sig syscall.Signal) {
+	if proc == nil {
+		return
+	}
+	_ = syscall.Kill(-proc.Pid, sig)
 }
 
 // pid returns the PID of the current process generation (0 if not running).
@@ -162,15 +184,15 @@ func (c *child) requestDrain(nc *nats.Conn, grace time.Duration) {
 	case <-time.After(grace):
 	}
 
-	// 2) escalation: SIGTERM
-	_ = proc.Signal(syscall.SIGTERM)
+	// 2) escalation: SIGTERM to the whole group (sh + the real thrall grandchild)
+	killGroup(proc, syscall.SIGTERM)
 	select {
 	case <-done:
 		return
 	case <-time.After(sigtermGrace):
 	}
 
-	// 3) last resort: SIGKILL
-	_ = proc.Kill()
+	// 3) last resort: SIGKILL to the whole group
+	killGroup(proc, syscall.SIGKILL)
 	<-done
 }
