@@ -7,6 +7,9 @@ export const subjects = {
   data: (app: string, name: string) => `aether.${app}.${name}.*`,
   ctl: (name: string) => `aether._lord.${name}.ctl`,
   hb: (name: string) => `aether._lord.${name}.hb`,
+  // lordCtl = the lord's inbound control channel (thrall -> lord), request/reply, for
+  // runtime spawn/stop. Unlike ctl, which is lord -> thrall.
+  lordCtl: () => "aether._lord.ctl",
   events: "aether._lord.events",
   // JetStream stream for the durable mailbox (dots are not allowed in stream names).
   stream: (app: string, name: string) => `aether_${app}_${name}`,
