@@ -141,11 +141,11 @@ func thresholdFromEnv() float64 {
 	return 100.0
 }
 
-func main() {
-	s := newSite(thresholdFromEnv())
-
-	def := thrall.Def[*site]{
-		Name: os.Getenv("AETHER_NAME"),
+// siteDef builds the thrall definition around a site image. Shared by main and the
+// bench harness (which runs the site in-process), so the measured code is the real one.
+func siteDef(name string, s *site) thrall.Def[*site] {
+	return thrall.Def[*site]{
+		Name: name,
 		Init: func(_ *thrall.Ctx) (*site, error) { return s, nil },
 
 		HandleCast: map[string]thrall.CastFn[*site]{
@@ -181,8 +181,11 @@ func main() {
 				reason, st.received, st.gaps, st.alarms, len(st.image))
 		},
 	}
+}
 
-	if err := thrall.Start(def); err != nil {
+func main() {
+	s := newSite(thresholdFromEnv())
+	if err := thrall.Start(siteDef(os.Getenv("AETHER_NAME"), s)); err != nil {
 		log.Fatal(err)
 	}
 }
