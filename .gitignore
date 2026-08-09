@@ -2,6 +2,8 @@
 /bin/
 *.test
 .aether-endpoint
+# stray binaries from `go build ./examples/<name>` without -o (named after the dir)
+/scada-spike
 
 # Persistent embedded JetStream store (runtime data from store_dir demos)
 .aether-store/
