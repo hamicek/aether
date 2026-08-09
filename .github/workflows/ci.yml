@@ -35,5 +35,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install nats-py
-      - run: python -m unittest wire_parity_test
+      - run: python -m unittest discover -p '*_test.py'
         working-directory: sdk/python

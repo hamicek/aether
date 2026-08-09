@@ -12,11 +12,26 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import nats
+
+
+def _connect_kwargs(
+    name: str, ca: Optional[str] = None, nkey_seed: Optional[str] = None
+) -> dict:
+    """Build the kwargs for nats.connect: the thrall name plus, when the bus is
+    secured, a TLS context (server verification) and the nkey seed path. Absent
+    fields leave the connection unsecured, exactly as before."""
+    kwargs: dict[str, Any] = {"name": name}
+    if ca:
+        kwargs["tls"] = ssl.create_default_context(cafile=ca)
+    if nkey_seed:
+        kwargs["nkeys_seed"] = nkey_seed
+    return kwargs
 from nats.js.api import ConsumerConfig, DeliverPolicy
 
 
@@ -112,8 +127,10 @@ async def start(defn: ThrallDef) -> None:
         raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
     name = defn.name or env_name
     durable = os.environ.get("AETHER_DURABLE") == "1"
+    ca = os.environ.get("AETHER_NATS_CA")
+    nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
-    nc = await nats.connect(url, name=name)
+    nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
     ctx = Ctx(nats=nc, name=name, app=app)
     state = await _maybe(defn.init(ctx))
 
