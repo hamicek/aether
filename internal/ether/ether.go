@@ -17,6 +17,37 @@ import (
 type Config struct {
 	Mode string `toml:"mode"` // "embedded" | "external"
 	URL  string `toml:"url"`  // for external: "nats://a:4222,nats://b:4222"
+	TLS  TLS    `toml:"tls"`  // client-side transport security (external mode)
+	Auth Auth   `toml:"auth"` // client authentication (external mode)
+}
+
+// TLS configures client-side transport security for an external bus. CA is the path
+// to a PEM file used to verify the server's certificate (server TLS). Empty = no TLS.
+type TLS struct {
+	CA string `toml:"ca"`
+}
+
+// Auth configures client authentication to an external bus. NkeySeed is the path to
+// an nkey seed file the client signs the server nonce with. Empty = no auth.
+type Auth struct {
+	NkeySeed string `toml:"nkey_seed"`
+}
+
+// clientOptions turns the TLS/auth config into nats options. An empty field adds no
+// option, so a config without a security block connects exactly as before.
+func (c Config) clientOptions() ([]nats.Option, error) {
+	var opts []nats.Option
+	if c.TLS.CA != "" {
+		opts = append(opts, nats.RootCAs(c.TLS.CA))
+	}
+	if c.Auth.NkeySeed != "" {
+		opt, err := nats.NkeyOptionFromSeed(c.Auth.NkeySeed)
+		if err != nil {
+			return nil, fmt.Errorf("nkey seed %q: %w", c.Auth.NkeySeed, err)
+		}
+		opts = append(opts, opt)
+	}
+	return opts, nil
 }
 
 // Ether holds the running bus and the system connection for the lord and registry.
@@ -34,7 +65,7 @@ func Start(ctx context.Context, cfg Config) (*Ether, error) {
 	case "", "embedded":
 		return startEmbedded(ctx)
 	case "external":
-		return startExternal(ctx, cfg.URL)
+		return startExternal(ctx, cfg)
 	default:
 		return nil, fmt.Errorf("unknown nats mode %q", cfg.Mode)
 	}
@@ -73,15 +104,22 @@ func startEmbedded(_ context.Context) (*Ether, error) {
 	return &Ether{mode: "embedded", srv: srv, nc: nc, url: url, storeDir: storeDir}, nil
 }
 
-func startExternal(_ context.Context, url string) (*Ether, error) {
-	nc, err := nats.Connect(url,
+func startExternal(_ context.Context, cfg Config) (*Ether, error) {
+	opts := []nats.Option{
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
-	)
+	}
+	secure, err := cfg.clientOptions()
 	if err != nil {
 		return nil, err
 	}
-	return &Ether{mode: "external", nc: nc, url: url}, nil
+	opts = append(opts, secure...)
+
+	nc, err := nats.Connect(cfg.URL, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return &Ether{mode: "external", nc: nc, url: cfg.URL}, nil
 }
 
 // Conn returns the system NATS connection (lord, registry, observability).
