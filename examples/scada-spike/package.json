@@ -1,0 +1,7 @@
+{
+  "name": "scada-spike-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}
