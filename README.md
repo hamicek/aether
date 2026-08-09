@@ -188,25 +188,30 @@ the runtime under an hours-long load and checks it against concrete bars. It liv
 build tag, so normal CI (`go test ./...`) never runs it; you invoke it explicitly:
 
 ```bash
-scripts/soak.sh smoke        # ~2 min   - a quick end-to-end check
-scripts/soak.sh default      # ~45 min
-scripts/soak.sh overnight    # ~8 h
-scripts/soak.sh smoke 12345  # a fixed seed for a reproducible run
+scripts/soak.sh smoke                 # ~2 min  - all scenarios, a quick end-to-end check
+scripts/soak.sh default chaos         # ~45 min - one scenario (all|load|chaos|drain|singleton)
+scripts/soak.sh overnight singleton   # ~8 h
+scripts/soak.sh smoke 12345           # a fixed seed for a reproducible run
 
 # ad-hoc: override the length, write the report to a file
 AETHER_SOAK_DURATION=30s AETHER_SOAK_REPORT=soak.txt scripts/soak.sh smoke
 ```
 
-Each run measures, concurrently for the whole window:
+Each timed scenario runs for the profile duration (so `all` at a long profile is long - pick a single
+scenario for `default`/`overnight`). The suite measures:
 
 - **Sustained load** - a concurrent `call` stream; bar: p99 < 50ms and no upward latency trend.
 - **Durable no-loss** - a durable cast stream over JetStream; bar: every stored cast delivered
   (zero loss); duplicates are counted and tolerated.
 - **Leak detection** - the lord's goroutines and heap plus a sample of thrall RSS; bar: < 10% growth
   after warm-up. (On a run too short to warm up, the deltas are reported but not enforced.)
+- **Chaos** - random thralls are `SIGKILL`ed under load; bar: recovery per strategy < 3s, with durable
+  delivery lossless through the kills (checked server-side by the stream draining to zero).
+- **Singleton failover** - two lord nodes (OS processes) race for a singleton; the holder's node is
+  killed repeatedly; bar: failover < 5s and never more than one live instance (fencing).
+- **Graceful drain** - a durable thrall is drained mid-stream and restarted; bar: no work lost.
 
-It ends with a structured report and a **non-zero exit on any bar breach**. Chaos (killing thralls),
-singleton failover and drain-under-load are the next step, tracked in [ROADMAP.md](./ROADMAP.md).
+It ends with a structured report and a **non-zero exit on any bar breach**.
 
 ## Deliberately deferred
 
