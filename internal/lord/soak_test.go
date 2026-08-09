@@ -477,6 +477,48 @@ func drainDurable(nc *nats.Conn, app, name string, stored int) durableResult {
 	return res
 }
 
+// streamPending returns how many messages remain in the durable stream. Under
+// WorkQueue retention a message is removed only once a consumer acks it, so pending
+// counts what has not yet been delivered-and-acked. This is restart-proof, unlike the
+// probe's in-memory tally (which resets when the thrall restarts).
+func streamPending(nc *nats.Conn, app, name string) (int, bool) {
+	js, err := nc.JetStream()
+	if err != nil {
+		return 0, false
+	}
+	si, err := js.StreamInfo(wire.Stream(app, name))
+	if err != nil {
+		return 0, false
+	}
+	return int(si.State.Msgs), true
+}
+
+// waitStreamDrained waits for the durable stream to be fully consumed (0 pending),
+// returning the pending count left when it stops. Redelivery after a hard kill waits
+// out the consumer AckWait, so the timeout must be generous.
+func waitStreamDrained(nc *nats.Conn, app, name string, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	last, stall := -1, 0
+	for time.Now().Before(deadline) {
+		p, ok := streamPending(nc, app, name)
+		if ok {
+			if p == 0 {
+				return 0
+			}
+			if p == last {
+				if stall++; stall > soakDrainStall {
+					return p
+				}
+			} else {
+				stall, last = 0, p
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	p, _ := streamPending(nc, app, name)
+	return p
+}
+
 // --- chaos ---
 
 // chaosResult is the outcome of the chaos phase: how many thralls were SIGKILLed and
@@ -890,6 +932,74 @@ func finishSoak(t *testing.T, report soak.Report, reportPath string) {
 	if b := report.Breaches(); len(b) > 0 {
 		t.Fatalf("soak bars breached:\n  %s", strings.Join(b, "\n  "))
 	}
+}
+
+// drainThrall sends the same ctl:drain the lord's graceful shutdown uses, so a single
+// thrall drains its mailbox, runs Terminate and exits; a permanent thrall is then
+// restarted by the supervisor.
+func drainThrall(nc *nats.Conn, name string) {
+	msg, _ := json.Marshal(wire.Envelope{V: 1, Kind: wire.KindCtl, Op: "drain"})
+	_ = nc.Publish(wire.Ctl(name), msg)
+	_ = nc.Flush()
+}
+
+// TestSoakDrain checks a graceful drain under load loses no durable work: a durable
+// thrall is drained mid-stream (mailbox flushed, Terminate run), the supervisor brings
+// it back, and every published cast is still delivered.
+func TestSoakDrain(t *testing.T) {
+	cfg := resolveSoakConfig(t)
+	t.Logf("soak drain: profile=%s duration=%s seed=%d", cfg.profile, cfg.duration, cfg.seed)
+
+	const app = "drain"
+	durSpec := spec("probe-dur", "permanent", "local")
+	durSpec.Durable = true
+
+	eth := startEmbedded(t)
+	nc := eth.Conn()
+	stopped := subscribeLifecycle(t, nc, probeStoppedSubject)
+	startLord(t, eth, soakManifest(t, app, durSpec))
+	waitReady(t, eth, "probe-dur")
+
+	report := soak.Report{Profile: cfg.profile, Duration: cfg.duration, Seed: cfg.seed, Bars: soak.DefaultBars()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
+	var durStored, durAttempted int64
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		durStored, durAttempted = runDurable(ctx, nc, app, "probe-dur", soakDurableWorkers, soakDurablePace)
+	}()
+	go func() { // trigger a graceful drain partway through the stream
+		defer wg.Done()
+		select {
+		case <-ctx.Done():
+		case <-time.After(cfg.duration / 2):
+			drainThrall(nc, "probe-dur")
+		}
+	}()
+	wg.Wait()
+	cancel()
+
+	// Let the thrall recover, then wait for the stream to be fully consumed. No-loss is
+	// checked server-side (stream pending -> 0), not via the probe's counter, which
+	// resets on the drain restart.
+	waitReady(t, eth, "probe-dur")
+	pending := waitStreamDrained(nc, app, "probe-dur", 30*time.Second)
+	report.DrainPublished = int(durStored)
+	report.DrainDelivered = int(durStored) - pending
+	if durAttempted != durStored {
+		t.Logf("durable: %d/%d publishes failed (gaps, excluded)", durAttempted-durStored, durAttempted)
+	}
+
+	// The drain must have run Terminate gracefully (a stopped event), not crashed.
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("no stopped event - the drain did not run Terminate gracefully")
+	}
+
+	finishSoak(t, report, cfg.reportPath)
 }
 
 // TestSoakChaos runs the resilience scenario: under call + durable load, random
