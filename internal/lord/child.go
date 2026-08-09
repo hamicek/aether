@@ -23,9 +23,11 @@ const (
 
 // child = a single running thrall process supervised by the lord.
 type child struct {
-	spec    ThrallSpec
-	natsURL string
-	app     string
+	spec     ThrallSpec
+	natsURL  string
+	app      string
+	caPath   string // TLS CA path injected to the thrall (empty = none)
+	nkeySeed string // nkey seed path injected to the thrall (empty = none)
 
 	live atomic.Bool // the process is currently running
 
@@ -48,6 +50,14 @@ func (c *child) spawn(ctx context.Context) (gen uint64, err error) {
 	)
 	if c.spec.Durable {
 		cmd.Env = append(cmd.Env, "AETHER_DURABLE=1")
+	}
+	// Inject the paths (not the secrets) so the thrall's SDK can connect to the same
+	// secured bus; the key material stays in files, never in the process env value.
+	if c.caPath != "" {
+		cmd.Env = append(cmd.Env, "AETHER_NATS_CA="+c.caPath)
+	}
+	if c.nkeySeed != "" {
+		cmd.Env = append(cmd.Env, "AETHER_NATS_NKEY_SEED="+c.nkeySeed)
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

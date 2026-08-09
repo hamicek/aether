@@ -80,9 +80,11 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
-			spec:    spec,
-			natsURL: eth.URL(),
-			app:     m.App,
+			spec:     spec,
+			natsURL:  eth.URL(),
+			app:      m.App,
+			caPath:   m.Nats.TLS.CA,
+			nkeySeed: m.Nats.Auth.NkeySeed,
 		})
 	}
 	return l, nil
