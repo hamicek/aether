@@ -61,6 +61,7 @@ class WireParity(unittest.TestCase):
         self.assertEqual(aether._stream(app, name), "aether_demo_counter")
         self.assertEqual(aether._sub_ctl(name), "aether._lord.counter.ctl")
         self.assertEqual(aether._sub_hb(name), "aether._lord.counter.hb")
+        self.assertEqual(aether._sub_lord_ctl(), "aether._lord.ctl")
 
 
 if __name__ == "__main__":
