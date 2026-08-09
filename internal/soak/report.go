@@ -13,15 +13,24 @@ type Bars struct {
 	LatP99Max time.Duration // sustained-load p99 ceiling (story: < 50ms)
 	TrendTol  float64       // allowed rise of the last latency window over the first (fraction)
 	GrowthTol float64       // allowed growth of goroutines / heap / RSS end-vs-start (fraction)
+
+	// Resilience (v2).
+	RecoveryMax      time.Duration // per-strategy recovery after a thrall kill (story: < 3s)
+	FailoverMax      time.Duration // singleton failover after the holder dies (story: < 5s)
+	MaxLiveSingleton int           // max live singleton instances allowed at once (fencing: 1)
 }
 
 // DefaultBars returns the story's approved bars: p99 < 50ms, no upward latency
-// trend beyond 20%, and less than 10% resource growth after warm-up.
+// trend beyond 20%, less than 10% resource growth after warm-up, chaos recovery
+// within 3s, singleton failover within 5s, and never more than one live singleton.
 func DefaultBars() Bars {
 	return Bars{
-		LatP99Max: 50 * time.Millisecond,
-		TrendTol:  0.20,
-		GrowthTol: 0.10,
+		LatP99Max:        50 * time.Millisecond,
+		TrendTol:         0.20,
+		GrowthTol:        0.10,
+		RecoveryMax:      3 * time.Second,
+		FailoverMax:      5 * time.Second,
+		MaxLiveSingleton: 1,
 	}
 }
 
@@ -57,6 +66,20 @@ type Report struct {
 	HeapEnd        uint64           // bytes
 	ThrallRSSStart map[string]int64 // KB, per thrall name
 	ThrallRSSEnd   map[string]int64 // KB, per thrall name
+
+	// Chaos (v2): random thralls SIGKILLed under load; recovery = kill -> ready again.
+	Kills       int
+	RecoveryP99 time.Duration
+	RecoveryMax time.Duration
+
+	// Singleton failover (v2): the lock holder killed repeatedly.
+	Failovers        int
+	FailoverMax      time.Duration
+	MaxLiveInstances int // most singleton instances seen live at once (fencing: must stay 1)
+
+	// Graceful drain (v2): a drain triggered mid-stream must lose no work.
+	DrainPublished int
+	DrainDelivered int
 }
 
 // latencyTrend rebuilds the Trend view from the recorded first/last window p99.
@@ -112,6 +135,31 @@ func (r Report) Breaches() []string {
 		}
 	}
 
+	if r.Kills > 0 && r.RecoveryMax >= r.Bars.RecoveryMax {
+		breaches = append(breaches, fmt.Sprintf(
+			"chaos recovery: max %s >= bar %s (over %d kills)",
+			ms(r.RecoveryMax), ms(r.Bars.RecoveryMax), r.Kills))
+	}
+
+	if r.Failovers > 0 {
+		if r.FailoverMax >= r.Bars.FailoverMax {
+			breaches = append(breaches, fmt.Sprintf(
+				"singleton failover: max %s >= bar %s (over %d failovers)",
+				ms(r.FailoverMax), ms(r.Bars.FailoverMax), r.Failovers))
+		}
+		if r.MaxLiveInstances > r.Bars.MaxLiveSingleton {
+			breaches = append(breaches, fmt.Sprintf(
+				"singleton fencing: %d instances live at once (bar %d)",
+				r.MaxLiveInstances, r.Bars.MaxLiveSingleton))
+		}
+	}
+
+	if r.DrainPublished > 0 && r.DrainDelivered != r.DrainPublished {
+		breaches = append(breaches, fmt.Sprintf(
+			"drain loss: published %d, delivered %d (lost %d)",
+			r.DrainPublished, r.DrainDelivered, r.DrainPublished-r.DrainDelivered))
+	}
+
 	return breaches
 }
 
@@ -148,6 +196,18 @@ func (r Report) Format() string {
 	}
 	if r.GoroutineStart > 0 && !r.LeakEvaluated {
 		b.WriteString("  leak: informational only (run too short to hold the growth bars)\n")
+	}
+	if r.Kills > 0 {
+		fmt.Fprintf(&b, "  chaos: kills=%d recovery[p99=%s max=%s]\n",
+			r.Kills, ms(r.RecoveryP99), ms(r.RecoveryMax))
+	}
+	if r.Failovers > 0 {
+		fmt.Fprintf(&b, "  singleton: failovers=%d max=%s max_live=%d\n",
+			r.Failovers, ms(r.FailoverMax), r.MaxLiveInstances)
+	}
+	if r.DrainPublished > 0 {
+		fmt.Fprintf(&b, "  drain: published=%d delivered=%d lost=%d\n",
+			r.DrainPublished, r.DrainDelivered, r.DrainPublished-r.DrainDelivered)
 	}
 
 	if breaches := r.Breaches(); len(breaches) == 0 {
