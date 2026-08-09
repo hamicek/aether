@@ -34,10 +34,11 @@ remain before it is production-grade. They are listed here so the trade-offs are
 
 - **Long-running soak and chaos testing.** For high-reliability use (for example SCADA-style
   always-on deployments), a soak suite that runs for hours, kept separate from CI (`soak` build tag)
-  and run on demand via `scripts/soak.sh`. The core is in place: sustained call/cast load with a p99
-  and no-trend bar, zero loss on durable mailboxes, leak detection (goroutine, heap and thrall RSS
-  trend), and a structured report that fails on any breach. Still to add: repeated induced crashes
-  with deterministic recovery, singleton failover under churn, and graceful drain under load.
+  and run on demand via `scripts/soak.sh`. In place: sustained call/cast load with a p99 and no-trend
+  bar, zero loss on durable mailboxes, leak detection (goroutine, heap and thrall RSS trend), chaos
+  (`SIGKILL` of random thralls with a per-strategy recovery bar and lossless durable delivery through
+  the kills), singleton failover across killed lord nodes (a failover bar and a one-live-instance
+  fencing bar), graceful drain with no lost work, and a structured report that fails on any breach.
 
 ## Not on the roadmap (by design)
 
