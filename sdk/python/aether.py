@@ -60,6 +60,12 @@ def _sub_hb(name: str) -> str:
     return f"aether._lord.{name}.hb"
 
 
+def _sub_lord_ctl() -> str:
+    # The lord's inbound control channel (thrall -> lord), request/reply, for runtime
+    # spawn/stop. Unlike _sub_ctl, which is lord -> thrall.
+    return "aether._lord.ctl"
+
+
 def _stream(app: str, name: str) -> str:
     return f"aether_{app}_{name}"
 
@@ -72,6 +78,17 @@ def _decode(data: bytes) -> dict:
     return json.loads(data)
 
 
+_id_seq = 0
+
+
+def _next_id() -> str:
+    # A simple envelope id (wire-shape parity with Go/TS). nats-py pairs the reply via
+    # its own inbox, so this id is informational, not the correlation key.
+    global _id_seq
+    _id_seq += 1
+    return f"{int(time.time() * 1000):x}-{_id_seq:x}"
+
+
 # Handler shapes hold the GenServer semantics:
 #   handle_call: (payload, state, ctx) -> (reply, new_state)
 #   handle_cast: (payload, state, ctx) -> new_state
@@ -80,11 +97,53 @@ CastHandler = Callable[[Any, Any, "Ctx"], Any]
 
 
 @dataclass
+class SpawnSpec:
+    # Request to spawn a child at runtime. Mirrors internal/wire.SpawnSpec: the subset of
+    # a manifest thrall relevant to a dynamic child (always local scope, single instance).
+    name: str
+    cmd: str
+    restart: str = ""  # permanent | transient | temporary (default permanent)
+    durable: bool = False  # true -> casts go through JetStream
+
+    def _payload(self) -> dict:
+        # Omit empty optional fields for wire parity with the Go/TS json (omitempty).
+        p: dict = {"name": self.name, "cmd": self.cmd}
+        if self.restart:
+            p["restart"] = self.restart
+        if self.durable:
+            p["durable"] = self.durable
+        return p
+
+
+async def _lord_control(nc: Any, op: str, payload: Any, timeout: float) -> Any:
+    # Send a spawn/stop request on the lord's control channel; return the reply payload,
+    # or raise RuntimeError with the lord's refusal.
+    req = {"v": 1, "id": _next_id(), "kind": "ctl", "op": op, "payload": payload,
+           "ts": int(time.time() * 1000)}
+    msg = await nc.request(_sub_lord_ctl(), _encode(req), timeout=timeout)
+    reply = _decode(msg.data)
+    if reply.get("status") == "error":
+        err = reply.get("error") or {}
+        raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
+    return reply.get("payload")
+
+
+@dataclass
 class Ctx:
     # WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
     nats: Any
     name: str
     app: str
+
+    async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
+        # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
+        # The lord supervises it one_for_one, outside any group strategy. Returns its name.
+        reply = await _lord_control(self.nats, "spawn", spec._payload(), timeout)
+        return reply["name"]
+
+    async def stop_child(self, name: str, timeout: float = 5.0) -> None:
+        # Ask the lord to drain and stop a dynamic child started via start_child.
+        await _lord_control(self.nats, "stop", {"name": name}, timeout)
 
 
 @dataclass
