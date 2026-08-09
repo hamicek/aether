@@ -31,6 +31,17 @@ func goodReport() Report {
 		HeapEnd:        10 << 20,
 		ThrallRSSStart: map[string]int64{"probe": 12000},
 		ThrallRSSEnd:   map[string]int64{"probe": 12500},
+
+		Kills:       100,
+		RecoveryP99: 1 * time.Second,
+		RecoveryMax: 2 * time.Second,
+
+		Failovers:        10,
+		FailoverMax:      4 * time.Second,
+		MaxLiveInstances: 1,
+
+		DrainPublished: 3000,
+		DrainDelivered: 3000,
 	}
 }
 
@@ -109,9 +120,33 @@ func TestBreachesSkipsPhasesThatDidNotRun(t *testing.T) {
 	}
 }
 
+func TestBreachesChaosRecovery(t *testing.T) {
+	r := goodReport()
+	r.RecoveryMax = 4 * time.Second // over the 3s bar
+	assertSingleBreach(t, r, "chaos recovery")
+}
+
+func TestBreachesSingletonFailover(t *testing.T) {
+	r := goodReport()
+	r.FailoverMax = 6 * time.Second // over the 5s bar
+	assertSingleBreach(t, r, "singleton failover")
+}
+
+func TestBreachesSingletonFencing(t *testing.T) {
+	r := goodReport()
+	r.MaxLiveInstances = 2 // two live at once - split singleton
+	assertSingleBreach(t, r, "singleton fencing")
+}
+
+func TestBreachesDrainLoss(t *testing.T) {
+	r := goodReport()
+	r.DrainDelivered = 2997 // 3 lost across the drain
+	assertSingleBreach(t, r, "drain loss")
+}
+
 func TestFormatContainsSectionsAndVerdict(t *testing.T) {
 	out := goodReport().Format()
-	for _, want := range []string{"sustained load", "durable", "goroutines", "lord heap", "thrall probe RSS", "bars: all held"} {
+	for _, want := range []string{"sustained load", "durable", "goroutines", "lord heap", "thrall probe RSS", "chaos", "singleton", "drain", "bars: all held"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Format() missing %q\n%s", want, out)
 		}
