@@ -144,13 +144,43 @@ func (s *soakState) record(seq int) {
 // runSoakProbe runs the richer thrall through the real Go SDK. `getlat` is a cheap
 // call used only to measure request/reply latency; `seq` is an idempotent cast that
 // carries a sequence number; `stats` reports the counters for the no-loss check.
+// probe lifecycle event subjects: the soak probe announces its start and its
+// graceful stop, each carrying its PID, so the singleton test can track which
+// instances are live at any moment.
+const (
+	probeStartedSubject = "test.probe.started"
+	probeStoppedSubject = "test.probe.stopped"
+)
+
+type lifecycleEvent struct {
+	Name string `json:"name"`
+	PID  int    `json:"pid"`
+}
+
+func publishLifecycle(nc *nats.Conn, subject, name string) {
+	if nc == nil {
+		return
+	}
+	data, _ := json.Marshal(lifecycleEvent{Name: name, PID: os.Getpid()})
+	_ = nc.Publish(subject, data)
+	_ = nc.Flush()
+}
+
 func runSoakProbe() {
+	// Captured in Init and reused in Terminate (which gets no Ctx) to emit the stopped
+	// event on a graceful drain. A SIGKILL never runs Terminate, so no stopped event -
+	// the singleton test drops a killed PID from the live set itself.
+	var nc *nats.Conn
+	var name string
 	def := thrall.Def[*soakState]{
 		// Name empty -> taken from AETHER_NAME injected by the lord.
 		Init: func(ctx *thrall.Ctx) (*soakState, error) {
-			_ = ctx.NATS.Publish("test.probe.started", []byte(ctx.Name))
-			_ = ctx.NATS.Flush()
+			nc, name = ctx.NATS, ctx.Name
+			publishLifecycle(nc, probeStartedSubject, name)
 			return &soakState{ahead: make(map[int]bool)}, nil
+		},
+		Terminate: func(_ string, _ *soakState) {
+			publishLifecycle(nc, probeStoppedSubject, name)
 		},
 		HandleCall: map[string]thrall.CallFn[*soakState]{
 			"getlat": func(_ json.RawMessage, s *soakState, _ *thrall.Ctx) (any, *soakState, error) {
@@ -196,6 +226,62 @@ func soakManifest(t *testing.T, app string, specs ...ThrallSpec) *Manifest {
 		specs[i].Cmd = cmd
 	}
 	return &Manifest{App: app, Strategy: "one_for_one", Thralls: specs}
+}
+
+// subscribeLifecycle delivers decoded probe lifecycle events (started/stopped) on a
+// channel. Subscribe before starting the lord to catch the first started event.
+func subscribeLifecycle(t *testing.T, nc *nats.Conn, subject string) <-chan lifecycleEvent {
+	t.Helper()
+	ch := make(chan lifecycleEvent, 64)
+	if _, err := nc.Subscribe(subject, func(m *nats.Msg) {
+		var e lifecycleEvent
+		if json.Unmarshal(m.Data, &e) == nil {
+			select {
+			case ch <- e:
+			default:
+			}
+		}
+	}); err != nil {
+		t.Fatalf("subscribe %s: %v", subject, err)
+	}
+	_ = nc.Flush()
+	return ch
+}
+
+// nextLifecycle waits for the next lifecycle event or fails after timeout.
+func nextLifecycle(t *testing.T, ch <-chan lifecycleEvent, timeout time.Duration, desc string) lifecycleEvent {
+	t.Helper()
+	select {
+	case e := <-ch:
+		return e
+	case <-time.After(timeout):
+		t.Fatalf("timeout after %s waiting for %s", timeout, desc)
+		return lifecycleEvent{}
+	}
+}
+
+// TestSoakProbeLifecycle checks the probe emits started (with its PID) on boot and
+// stopped on a graceful drain - the signals the singleton failover test relies on.
+func TestSoakProbeLifecycle(t *testing.T) {
+	const app = "life"
+	eth := startEmbedded(t)
+	nc := eth.Conn()
+	started := subscribeLifecycle(t, nc, probeStartedSubject)
+	stopped := subscribeLifecycle(t, nc, probeStoppedSubject)
+
+	l := startLord(t, eth, soakManifest(t, app, spec("probe", "permanent", "local")))
+	waitReady(t, eth, "probe")
+
+	ev := nextLifecycle(t, started, 5*time.Second, "started event")
+	if ev.Name != "probe" || ev.PID <= 0 {
+		t.Fatalf("started event = %+v, want name=probe pid>0", ev)
+	}
+
+	l.Stop() // graceful drain -> Terminate -> stopped (Cleanup's second Stop is a no-op)
+	sev := nextLifecycle(t, stopped, 5*time.Second, "stopped event")
+	if sev.Name != "probe" || sev.PID != ev.PID {
+		t.Fatalf("stopped event = %+v, want name=probe pid=%d", sev, ev.PID)
+	}
 }
 
 type probeStats struct {
