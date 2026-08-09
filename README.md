@@ -32,7 +32,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Observability** | ✅ | KV registry (`name -> pid/status`), a lifecycle stream, the CLI `ps` / `events` |
-| **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go |
+| **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
 
@@ -110,6 +110,7 @@ restart_intensity = { max = 3, within_ms = 5000 }
 
 [nats]
 mode = "embedded"                        # | external (+ url = "nats://...")
+# store_dir = "./.aether-store"          # embedded only: persist the durable mailbox across restarts
 
 [[thrall]]
 name = "counter"
@@ -118,6 +119,22 @@ restart = "permanent"                    # | transient | temporary
 scope   = "local"                        # | singleton
 durable = false                          # true -> cast over JetStream
 ```
+
+## Durability
+
+`durable = true` means a cast is **not lost** if the thrall crashes before handling it - it does
+**not** mean the thrall's state is remembered (a restart runs a clean `init`, like OTP). How long the
+durable mailbox survives depends on where JetStream stores it:
+
+| Mode | Config | Survives a thrall crash | Survives a lord/process restart |
+|---|---|---|---|
+| embedded, ephemeral (default) | `mode="embedded"` | ✅ | ❌ (temp dir wiped on Stop) |
+| embedded, persistent | `mode="embedded"` + `store_dir` | ✅ | ✅ (same host, same dir) |
+| external, persistent | `mode="external"` | ✅ | ✅ (independent of the app host) |
+
+Use `store_dir` for a single-host deployment that must keep the mailbox across restarts (see
+`examples/counter/aether-durable-persistent.toml`); use external NATS when durability must be
+independent of the application host. Full model: [DESIGN.md §13](./DESIGN.md).
 
 ## Quickstart
 
@@ -147,8 +164,9 @@ cd examples/counter
 If `go` tries to download a different toolchain, prefix the build with `GOTOOLCHAIN=local`.
 
 Sample manifests in `examples/counter/`: `aether.toml` (polyglot TS/Py/Go),
-`aether-durable.toml`, `aether-external.toml`, `aether-singleton.toml`,
-`aether-one-for-all.toml`, `aether-rest-for-one.toml`, `aether-secure-external.toml`.
+`aether-durable.toml`, `aether-durable-persistent.toml`, `aether-external.toml`,
+`aether-singleton.toml`, `aether-one-for-all.toml`, `aether-rest-for-one.toml`,
+`aether-secure-external.toml`.
 
 ## Security
 
@@ -217,5 +235,5 @@ It ends with a structured report and a **non-zero exit on any bar breach**.
 
 The runtime has conscious gaps, tracked in [ROADMAP.md](./ROADMAP.md): liveness beyond heartbeats
 (`$SYS` events), full thrall-level fencing for orphaned singletons, `temporary` semantics inside
-group strategies, thrall state persistence (today durability covers the mailbox, not the state), and
-chaos/failover coverage on top of the soak suite for high-reliability use.
+group strategies, thrall state persistence (today durability covers the mailbox, not the state - see
+[Durability](#durability)), and chaos/failover coverage on top of the soak suite for high-reliability use.

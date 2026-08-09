@@ -17,8 +17,12 @@ import (
 type Config struct {
 	Mode string `toml:"mode"` // "embedded" | "external"
 	URL  string `toml:"url"`  // for external: "nats://a:4222,nats://b:4222"
-	TLS  TLS    `toml:"tls"`  // client-side transport security (external mode)
-	Auth Auth   `toml:"auth"` // client authentication (external mode)
+	// StoreDir is the JetStream storage directory for the embedded server. Empty
+	// (the default) uses an ephemeral temp dir removed on Stop; a fixed path keeps
+	// the durable mailbox across a lord/process restart. Ignored in external mode.
+	StoreDir string `toml:"store_dir"`
+	TLS      TLS    `toml:"tls"`  // client-side transport security (external mode)
+	Auth     Auth   `toml:"auth"` // client authentication (external mode)
 }
 
 // TLS configures client-side transport security for an external bus. CA is the path
@@ -52,18 +56,19 @@ func (c Config) clientOptions() ([]nats.Option, error) {
 
 // Ether holds the running bus and the system connection for the lord and registry.
 type Ether struct {
-	mode     string
-	srv      *natsserver.Server // embedded mode only
-	nc       *nats.Conn
-	url      string
-	storeDir string // JetStream storage (embedded); removed on Stop
+	mode      string
+	srv       *natsserver.Server // embedded mode only
+	nc        *nats.Conn
+	url       string
+	storeDir  string // JetStream storage (embedded)
+	ephemeral bool   // true -> storeDir is a temp dir we own and remove on Stop
 }
 
 // Start brings up an embedded NATS server (default), or connects to an external URL.
 func Start(ctx context.Context, cfg Config) (*Ether, error) {
 	switch cfg.Mode {
 	case "", "embedded":
-		return startEmbedded(ctx)
+		return startEmbedded(ctx, cfg)
 	case "external":
 		return startExternal(ctx, cfg)
 	default:
@@ -71,10 +76,35 @@ func Start(ctx context.Context, cfg Config) (*Ether, error) {
 	}
 }
 
-func startEmbedded(_ context.Context) (*Ether, error) {
-	storeDir, err := os.MkdirTemp("", "aether-js-")
+// resolveStoreDir returns the JetStream storage directory for the embedded server
+// and whether it is an ephemeral temp dir we own. A configured StoreDir is kept
+// across restarts (persistent durable mailbox); an empty one falls back to a temp
+// dir removed on Stop (the ephemeral default).
+func resolveStoreDir(cfg Config) (dir string, ephemeral bool, err error) {
+	if cfg.StoreDir != "" {
+		if err := os.MkdirAll(cfg.StoreDir, 0o755); err != nil {
+			return "", false, fmt.Errorf("store_dir %q: %w", cfg.StoreDir, err)
+		}
+		return cfg.StoreDir, false, nil
+	}
+	dir, err = os.MkdirTemp("", "aether-js-")
+	if err != nil {
+		return "", false, err
+	}
+	return dir, true, nil
+}
+
+func startEmbedded(_ context.Context, cfg Config) (*Ether, error) {
+	storeDir, ephemeral, err := resolveStoreDir(cfg)
 	if err != nil {
 		return nil, err
+	}
+	// cleanup removes the store dir only when we own it (ephemeral temp), so a
+	// failed start never deletes a user-supplied persistent directory.
+	cleanup := func() {
+		if ephemeral {
+			os.RemoveAll(storeDir)
+		}
 	}
 	opts := &natsserver.Options{
 		Host:      "127.0.0.1",
@@ -86,22 +116,22 @@ func startEmbedded(_ context.Context) (*Ether, error) {
 	}
 	srv, err := natsserver.NewServer(opts)
 	if err != nil {
-		os.RemoveAll(storeDir)
+		cleanup()
 		return nil, err
 	}
 	go srv.Start()
 	if !srv.ReadyForConnections(5 * time.Second) {
-		os.RemoveAll(storeDir)
+		cleanup()
 		return nil, fmt.Errorf("embedded NATS did not start in time")
 	}
 	url := srv.ClientURL()
 	nc, err := nats.Connect(url)
 	if err != nil {
 		srv.Shutdown()
-		os.RemoveAll(storeDir)
+		cleanup()
 		return nil, err
 	}
-	return &Ether{mode: "embedded", srv: srv, nc: nc, url: url, storeDir: storeDir}, nil
+	return &Ether{mode: "embedded", srv: srv, nc: nc, url: url, storeDir: storeDir, ephemeral: ephemeral}, nil
 }
 
 func startExternal(_ context.Context, cfg Config) (*Ether, error) {
@@ -128,7 +158,9 @@ func (e *Ether) Conn() *nats.Conn { return e.nc }
 // URL returns the bus address; injected into thralls as AETHER_NATS_URL.
 func (e *Ether) URL() string { return e.url }
 
-// Stop closes the connection and (in embedded mode) stops the server and removes storage.
+// Stop closes the connection and (in embedded mode) stops the server. An ephemeral
+// store dir is removed; a persistent one (configured store_dir) is kept so the
+// durable mailbox survives to the next start.
 func (e *Ether) Stop() {
 	if e.nc != nil {
 		_ = e.nc.Drain()
@@ -137,7 +169,7 @@ func (e *Ether) Stop() {
 		e.srv.Shutdown()
 		e.srv.WaitForShutdown()
 	}
-	if e.storeDir != "" {
+	if e.ephemeral && e.storeDir != "" {
 		os.RemoveAll(e.storeDir)
 	}
 }
