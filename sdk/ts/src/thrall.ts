@@ -2,7 +2,7 @@ import { AckPolicy, DeliverPolicy, type NatsConnection } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
-import { useConnection } from "./client";
+import { useConnection, startChild, stopChild, type SpawnSpec, type CallOpts } from "./client";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -24,6 +24,11 @@ export interface Ctx {
   nats: NatsConnection;
   name: string;
   app: string;
+  // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
+  // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
+  // outside any manifest group strategy.
+  startChild: (spec: SpawnSpec, opts?: CallOpts) => Promise<string>;
+  stopChild: (name: string, opts?: CallOpts) => Promise<void>;
 }
 
 export interface ThrallDef<S> {
@@ -46,7 +51,13 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const durable = process.env.AETHER_DURABLE === "1";
   const nc = await open(env);
   useConnection(nc); // so this thrall can call()/cast() other thralls
-  const ctx: Ctx = { nats: nc, name, app: env.app };
+  const ctx: Ctx = {
+    nats: nc,
+    name,
+    app: env.app,
+    startChild: (spec, opts) => startChild(nc, spec, opts),
+    stopChild: (childName, opts) => stopChild(nc, childName, opts),
+  };
 
   let state: S = await def.init(ctx);
 
