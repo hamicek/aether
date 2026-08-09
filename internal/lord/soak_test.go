@@ -52,18 +52,14 @@ const (
 	soakDurablePace    = 5 * time.Millisecond
 	soakDrainStall     = 20 // consecutive no-progress polls (~10s) that end the drain
 
-	// Leak sampling: how many samples to aim for over the run (bounding the interval),
-	// the warm-up fraction discarded before comparing, and the fraction of the retained
-	// samples averaged at each end to smooth GC sawtooth.
+	// Leak sampling: how many samples to aim for over the run (bounding the interval).
 	soakLeakSamples = 100
-	soakLeakWarmup  = 0.10
-	soakLeakEndFrac = 0.25
 	soakLeakMinIval = 1 * time.Second
 	soakLeakMaxIval = 60 * time.Second
-	// Minimum retained (post-warm-up) samples for the leak bars to be enforced. Below
-	// this the run is too short for warm-up to have settled, so the deltas are reported
-	// but not held to the bars - a cold-start ramp is not a leak. Real profiles produce
-	// far more; only very short ad-hoc duration overrides fall under it.
+	// Minimum samples in the settled (back-half) region for the leak bars to be
+	// enforced. Below this the run is too short to have reached a steady state, so the
+	// deltas are reported but not held to the bars - a working-set ramp is not a leak.
+	// Real profiles produce far more; only short ad-hoc duration overrides fall under it.
 	soakLeakMinEval = 20
 )
 
@@ -456,25 +452,24 @@ func samplerInterval(d time.Duration) time.Duration {
 	return iv
 }
 
-// fillLeak reduces the sample series to start/end resource figures on the report. It
-// discards a warm-up prefix, then averages the first and last soakLeakEndFrac of the
-// remaining samples so a single GC sawtooth does not skew the comparison.
+// fillLeak reduces the sample series to start/end resource figures on the report,
+// plateau-aware: it compares the two halves of the run's *back half*, where the
+// working set has settled. Comparing against the early run would count the initial
+// working-set ramp (the in-process NATS server warming up under load) as a leak,
+// while a genuine leak is still climbing in the back half and is caught here. Each
+// window is averaged to smooth GC sawtooth.
 func fillLeak(report *soak.Report, samples []leakSample) {
 	if len(samples) < 2 {
 		return
 	}
-	retained := samples[int(float64(len(samples))*soakLeakWarmup):]
-	if len(retained) < 2 {
-		retained = samples
+	backHalf := samples[len(samples)/2:]
+	report.LeakEvaluated = len(backHalf) >= soakLeakMinEval
+	mid := len(backHalf) / 2
+	if mid < 1 {
+		mid = 1
 	}
-	report.LeakEvaluated = len(retained) >= soakLeakMinEval
-	n := len(retained)
-	w := int(float64(n) * soakLeakEndFrac)
-	if w < 1 {
-		w = 1
-	}
-	start := retained[:w]
-	end := retained[n-w:]
+	start := backHalf[:mid]
+	end := backHalf[mid:]
 
 	report.GoroutineStart = meanInt(start, func(s leakSample) int { return s.goroutines })
 	report.GoroutineEnd = meanInt(end, func(s leakSample) int { return s.goroutines })
@@ -504,6 +499,48 @@ func meanUint64(samples []leakSample, pick func(leakSample) uint64) uint64 {
 		sum += pick(s)
 	}
 	return sum / uint64(len(samples))
+}
+
+// TestFillLeakPlateauAware asserts a heap that ramps over the first half and then
+// plateaus does not breach: the settled back half is flat.
+func TestFillLeakPlateauAware(t *testing.T) {
+	var samples []leakSample
+	for i := 0; i < 20; i++ { // ramp 100..119 MiB
+		samples = append(samples, leakSample{goroutines: 50, heapInUse: uint64(100+i) << 20, rss: map[string]int64{"p": 1000}})
+	}
+	for i := 0; i < 20; i++ { // plateau at 120 MiB
+		samples = append(samples, leakSample{goroutines: 50, heapInUse: uint64(120) << 20, rss: map[string]int64{"p": 1000}})
+	}
+	r := soak.Report{Bars: soak.DefaultBars()}
+	fillLeak(&r, samples)
+	if !r.LeakEvaluated {
+		t.Fatal("expected leak evaluated with 20 settled samples")
+	}
+	if b := r.Breaches(); len(b) != 0 {
+		t.Fatalf("a plateau must not breach, got %v", b)
+	}
+}
+
+// TestFillLeakCatchesLinearLeak asserts a heap still climbing in the back half breaches.
+func TestFillLeakCatchesLinearLeak(t *testing.T) {
+	var samples []leakSample
+	for i := 0; i < 40; i++ { // rises the whole run
+		samples = append(samples, leakSample{goroutines: 50, heapInUse: uint64(100+i*5) << 20, rss: map[string]int64{"p": 1000}})
+	}
+	r := soak.Report{Bars: soak.DefaultBars()}
+	fillLeak(&r, samples)
+	if !r.LeakEvaluated {
+		t.Fatal("expected leak evaluated")
+	}
+	found := false
+	for _, b := range r.Breaches() {
+		if strings.Contains(b, "heap") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a linear leak must breach the heap bar, got %v", r.Breaches())
+	}
 }
 
 // meanRSS averages each thrall's RSS across the samples.
