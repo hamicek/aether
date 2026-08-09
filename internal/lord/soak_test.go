@@ -498,29 +498,24 @@ func streamPending(nc *nats.Conn, app, name string) (int, bool) {
 }
 
 // waitStreamDrained waits for the durable stream to be fully consumed (0 pending),
-// returning the pending count left when it stops. Redelivery after a hard kill waits
-// out the consumer AckWait, so the timeout must be generous.
+// returning the pending count left if the timeout is hit. It is called after
+// publishing has stopped, so the backlog only shrinks - it just polls until zero
+// rather than giving up on a stall, which under load can fire while the consumer is
+// still catching up.
 func waitStreamDrained(nc *nats.Conn, app, name string, timeout time.Duration) int {
 	deadline := time.Now().Add(timeout)
-	last, stall := -1, 0
+	var pending int
 	for time.Now().Before(deadline) {
 		p, ok := streamPending(nc, app, name)
 		if ok {
 			if p == 0 {
 				return 0
 			}
-			if p == last {
-				if stall++; stall > soakDrainStall {
-					return p
-				}
-			} else {
-				stall, last = 0, p
-			}
+			pending = p
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	p, _ := streamPending(nc, app, name)
-	return p
+	return pending
 }
 
 // --- chaos ---
@@ -989,7 +984,7 @@ func TestSoakDrain(t *testing.T) {
 	// checked server-side (stream pending -> 0), not via the probe's counter, which
 	// resets on the drain restart.
 	waitReady(t, eth, "probe-dur")
-	pending := waitStreamDrained(nc, app, "probe-dur", 30*time.Second)
+	pending := waitStreamDrained(nc, app, "probe-dur", 90*time.Second)
 	report.DrainPublished = int(durStored)
 	report.DrainDelivered = int(durStored) - pending
 	if durAttempted != durStored {
