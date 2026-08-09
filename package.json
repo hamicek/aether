@@ -3,6 +3,7 @@
   "private": true,
   "workspaces": [
     "sdk/ts",
-    "examples/counter"
+    "examples/counter",
+    "examples/scada-spike"
   ]
 }

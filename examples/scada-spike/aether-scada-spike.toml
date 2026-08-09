@@ -1,0 +1,29 @@
+# SCADA spike (AE-014): the thinnest vertical - one TS driver feeding telemetry to one
+# coarse-grained Go site thrall that holds the whole site's process image in memory and
+# raises a threshold alarm. Throwaway spike to gauge whether aether is viable as an
+# Elixir replacement for a SCADA core.
+#
+# Build the site binary first:
+#   mise exec go@latest -- go build -o bin/site ./examples/scada-spike
+# Then run from examples/scada-spike/:
+#   ../../bin/aether up -f aether-scada-spike.toml
+#   ../../bin/aether call site snapshot     # read the process image
+#   ../../bin/aether events                 # watch alarms / lifecycle
+app = "scada"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "site"
+cmd  = "../../bin/site"
+restart = "permanent"
+scope   = "local"
+
+[[thrall]]
+name = "driver"
+cmd  = "bun run ./driver.ts"
+restart = "permanent"
+scope   = "local"
