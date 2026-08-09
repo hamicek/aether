@@ -109,11 +109,15 @@ func init() { soakDispatch = runSoakDispatch }
 // is a soak-probe re-exec it runs the probe and reports true so the caller returns
 // without entering the test runner.
 func runSoakDispatch() bool {
-	if os.Getenv("AETHER_SOAK_PROBE") != "1" {
-		return false
+	switch {
+	case os.Getenv("AETHER_SOAK_PROBE") == "1":
+		runSoakProbe()
+		return true
+	case os.Getenv("AETHER_LORD_HOST") == "1":
+		runLordHost()
+		return true
 	}
-	runSoakProbe()
-	return true
+	return false
 }
 
 // soakState is the soak probe's state for idempotent (at-least-once) cast counting.
