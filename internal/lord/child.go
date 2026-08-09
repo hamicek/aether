@@ -29,7 +29,9 @@ type child struct {
 	caPath   string // TLS CA path injected to the thrall (empty = none)
 	nkeySeed string // nkey seed path injected to the thrall (empty = none)
 
-	live atomic.Bool // the process is currently running
+	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
+	live    atomic.Bool // the process is currently running
+	retired atomic.Bool // stopped on purpose (StopChild) -> must not be restarted
 
 	mu     sync.Mutex
 	cmd    *exec.Cmd
