@@ -75,7 +75,7 @@ process groups), and an embedded NATS with no external dependency.
 **What Go + embedded NATS does NOT solve automatically** (these are semantic decisions, not language ones):
 - **Dual-liveness** - the broker knows "the PID is alive" + "the subscription is active" (2 of 3
   signals for free), but "the handler is actually responsive" still needs an application heartbeat.
-- **Mailbox durability** - core vs JetStream (see §11).
+- **Mailbox durability** - core vs JetStream, and what survives a restart (see §13).
 - **Idempotence / state persistence** - language-neutral contracts.
 
 The elegance is real, but it is elegance of the *mechanism*, not the *semantics*.
