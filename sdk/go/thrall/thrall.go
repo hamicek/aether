@@ -47,6 +47,24 @@ var sharedConn *nats.Conn // for Call/Cast from this thrall
 
 // Start connects the thrall to the ether and runs its lifecycle. It blocks until a
 // controlled shutdown (ctl:drain), then calls Terminate and disconnects.
+// connectOptions builds the NATS connect options for a thrall: its name plus, when
+// the lord injected them, the TLS CA and nkey seed for a secured bus. Absent env =
+// no option, so a thrall on an unsecured bus connects exactly as before.
+func connectOptions(name string) ([]nats.Option, error) {
+	opts := []nats.Option{nats.Name(name)}
+	if ca := os.Getenv("AETHER_NATS_CA"); ca != "" {
+		opts = append(opts, nats.RootCAs(ca))
+	}
+	if seed := os.Getenv("AETHER_NATS_NKEY_SEED"); seed != "" {
+		opt, err := nats.NkeyOptionFromSeed(seed)
+		if err != nil {
+			return nil, fmt.Errorf("nkey seed %q: %w", seed, err)
+		}
+		opts = append(opts, opt)
+	}
+	return opts, nil
+}
+
 func Start[S any](def Def[S]) error {
 	url := os.Getenv("AETHER_NATS_URL")
 	app := os.Getenv("AETHER_APP")
@@ -60,7 +78,11 @@ func Start[S any](def Def[S]) error {
 	}
 	durable := os.Getenv("AETHER_DURABLE") == "1"
 
-	nc, err := nats.Connect(url, nats.Name(name))
+	opts, err := connectOptions(name)
+	if err != nil {
+		return err
+	}
+	nc, err := nats.Connect(url, opts...)
 	if err != nil {
 		return err
 	}
