@@ -148,7 +148,34 @@ If `go` tries to download a different toolchain, prefix the build with `GOTOOLCH
 
 Sample manifests in `examples/counter/`: `aether.toml` (polyglot TS/Py/Go),
 `aether-durable.toml`, `aether-external.toml`, `aether-singleton.toml`,
-`aether-one-for-all.toml`, `aether-rest-for-one.toml`.
+`aether-one-for-all.toml`, `aether-rest-for-one.toml`, `aether-secure-external.toml`.
+
+## Security
+
+By default the embedded server binds `127.0.0.1` and is meant for a trusted single host. To run
+against a **networked / shared NATS**, connect over TLS with nkey authentication: add a `[nats.tls]`
+CA and a `[nats.auth]` nkey seed to the manifest. The lord authenticates with them and injects the
+**paths** (not the secrets) into every thrall, so all three SDKs connect the same secured way.
+
+```toml
+[nats]
+mode = "external"
+url  = "tls://nats.internal:4222"
+
+[nats.tls]
+ca = "/etc/aether/ca.pem"          # verify the server (server TLS)
+
+[nats.auth]
+nkey_seed = "/etc/aether/user.nk"  # authenticate (nkey)
+```
+
+Secrets are passed by **file path**, never as an env value - the nkey seed never appears in `ps` or
+the process environment. A full example is `examples/counter/aether-secure-external.toml`.
+
+Scope: this secures the client side against an already-secured external NATS (server TLS + nkeys).
+Securing the embedded server itself (for a networked `0.0.0.0` bind), mutual TLS, JWT/account
+isolation, token auth and the operator CLI against a secured cluster are follow-ups tracked in
+[ROADMAP.md](./ROADMAP.md).
 
 ## Reliability testing (soak)
 
