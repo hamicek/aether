@@ -46,9 +46,10 @@ type Report struct {
 	Distinct   int
 	Duplicates int
 
-	// Leak deltas. LeakEvaluated is false when the run was too short for a valid
-	// warm-up: the deltas are then reported for information but not held to the growth
-	// bars (a cold-start ramp is not a leak).
+	// Leak deltas over the run's settled (back-half) region, so a working-set ramp is
+	// not mistaken for a leak. LeakEvaluated is false when the run was too short to
+	// reach a steady state: the deltas are then reported for information but not held
+	// to the growth bars.
 	LeakEvaluated  bool
 	GoroutineStart int
 	GoroutineEnd   int
