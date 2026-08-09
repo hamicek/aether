@@ -47,5 +47,6 @@ test("subject convention matches the contract", () => {
   expect(subjects.stream(app, name)).toBe("aether_demo_counter");
   expect(subjects.ctl(name)).toBe("aether._lord.counter.ctl");
   expect(subjects.hb(name)).toBe("aether._lord.counter.hb");
+  expect(subjects.lordCtl()).toBe("aether._lord.ctl");
   expect(subjects.events).toBe("aether._lord.events");
 });

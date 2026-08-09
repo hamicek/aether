@@ -53,3 +53,43 @@ export function cast(target: string, op: string, payload: unknown = {}): void {
   const e: Envelope = { v: 1, id: nextId(), kind: "cast", to: target, op, payload, ts: Date.now() };
   conn().publish(subjects.cast(app(), target), encode(e));
 }
+
+// SpawnSpec = the request to spawn a child at runtime. Mirrors internal/wire.SpawnSpec:
+// the subset of a manifest thrall relevant to a dynamic child (always local, single).
+export interface SpawnSpec {
+  name: string;
+  cmd: string;
+  restart?: string; // permanent | transient | temporary (default permanent)
+  durable?: boolean; // true -> casts go through JetStream
+}
+
+// lordControl sends a spawn/stop request on the lord's control channel and returns the
+// reply payload, or throws with the lord's refusal. `nc` is passed explicitly so this
+// works both from a thrall's ctx and from a standalone client connection.
+async function lordControl(
+  nc: NatsConnection,
+  op: "spawn" | "stop",
+  payload: unknown,
+  opts: CallOpts = {},
+): Promise<unknown> {
+  const req: Envelope = { v: 1, id: nextId(), kind: "ctl", op, payload, ts: Date.now() };
+  const msg = await nc.request(subjects.lordCtl(), encode(req), { timeout: opts.timeoutMs ?? 5000 });
+  const reply = decode(msg.data);
+  if (reply.status === "error") {
+    throw new Error(`${reply.error?.type}: ${reply.error?.message}`);
+  }
+  return reply.payload;
+}
+
+// startChild asks the lord to spawn a new thrall at runtime - a child not in the
+// manifest (a driver per connection, a worker per request). The lord supervises it
+// one_for_one, outside any group strategy. Returns the child's name.
+export async function startChild(nc: NatsConnection, spec: SpawnSpec, opts: CallOpts = {}): Promise<string> {
+  const reply = (await lordControl(nc, "spawn", spec, opts)) as { name: string };
+  return reply.name;
+}
+
+// stopChild asks the lord to drain and stop a dynamic child started via startChild.
+export async function stopChild(nc: NatsConnection, name: string, opts: CallOpts = {}): Promise<void> {
+  await lordControl(nc, "stop", { name }, opts);
+}
