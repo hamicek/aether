@@ -400,7 +400,50 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
 
 ---
 
-## 13. Deliberately deferred (gaps in the design)
+## 13. Durability model (what survives what)
+
+Durability is easy to over-read. Two things must be kept apart:
+
+- **Mailbox durability** - a durable thrall's *casts* are captured in a JetStream
+  stream (`durable = true`), so a message survives even if the thrall crashes before
+  handling it. This is a property of the **queue**.
+- **State durability** - the thrall's in-memory state. aether does **not** persist it:
+  like OTP, a restart runs a clean `init` and the previous state is gone. (Thrall
+  state persistence is deferred - see §14.)
+
+So "durable" always means *the message is not lost*, never *the state is remembered*.
+
+How long the mailbox survives then depends on **where JetStream stores it**, which is
+a deployment choice, not a thrall concern:
+
+| Mode | Storage | Thrall crash | Lord/process restart | Machine restart |
+|---|---|---|---|---|
+| **embedded, ephemeral** (default) | temp dir, removed on Stop | survives | **lost** | lost |
+| **embedded, persistent** (`store_dir`) | fixed dir, file storage | survives | **survives** | survives (same host, same dir) |
+| **external, persistent** | external NATS, file storage | survives | survives | survives (independent of the app host) |
+
+```toml
+# embedded, persistent: keep the durable mailbox across restarts, no external NATS
+[nats]
+mode = "embedded"
+store_dir = "./.aether-store"
+```
+
+The default stays ephemeral: with no `store_dir`, the embedded server uses a temp dir
+wiped on Stop - convenient for "download and run", but the durable mailbox does not
+outlive the process. Set `store_dir` when a single-host deployment must keep the
+mailbox across restarts. Choose **external NATS** when durability must be independent
+of the application host (HA, storage managed separately, several lords sharing one
+bus). `store_dir` is an embedded-only setting; in external mode the storage lives on
+the cluster and the field is ignored.
+
+No-loss claims about restarts are measured **server-side** via the stream backlog
+(`StreamInfo().State.Msgs`), not via an in-process counter - the latter resets on
+restart, and a WorkQueue stream drops messages once they are delivered and acked.
+
+---
+
+## 14. Deliberately deferred (gaps in the design)
 
 See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
 
@@ -424,7 +467,7 @@ listed as future work in earlier drafts, are now implemented (see §6, §12 and 
 
 ---
 
-## 14. Summary of decisions
+## 15. Summary of decisions
 
 | Area | Decision |
 |---|---|

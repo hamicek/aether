@@ -19,6 +19,8 @@ remain before it is production-grade. They are listed here so the trade-offs are
 - **Thrall state persistence.** Durability today covers the *mailbox* (casts survive a crash via
   JetStream), not the *state*. Like OTP, a restarted thrall runs a clean `init` and loses its
   in-memory state. Optional state snapshots/restore are future work.
+  The mailbox itself now survives a restart when JetStream storage is persistent - an embedded
+  `store_dir` or external NATS; see the durability model in [DESIGN.md §13](./DESIGN.md).
 
 ## Observability and operations
 
