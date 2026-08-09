@@ -24,15 +24,18 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/ether"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/soak"
 	"github.com/hamicek/aether/internal/wire"
@@ -61,6 +64,11 @@ const (
 	// deltas are reported but not held to the bars - a working-set ramp is not a leak.
 	// Real profiles produce far more; only short ad-hoc duration overrides fall under it.
 	soakLeakMinEval = 20
+
+	// Chaos: the random interval between SIGKILLs. Kept comfortably above the recovery
+	// time so a target is back up before it can be picked again.
+	chaosMinGap = 2 * time.Second
+	chaosMaxGap = 4 * time.Second
 )
 
 var (
@@ -469,6 +477,88 @@ func drainDurable(nc *nats.Conn, app, name string, stored int) durableResult {
 	return res
 }
 
+// --- chaos ---
+
+// chaosResult is the outcome of the chaos phase: how many thralls were SIGKILLed and
+// how long each took to recover (kill -> ready again with a new PID).
+type chaosResult struct {
+	kills      int
+	recoveries []time.Duration
+}
+
+func (c chaosResult) p99() time.Duration { return durationPercentile(c.recoveries, 99) }
+func (c chaosResult) max() time.Duration { return durationPercentile(c.recoveries, 100) }
+
+// durationPercentile returns the p-th percentile (nearest-rank) of the durations. The
+// set is small (one per kill), so a plain sort is fine.
+func durationPercentile(ds []time.Duration, p int) time.Duration {
+	if len(ds) == 0 {
+		return 0
+	}
+	sorted := append([]time.Duration(nil), ds...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	rank := (p*len(sorted) + 99) / 100 // ceil(p/100 * n)
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > len(sorted) {
+		rank = len(sorted)
+	}
+	return sorted[rank-1]
+}
+
+// runChaos SIGKILLs a random ready thrall from names at seeded random intervals and
+// measures how long the supervisor takes to bring it back (a new PID, ready in the
+// registry). It is a real hard crash, distinct from the probe's cooperative exit.
+func runChaos(ctx context.Context, eth *ether.Ether, app string, names []string, seed int64, minGap, maxGap time.Duration) chaosResult {
+	reg, err := registry.Open(eth.Conn())
+	if err != nil {
+		return chaosResult{}
+	}
+	rng := rand.New(rand.NewSource(seed))
+	var res chaosResult
+	for {
+		gap := minGap
+		if maxGap > minGap {
+			gap += time.Duration(rng.Int63n(int64(maxGap - minGap)))
+		}
+		select {
+		case <-ctx.Done():
+			return res
+		case <-time.After(gap):
+		}
+
+		name := names[rng.Intn(len(names))]
+		e, ok, err := reg.Get(name)
+		if err != nil || !ok || e.Status != "ready" || e.PID <= 0 {
+			continue // not currently ready (maybe still recovering) - skip this round
+		}
+		oldPID := e.PID
+		killAt := time.Now()
+		if err := syscall.Kill(oldPID, syscall.SIGKILL); err != nil {
+			continue
+		}
+		if rec, ok := waitRecovery(reg, name, oldPID, killAt, 15*time.Second); ok {
+			res.kills++
+			res.recoveries = append(res.recoveries, rec)
+		}
+	}
+}
+
+// waitRecovery waits until name is ready again with a PID different from the killed
+// one, returning the elapsed time since the kill.
+func waitRecovery(reg *registry.Registry, name string, oldPID int, killAt time.Time, timeout time.Duration) (time.Duration, bool) {
+	deadline := killAt.Add(timeout)
+	for time.Now().Before(deadline) {
+		e, ok, err := reg.Get(name)
+		if err == nil && ok && e.Status == "ready" && e.PID > 0 && e.PID != oldPID {
+			return time.Since(killAt), true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return 0, false
+}
+
 // --- leak detection ---
 
 // leakSample is one point-in-time snapshot of the runtime's resource use: the in-
@@ -800,4 +890,75 @@ func finishSoak(t *testing.T, report soak.Report, reportPath string) {
 	if b := report.Breaches(); len(b) > 0 {
 		t.Fatalf("soak bars breached:\n  %s", strings.Join(b, "\n  "))
 	}
+}
+
+// TestSoakChaos runs the resilience scenario: under call + durable load, random
+// thralls are SIGKILLed and must recover within the bar, while durable delivery stays
+// lossless through the kills. Call load runs purely as background traffic here - its
+// latency is expected to spike during a thrall's downtime, so it is not a bar.
+func TestSoakChaos(t *testing.T) {
+	cfg := resolveSoakConfig(t)
+	t.Logf("soak chaos: profile=%s duration=%s seed=%d", cfg.profile, cfg.duration, cfg.seed)
+
+	const app = "chaos"
+	durSpec := spec("probe-dur", "permanent", "local")
+	durSpec.Durable = true
+	// A zero RestartIntensity disables the give-up cap, so repeated kills keep restarting.
+	m := soakManifest(t, app, spec("probe", "permanent", "local"), durSpec)
+
+	eth := startEmbedded(t)
+	startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+	waitReady(t, eth, "probe-dur")
+
+	report := soak.Report{Profile: cfg.profile, Duration: cfg.duration, Seed: cfg.seed, Bars: soak.DefaultBars()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
+	var durStored, durAttempted int64
+	var chaos chaosResult
+	var samples []leakSample
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { // background traffic (latency not a bar under chaos)
+		defer wg.Done()
+		runLoad(ctx, nc, app, []string{"probe"}, cfg.loadWorkers, cfg.seed, soak.NewLatencyRecorder(cfg.duration, soakTrendWindows))
+	}()
+	go func() {
+		defer wg.Done()
+		durStored, durAttempted = runDurable(ctx, nc, app, "probe-dur", soakDurableWorkers, soakDurablePace)
+	}()
+	go func() {
+		defer wg.Done()
+		// Chaos targets the load thrall: recovery is measured on it, and durable delivery
+		// must stay lossless through the surrounding kills. Hard-killing the durable thrall
+		// itself surfaces a separate JetStream-consumer recovery weakness (its backlog is
+		// not re-consumed after SIGKILL) - filed as a follow-up, out of this bar.
+		chaos = runChaos(ctx, eth, app, []string{"probe"}, cfg.seed, chaosMinGap, chaosMaxGap)
+	}()
+	go func() { // nil pids: sample the in-process lord's goroutines/heap only (thrall PIDs churn under chaos)
+		defer wg.Done()
+		samples = runLeakSampler(ctx, nil, samplerInterval(cfg.duration))
+	}()
+	wg.Wait()
+	cancel()
+
+	// Durable must be lossless through the chaos.
+	dur := drainDurable(nc, app, "probe-dur", int(durStored))
+	report.Published = dur.stored
+	report.Distinct = dur.distinct
+	report.Duplicates = dur.duplicates
+	if durAttempted != durStored {
+		t.Logf("durable: %d/%d publishes failed (gaps, excluded from no-loss)", durAttempted-durStored, durAttempted)
+	}
+
+	report.Kills = chaos.kills
+	report.RecoveryP99 = chaos.p99()
+	report.RecoveryMax = chaos.max()
+	fillLeak(&report, samples)
+
+	if chaos.kills == 0 {
+		t.Fatalf("chaos induced no kills - run too short or targets never ready")
+	}
+	finishSoak(t, report, cfg.reportPath)
 }
