@@ -261,6 +261,8 @@ restart_intensity = { max = 3, within_ms = 5000 }
 [nats]
 mode = "embedded"                        # embedded | external
 # url = "nats://node-a:4222,nats://node-b:4222"   # for mode = "external"
+# [nats.tls]  ca = "/etc/aether/ca.pem"           # server TLS (verify the server) - external
+# [nats.auth] nkey_seed = "/etc/aether/user.nk"   # nkey authentication - external
 
 [[thrall]]
 name = "counter"
@@ -411,9 +413,14 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via
   JetStream), not the *state*. Like OTP, a restart runs a clean `init` and loses in-memory state.
 - **Monitoring / observability and long-running soak testing** - for high-reliability use.
+- **Stronger and server-side security** - the client side authenticates to an *external* bus with
+  nkeys over server TLS (manifest `[nats.tls]` / `[nats.auth]`; the lord injects the credential
+  paths into thralls). Still open: securing the embedded server itself for a networked bind, mutual
+  TLS, JWT/account isolation, token auth, the operator CLI against a secured cluster, and key rotation.
 
-Note: JetStream durable mailboxes and cluster-wide singletons, listed as future work in earlier
-drafts, are now implemented (see §6, §12 and the manifest `durable` / `scope` fields).
+Note: JetStream durable mailboxes, cluster-wide singletons, and client-side nkey auth over server TLS,
+listed as future work in earlier drafts, are now implemented (see §6, §12 and the manifest `durable` /
+`scope` / `[nats.tls]` / `[nats.auth]` fields).
 
 ---
 

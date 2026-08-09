@@ -1,0 +1,37 @@
+# The polyglot stack against a SECURED external NATS: nkey auth over server TLS.
+# Only the [nats] section differs from aether-external.toml. The lord authenticates
+# with the CA + nkey seed and injects their PATHS into every thrall, so all three
+# SDKs (TS/Py/Go) connect the same secured way. The secrets live in those files,
+# never inline and never in the process environment.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "tls://nats.internal:4222"
+
+[nats.tls]
+ca = "/etc/aether/ca.pem"          # verifies the server's certificate (server TLS)
+
+[nats.auth]
+nkey_seed = "/etc/aether/user.nk"  # the client's nkey seed (authentication)
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-py"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+
+[[thrall]]
+name = "gateway"
+cmd  = "bun run ./gateway.ts"
+restart = "transient"
