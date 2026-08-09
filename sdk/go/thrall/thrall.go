@@ -278,6 +278,47 @@ func Cast(target, op string, payload any) error {
 	return sharedConn.Publish(wire.Cast(os.Getenv("AETHER_APP"), target), mustJSON(e))
 }
 
+// StartChild asks the lord to spawn a new thrall at runtime - a child not in the
+// manifest (a driver per connection, a worker per request). The lord supervises it
+// one_for_one, like a manifest child but outside any group strategy. Returns the
+// child's name once its process has been started.
+func (c *Ctx) StartChild(spec wire.SpawnSpec, timeout time.Duration) (string, error) {
+	reply, err := c.lordControl(wire.OpSpawn, spec, timeout)
+	if err != nil {
+		return "", err
+	}
+	var out wire.SpawnReply
+	if err := json.Unmarshal(reply, &out); err != nil {
+		return "", err
+	}
+	return out.Name, nil
+}
+
+// StopChild asks the lord to drain and stop a dynamic child started via StartChild.
+// Static (manifest) children cannot be stopped this way.
+func (c *Ctx) StopChild(name string, timeout time.Duration) error {
+	_, err := c.lordControl(wire.OpStop, wire.StopSpec{Name: name}, timeout)
+	return err
+}
+
+// lordControl sends a spawn/stop request on the lord's control channel and returns the
+// reply payload, or an error carrying the lord's refusal.
+func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCtl, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+	msg, err := c.NATS.Request(wire.LordCtl(), mustJSON(req), timeout)
+	if err != nil {
+		return nil, err
+	}
+	var reply wire.Envelope
+	if err := json.Unmarshal(msg.Data, &reply); err != nil {
+		return nil, err
+	}
+	if reply.Status == "error" {
+		return nil, fmt.Errorf("%s: %s", reply.Error.Type, reply.Error.Message)
+	}
+	return reply.Payload, nil
+}
+
 func heartbeat(nc *nats.Conn, name string, stop <-chan struct{}) {
 	tick := func() {
 		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli()}

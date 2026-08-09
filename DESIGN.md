@@ -388,15 +388,23 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
   (compare-and-swap on the revision) - whoever acquires the key `singleton/<name>` may start; the
   others wait and take over on failure (failover). That is why the manifest has
   `scope = "local" | "singleton"`.
+- **DynamicSupervisor** - starting and stopping thralls at runtime, not only from the manifest, via
+  `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go SDK). Needed for "a driver per connection", a
+  worker per request, or a workflow instance. The SDK sends a `ctl` request to the lord's inbound
+  control channel (`aether._lord.ctl`); the lord spawns the OS process and supervises it exactly like
+  a manifest child - restart per policy, registry status, lifecycle events. **Model:** a dynamic child
+  is **local scope, supervised one_for_one, and outside any manifest group strategy** - its crash does
+  not pull a `one_for_all` group and vice versa. **Boundary:** a dynamic child's topology lives only in
+  the lord's memory - the manifest is the source of truth on lord restart, so dynamic children do not
+  survive a lord restart (persisting the dynamic topology is deliberately out of scope). `Stop` drains
+  dynamic children alongside static ones.
 
 **Own blocks, planned (not yet implemented), in priority order:**
-1. **DynamicSupervisor** - starting thralls at runtime (`ctx.startChild({...})`), not only from the
-   manifest. Needed for "spawn a worker per request".
-2. **Task / work queue** -> cast + a **JetStream work-queue stream** + a queue group. A durable task
+1. **Task / work queue** -> cast + a **JetStream work-queue stream** + a queue group. A durable task
    queue, at-least-once, a worker pool, retry.
-3. **gen_statem (state machine)** - a thrall variant with explicit states and transitions
+2. **gen_statem (state machine)** - a thrall variant with explicit states and transitions
    (`new -> paid -> shipped`).
-4. **RateLimiter / Circuit breaker** - shared state in KV.
+3. **RateLimiter / Circuit breaker** - shared state in KV.
 
 ---
 
