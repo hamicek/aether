@@ -1,0 +1,25 @@
+# Persistent durable mailbox demo: same as aether-durable.toml, but the embedded
+# JetStream storage lives in a fixed store_dir instead of a temp dir wiped on Stop.
+# The durable mailbox therefore survives a restart of `aether up` (or the machine):
+# stop the runtime, restart it against the same store_dir, and casts stored while a
+# durable thrall was down are still delivered. Without an external NATS.
+#
+# Try it: `aether up -f aether-durable-persistent.toml`, cast to counter-dur while
+# it is down, stop, start again - the stored casts arrive after restart.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+store_dir = "./.aether-store"   # persistent JetStream storage (kept across restarts)
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "temporary"
+
+[[thrall]]
+name = "counter-dur"
+cmd  = "bun run ./counter.ts tag-durable"
+restart = "temporary"
+durable = true

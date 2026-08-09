@@ -3,6 +3,9 @@
 *.test
 .aether-endpoint
 
+# Persistent embedded JetStream store (runtime data from store_dir demos)
+.aether-store/
+
 # Node / Bun
 node_modules/
 dist/
