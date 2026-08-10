@@ -17,8 +17,13 @@ const (
 
 // Envelope is the uniform JSON envelope for all communication in the ether.
 type Envelope struct {
-	V       int             `json:"v"`
-	ID      string          `json:"id,omitempty"`
+	V  int    `json:"v"`
+	ID string `json:"id,omitempty"`
+	// Trace is a correlation id propagated across hops (call/cast chains), distinct from ID
+	// which correlates a single request with its reply. It lets one logical operation be
+	// followed across process boundaries; an edge (CLI, first message) mints it, handlers pass
+	// it to downstream calls, and it is logged so a trace and a log line can be joined.
+	Trace   string          `json:"trace,omitempty"`
 	Kind    Kind            `json:"kind"`
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`

@@ -15,6 +15,7 @@ const parse = (buf: Uint8Array) => JSON.parse(new TextDecoder().decode(buf));
 // with the golden fixture.
 const cases: Record<string, Envelope> = {
   call: { v: 1, id: "c-1", kind: "call", to: "counter", op: "get", payload: { n: 1 }, ts: 1700000000000 },
+  call_traced: { v: 1, id: "c-9", trace: "t-abc", kind: "call", to: "counter", op: "get", payload: { n: 1 }, ts: 1700000000004 },
   cast: { v: 1, id: "c-2", kind: "cast", to: "counter", op: "inc", payload: {}, ts: 1700000000001 },
   reply_ok: { v: 1, id: "c-1", kind: "reply", status: "ok", payload: { value: 42 } },
   reply_error: {

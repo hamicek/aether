@@ -6,6 +6,9 @@ export type Kind = "call" | "cast" | "reply" | "hb" | "ctl";
 export interface Envelope {
   v: 1;
   id?: string;
+  // Correlation id propagated across hops (call/cast chains), distinct from id (which
+  // correlates a request with its reply). Mirrors wire.Envelope.Trace on the Go side.
+  trace?: string;
   kind: Kind;
   from?: string;
   to?: string;

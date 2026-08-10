@@ -23,6 +23,8 @@ func goldenCases() map[string]Envelope {
 	return map[string]Envelope{
 		"call": {V: 1, ID: "c-1", Kind: KindCall, To: "counter", Op: "get",
 			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000000},
+		"call_traced": {V: 1, ID: "c-9", Trace: "t-abc", Kind: KindCall, To: "counter", Op: "get",
+			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000004},
 		"cast": {V: 1, ID: "c-2", Kind: KindCast, To: "counter", Op: "inc",
 			Payload: json.RawMessage(`{}`), TS: 1700000000001},
 		"reply_ok": {V: 1, ID: "c-1", Kind: KindReply, Status: "ok",
@@ -108,7 +110,7 @@ func TestOmitEmpty(t *testing.T) {
 	if got := string(data); got != `{"v":1,"kind":"call"}` {
 		t.Errorf("minimal envelope: got %s, want {\"v\":1,\"kind\":\"call\"}", got)
 	}
-	for _, field := range []string{"id", "from", "to", "op", "payload", "status", "error", "ts"} {
+	for _, field := range []string{"id", "trace", "from", "to", "op", "payload", "status", "error", "ts"} {
 		if strings.Contains(string(data), `"`+field+`"`) {
 			t.Errorf("minimal envelope unexpectedly contains %q: %s", field, data)
 		}
