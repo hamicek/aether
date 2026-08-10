@@ -4,6 +4,7 @@ import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
 import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
 import { newLogger, type Logger } from "./log";
+import { appendEvent } from "./rebuild";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -33,6 +34,9 @@ export interface Ctx {
   trace: string;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
   cast: (target: string, op: string, payload?: unknown) => void;
+  // append persists a domain event to this thrall's event log (opt-in event_log). Rebuild
+  // replays it in init. Mirrors the Go SDK ctx.Append.
+  append: (event: unknown) => Promise<void>;
   // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
   // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
   // outside any manifest group strategy.
@@ -69,6 +73,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     trace: "",
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    append: (event) => appendEvent(nc, env.app, name, event),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
