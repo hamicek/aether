@@ -36,6 +36,12 @@ type ThrallSpec struct {
 	Scope    string `toml:"scope"`    // local | singleton
 	Replicas int    `toml:"replicas"` // >1 -> queue group (a pool of workers)
 	Durable  bool   `toml:"durable"`  // true -> casts go through JetStream (survive a crash)
+
+	// EventLog opts the thrall into an event-sourcing log: a separate RETENTION stream the
+	// thrall appends events to and replays in init to rebuild state. Independent of Durable.
+	EventLog         bool  `toml:"event_log"`
+	EventLogMaxMsgs  int64 `toml:"event_log_max_msgs"`   // 0 = unbounded (message count)
+	EventLogMaxAgeMs int64 `toml:"event_log_max_age_ms"` // 0 = unbounded (age)
 }
 
 // LoadManifest reads, parses and fills in the defaults of aether.toml.

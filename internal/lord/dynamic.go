@@ -88,9 +88,9 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 	l.children = append(l.children, ch)
 	l.childrenMu.Unlock()
 
-	if err := l.provisionStream(ch); err != nil {
+	if err := l.provisionChildStreams(ch); err != nil {
 		l.removeChild(ch)
-		return "", fmt.Errorf("provision durable mailbox: %w", err)
+		return "", fmt.Errorf("provision streams: %w", err)
 	}
 	if err := l.startChild(ch); err != nil {
 		l.removeChild(ch)
