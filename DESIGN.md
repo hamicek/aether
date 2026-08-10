@@ -451,6 +451,42 @@ restart, and a WorkQueue stream drops messages once they are delivered and acked
 
 ---
 
+## 13b. Observability (telemetry about the runtime itself)
+
+The runtime reports on itself so a remote operator can diagnose "why isn't it working" without
+being at the machine. Three layers, deliberately built to stay thin across the polyglot SDKs.
+
+**Structured logs.** The lord and all three SDKs log through a small structured logger
+(Go `log/slog`; minimal JSON/text loggers in TS and Python) configured from `AETHER_LOG_LEVEL`
+and `AETHER_LOG_FORMAT`. The lord injects those into every thrall's environment, so the tree logs
+consistently; records carry `component` / `app` / `name` to separate lord and thrall lines on a
+shared stream.
+
+**Metrics via a lord-side Prometheus endpoint.** The lord is the single aggregation point (it
+already holds the registry, the lifecycle stream, restart windows and JetStream), so it exposes a
+Prometheus `/metrics` HTTP endpoint (opt-in, `[observability] metrics_addr`). Crucially the SDKs do
+**not** each carry a metrics client - that would fight the thin-SDK principle. Instead a thrall
+attaches its self-metrics (mailbox depth, last handler latency, processed count) to the heartbeat
+it already sends every 2s, and the lord folds them in alongside its own supervision counters
+(thrall count by status, restarts, gave-ups, heartbeat misses) and the durable backlog it reads
+from JetStream (`num_pending`). The endpoint is the lord's own HTTP server, independent of the
+NATS mode, so it works the same embedded or external - satisfying "not built on the embedded
+privilege" (see §9/§10) without depending on `$SYS`. The metric model is exporter-agnostic, leaving
+room for an OTLP bridge later.
+
+**Heartbeat miss detection.** Heartbeats previously only flipped a thrall to `ready`. A reaper now
+tracks last-seen per thrall and marks one `stale` (with an event and a counter) when it stops
+heart-beating - catching a hung process the OS-level exit watcher cannot see. A resumed heartbeat
+flips it back to `ready`.
+
+**Tracing.** The envelope gained a `trace` correlation id, distinct from `id` (which pairs a
+request with its reply). An edge mints it; `ctx.Call` / `ctx.Cast` propagate the current message's
+trace to downstream messages; it is logged, so a log line and a trace can be joined and one logical
+operation followed across process boundaries. Full OTLP tracing is deferred - this is log-based
+correlation, which the exporter-agnostic model can later bridge.
+
+---
+
 ## 14. Deliberately deferred (gaps in the design)
 
 See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
@@ -485,6 +521,6 @@ listed as future work in earlier drafts, are now implemented (see §6, §12 and 
 | Topology | a declarative `aether.toml`; behavior in code |
 | Lord | variant A (dumb) + a heartbeat/drain contract ready for B |
 | Mailbox | core NATS ephemeral, with an optional JetStream durable mailbox (`durable = true`) |
-| Observability | the KV registry + the `aether._lord.events` lifecycle stream; `$SYS` events planned |
+| Observability | structured logs + a Prometheus `/metrics` endpoint + heartbeat miss detection + `trace` propagation (§14); `$SYS` liveness still planned |
 | NATS features | do NOT hide them from thralls - `ctx.nats` is freely available |
 | Multi-node | a local lord; singletons via a KV CAS lock |

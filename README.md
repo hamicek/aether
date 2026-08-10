@@ -31,7 +31,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Messaging** | ✅ | `call` (sync request/reply), `cast` (fire-and-forget), a serialized mailbox |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
-| **Observability** | ✅ | KV registry (`name -> pid/status`), a lifecycle stream, the CLI `ps` / `events` |
+| **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
@@ -49,6 +49,7 @@ internal/
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
   singleton/          distributed lock over KV (Create/CAS + TTL failover)
+  obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
 sdk/ts/               @hamicek/aether (Bun/TS): defThrall, start, call, cast
@@ -136,6 +137,52 @@ durable mailbox survives depends on where JetStream stores it:
 Use `store_dir` for a single-host deployment that must keep the mailbox across restarts (see
 `examples/counter/aether-durable-persistent.toml`); use external NATS when durability must be
 independent of the application host. Full model: [DESIGN.md §13](./DESIGN.md).
+
+## Observability
+
+The runtime reports on itself so a remote deployment can answer "why isn't it working" without
+guessing. Three layers, all configured through the manifest and environment:
+
+**Structured logs.** The lord and all three SDKs log as machine-parseable records with levels,
+tagged with `component` / `app` / `name` so lord and thrall lines are tellable apart on a shared
+stream. Configured by environment, and the lord injects the same config into every thrall so the
+whole tree logs consistently:
+
+```bash
+AETHER_LOG_LEVEL=debug   # debug | info | warn | error  (default info)
+AETHER_LOG_FORMAT=json   # json | text                  (default text, for dev)
+```
+
+**Metrics.** Enable the Prometheus endpoint in the manifest (off by default):
+
+```toml
+[observability]
+metrics_addr = "127.0.0.1:7391"   # empty / omitted = disabled
+```
+
+Then scrape `http://127.0.0.1:7391/metrics`. The endpoint is the lord's own HTTP server, so it
+works the same embedded or external. Exposed series:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `aether_up` | gauge | 1 while the lord is running |
+| `aether_thralls{status}` | gauge | thralls by current status (`starting`/`ready`/`down`/`stale`) |
+| `aether_restarts_total{name}` | counter | restarts per thrall |
+| `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded) |
+| `aether_heartbeat_misses_total{name}` | counter | detected heartbeat outages |
+| `aether_mailbox_depth{name}` | gauge | messages a thrall currently holds (self-reported) |
+| `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
+| `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
+| `aether_durable_backlog{name}` | gauge | pending casts in a durable thrall's stream (JetStream `num_pending`) |
+
+Thralls report their own mailbox metrics on the heartbeat they already send every 2s; the lord
+aggregates them plus its own supervision counters. A thrall that stops heart-beating is marked
+`stale` and counted (`aether_heartbeat_misses_total`) even though its process is still alive.
+
+**Tracing.** The envelope carries a `trace` correlation id propagated across `call`/`cast` hops:
+an edge (the CLI, or the first message) mints it, `ctx.Call` / `ctx.Cast` pass it downstream, and
+it appears in the logs - so one logical operation can be followed across processes. See
+`examples/tracing/` for a runnable two-thrall demo.
 
 ## Quickstart
 
