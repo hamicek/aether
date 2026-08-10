@@ -3,7 +3,7 @@ package lord
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/nats-io/nats.go"
 
@@ -96,7 +96,7 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 		l.removeChild(ch)
 		return "", fmt.Errorf("start: %w", err)
 	}
-	log.Printf("[lord] dynamically spawned thrall %q", spec.Name)
+	l.log.Info("dynamically spawned thrall", slog.String("name", spec.Name))
 	return spec.Name, nil
 }
 
@@ -128,7 +128,7 @@ func (l *Lord) stopChild(name string) error {
 	target.requestDrain(l.ether.Conn(), defaultGrace)
 	l.setStatus(name, 0, "down")
 	l.emit("stopped", name, 0)
-	log.Printf("[lord] dynamically stopped thrall %q", name)
+	l.log.Info("dynamically stopped thrall", slog.String("name", name))
 	return nil
 }
 

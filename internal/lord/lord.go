@@ -8,7 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
@@ -43,6 +44,7 @@ type Lord struct {
 	locks    *singleton.Manager
 	children []*child
 	id       string
+	log      *slog.Logger
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
@@ -78,6 +80,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		reg:        reg,
 		locks:      locks,
 		id:         fmt.Sprintf("%s-%d", host, os.Getpid()),
+		log:        obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
 		exits:      make(chan exit, len(m.Thralls)+8),
 		procCtx:    procCtx,
 		procCancel: procCancel,
@@ -160,7 +163,7 @@ func (l *Lord) provisionStream(ch *child) error {
 	}); err != nil {
 		return err
 	}
-	log.Printf("[lord] durable mailbox: stream %q for subject %q", stream, subject)
+	l.log.Info("durable mailbox provisioned", slog.String("stream", stream), slog.String("subject", subject))
 	return nil
 }
 
@@ -172,7 +175,7 @@ func (l *Lord) startChild(ch *child) error {
 	}
 	pid := ch.pid()
 	l.setStatus(ch.spec.Name, pid, "starting")
-	log.Printf("[lord] starting thrall %q (pid=%d, restart=%s)", ch.spec.Name, pid, ch.spec.Restart)
+	l.log.Info("starting thrall", slog.String("name", ch.spec.Name), slog.Int("pid", pid), slog.String("restart", ch.spec.Restart))
 	l.emit("spawned", ch.spec.Name, pid)
 	go l.watch(ch, gen)
 	return nil
@@ -203,7 +206,7 @@ func (l *Lord) supervisorLoop() {
 			continue
 		}
 		l.setStatus(ev.ch.spec.Name, 0, "down")
-		log.Printf("[lord] thrall %q exited (abnormal=%v)", ev.ch.spec.Name, ev.abnormal)
+		l.logExit(ev.ch.spec.Name, ev.abnormal)
 		l.emit("down", ev.ch.spec.Name, 0)
 		l.handleCrash(ev.ch, ev.abnormal)
 	}
@@ -220,7 +223,7 @@ func (l *Lord) handleCrash(ch *child, abnormal bool) {
 	}
 	switch action {
 	case DontRestart:
-		log.Printf("[lord] thrall %q is not restarted (policy=%s)", ch.spec.Name, ch.spec.Restart)
+		l.log.Info("thrall not restarted", slog.String("name", ch.spec.Name), slog.String("policy", ch.spec.Restart))
 	case RestartOne:
 		l.restartOne(ch)
 	case RestartAll:
@@ -238,10 +241,10 @@ func (l *Lord) restartOne(ch *child) {
 	if l.backoff() {
 		return
 	}
-	log.Printf("[lord] restarting thrall %q", ch.spec.Name)
+	l.log.Warn("restarting thrall", slog.String("name", ch.spec.Name))
 	l.emit("restarting", ch.spec.Name, 0)
 	if err := l.startChild(ch); err != nil {
-		log.Printf("[lord] restart of %q failed: %v", ch.spec.Name, err)
+		l.log.Error("restart failed", slog.String("name", ch.spec.Name), slog.Any("err", err))
 	}
 }
 
@@ -256,7 +259,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 	for i, ch := range group {
 		names[i] = ch.spec.Name
 	}
-	log.Printf("[lord] %s: crash of %q -> restarting group [%s]", strategy, crashed.spec.Name, strings.Join(names, " "))
+	l.log.Warn("group restart", slog.String("strategy", strategy), slog.String("crashed", crashed.spec.Name), slog.String("group", strings.Join(names, " ")))
 	l.emit("group_restart", crashed.spec.Name, 0)
 
 	nc := l.ether.Conn()
@@ -266,7 +269,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 		if ch == crashed || !ch.running() {
 			continue
 		}
-		log.Printf("[lord] %s: stopping sibling %q", strategy, ch.spec.Name)
+		l.log.Info("stopping sibling", slog.String("strategy", strategy), slog.String("name", ch.spec.Name))
 		ch.requestDrain(nc, defaultGrace) // blocks until done; its exit event will then be stale
 	}
 
@@ -277,7 +280,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 	// 2) restart the whole group in order
 	for _, ch := range group {
 		if err := l.startChild(ch); err != nil {
-			log.Printf("[lord] restart of %q failed: %v", ch.spec.Name, err)
+			l.log.Error("restart failed", slog.String("name", ch.spec.Name), slog.Any("err", err))
 		}
 	}
 }
@@ -287,7 +290,7 @@ func (l *Lord) overIntensity(ch *child) bool {
 	window := time.Duration(l.manifest.RestartIntensity.WithinMs) * time.Millisecond
 	if max := l.manifest.RestartIntensity.Max; max > 0 && window > 0 {
 		if n := ch.restartsWithin(window); n > max {
-			log.Printf("[lord] thrall %q exceeded restart-intensity (%d starts / %s) - giving up", ch.spec.Name, n, window)
+			l.log.Error("restart-intensity exceeded - giving up", slog.String("name", ch.spec.Name), slog.Int("starts", n), slog.Duration("within", window))
 			l.emit("gave_up", ch.spec.Name, 0)
 			return true
 		}
@@ -335,7 +338,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		lock, ok, err := l.locks.TryAcquire(name, l.id)
 		if err != nil {
-			log.Printf("[lord] singleton %q: lock error: %v", name, err)
+			l.log.Error("singleton lock error", slog.String("name", name), slog.Any("err", err))
 			if l.sleep(singletonRetry) {
 				return
 			}
@@ -343,7 +346,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		if !ok {
 			if !waiting {
-				log.Printf("[lord] singleton %q: lock held by another lord - waiting", name)
+				l.log.Info("singleton lock held by another lord - waiting", slog.String("name", name))
 				waiting = true
 			}
 			if l.sleep(singletonRetry) {
@@ -352,14 +355,14 @@ func (l *Lord) manageSingleton(ch *child) {
 			continue
 		}
 		waiting = false
-		log.Printf("[lord] singleton %q: lock ACQUIRED (%s) - starting", name, l.id)
+		l.log.Info("singleton lock acquired - starting", slog.String("name", name), slog.String("lord", l.id))
 		l.emit("lock_acquired", name, 0)
 
 		renewStop := make(chan struct{})
 		go l.renewLoop(ch, lock, renewStop)
 
 		if _, err := ch.spawn(l.procCtx); err != nil {
-			log.Printf("[lord] singleton %q: spawn failed: %v", name, err)
+			l.log.Error("singleton spawn failed", slog.String("name", name), slog.Any("err", err))
 			close(renewStop)
 			_ = lock.Release()
 			if l.sleep(restartBackoff) {
@@ -369,7 +372,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		pid := ch.pid()
 		l.setStatus(name, pid, "starting")
-		log.Printf("[lord] starting thrall %q (pid=%d, singleton)", name, pid)
+		l.log.Info("starting thrall", slog.String("name", name), slog.Int("pid", pid), slog.String("scope", "singleton"))
 		l.emit("spawned", name, pid)
 
 		abnormal := ch.wait()
@@ -379,14 +382,14 @@ func (l *Lord) manageSingleton(ch *child) {
 		l.mu.Lock()
 		l.ready[name] = false
 		l.mu.Unlock()
-		log.Printf("[lord] singleton %q: process exited (abnormal=%v), lock released", name, abnormal)
+		l.logExit(name, abnormal)
 		l.emit("lock_released", name, 0)
 
 		if l.stopping() {
 			return
 		}
 		if decide(ch.spec.Restart, l.manifest.Strategy, abnormal) == DontRestart {
-			log.Printf("[lord] singleton %q is not restarted (policy=%s)", name, ch.spec.Restart)
+			l.log.Info("singleton not restarted", slog.String("name", name), slog.String("policy", ch.spec.Restart))
 			return
 		}
 		if l.sleep(restartBackoff) {
@@ -404,7 +407,7 @@ func (l *Lord) renewLoop(ch *child, lock *singleton.Lock, stop <-chan struct{}) 
 			return
 		case <-t.C:
 			if err := lock.Renew(); err != nil {
-				log.Printf("[lord] singleton %q: lock LOST (%v) - terminating local instance", ch.spec.Name, err)
+				l.log.Warn("singleton lock lost - terminating local instance", slog.String("name", ch.spec.Name), slog.Any("err", err))
 				ch.kill()
 				return
 			}
@@ -430,7 +433,7 @@ func (l *Lord) onHeartbeat(name string) {
 	l.ready[name] = true
 	l.mu.Unlock()
 	if first {
-		log.Printf("[lord] thrall %q is ready (on the bus)", name)
+		l.log.Info("thrall ready (on the bus)", slog.String("name", name), slog.Int("pid", pid))
 		l.emit("ready", name, pid)
 	}
 }
@@ -478,8 +481,18 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 	if err := l.reg.Set(name, registry.Entry{
 		PID: pid, Node: l.id, Status: status, UpdatedMs: time.Now().UnixMilli(),
 	}); err != nil {
-		log.Printf("[lord] registry Set(%q) failed: %v", name, err)
+		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))
 	}
+}
+
+// logExit records a thrall's process exit at a level reflecting its nature: an abnormal
+// exit (non-zero / signalled) is a warning, a clean exit is informational.
+func (l *Lord) logExit(name string, abnormal bool) {
+	if abnormal {
+		l.log.Warn("thrall exited", slog.String("name", name), slog.Bool("abnormal", true))
+		return
+	}
+	l.log.Info("thrall exited", slog.String("name", name), slog.Bool("abnormal", false))
 }
 
 func (l *Lord) emit(event, name string, pid int) {
