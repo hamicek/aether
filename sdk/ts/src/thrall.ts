@@ -3,6 +3,7 @@ import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
 import { useConnection, startChild, stopChild, type SpawnSpec, type CallOpts } from "./client";
+import { newLogger, type Logger } from "./log";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -24,6 +25,9 @@ export interface Ctx {
   nats: NatsConnection;
   name: string;
   app: string;
+  // Structured logger pre-tagged with app and name, configured from the logging env the
+  // lord injected - handlers should log through it.
+  log: Logger;
   // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
   // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
   // outside any manifest group strategy.
@@ -51,10 +55,12 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const durable = process.env.AETHER_DURABLE === "1";
   const nc = await open(env);
   useConnection(nc); // so this thrall can call()/cast() other thralls
+  const log = newLogger({ component: "thrall", app: env.app, name });
   const ctx: Ctx = {
     nats: nc,
     name,
     app: env.app,
+    log,
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
@@ -92,7 +98,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
       try {
         state = await handler(e.payload, state, ctx);
       } catch (err) {
-        console.error(`[${name}] cast ${e.op} failed:`, err);
+        log.error("cast handler failed", { op: e.op, err: String(err) });
       }
     });
 

@@ -4,3 +4,5 @@ export { call, cast, useConnection, startChild, stopChild } from "./client";
 export type { CallOpts, SpawnSpec } from "./client";
 export type { Envelope, Kind, WireError } from "./envelope";
 export { subjects } from "./subjects";
+export { newLogger, levelFromEnv } from "./log";
+export type { Logger, LogLevel, Fields } from "./log";
