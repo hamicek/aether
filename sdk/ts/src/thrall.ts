@@ -175,7 +175,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
 }
 
 // subscribeData: a single wildcard subscription (call/cast/info) for a non-durable thrall.
-function subscribeData(
+export function subscribeData(
   nc: NatsConnection,
   app: string,
   name: string,
@@ -194,7 +194,7 @@ function subscribeData(
 }
 
 // subscribeVerb: a core subscription on one specific subject.
-function subscribeVerb(
+export function subscribeVerb(
   nc: NatsConnection,
   subject: string,
   handle: (e: Envelope, msg: { respond: (d: Uint8Array) => void }) => void,
@@ -210,7 +210,7 @@ function subscribeVerb(
 // consumeDurableCast: reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
-async function consumeDurableCast(
+export async function consumeDurableCast(
   nc: NatsConnection,
   app: string,
   name: string,
@@ -238,11 +238,11 @@ async function consumeDurableCast(
   }
 }
 
-function okReply(req: Envelope, payload: unknown): Envelope {
+export function okReply(req: Envelope, payload: unknown): Envelope {
   return { v: 1, id: req.id, kind: "reply", status: "ok", payload };
 }
 
-function errReply(req: Envelope, type: string, message: string): Envelope {
+export function errReply(req: Envelope, type: string, message: string): Envelope {
   return {
     v: 1,
     id: req.id,
@@ -252,7 +252,7 @@ function errReply(req: Envelope, type: string, message: string): Envelope {
   };
 }
 
-function startHeartbeat(nc: NatsConnection, name: string, snapshot: () => unknown): void {
+export function startHeartbeat(nc: NatsConnection, name: string, snapshot: () => unknown): void {
   const tick = () => {
     const hb: Envelope = { v: 1, kind: "hb", to: name, payload: snapshot(), ts: Date.now() };
     nc.publish(subjects.hb(name), encode(hb));

@@ -518,6 +518,7 @@ listed as future work in earlier drafts, are now implemented (see §6, §12 and 
 | Runtime | a Go binary, embedded NATS (default) or an external cluster (config switch) |
 | Wire format | a JSON envelope, `kind` + `op` dispatch |
 | SDK home base | TS/Bun (`@hamicek/aether`); plus Python and Go |
+| SDK behaviours | GenServer thrall (`Def`/`Start`) and a state-machine thrall (`FSM`/`StartFSM`, a `gen_statem` analogue: states, guards, state timeouts) - both on the same serialized mailbox; the FSM stays domain-neutral, application automata build on top |
 | Topology | a declarative `aether.toml`; behavior in code |
 | Lord | variant A (dumb) + a heartbeat/drain contract ready for B |
 | Mailbox | core NATS ephemeral, with an optional JetStream durable mailbox (`durable = true`) |

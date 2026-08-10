@@ -6,3 +6,5 @@ export type { Envelope, Kind, WireError } from "./envelope";
 export { subjects } from "./subjects";
 export { newLogger, levelFromEnv } from "./log";
 export type { Logger, LogLevel, Fields } from "./log";
+export { defFSM, startFSM } from "./fsm";
+export type { FSMDef, State, Reaction, Outcome, Event, StateTimeout } from "./fsm";
