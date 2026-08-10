@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -24,11 +25,12 @@ const (
 
 // child = a single running thrall process supervised by the lord.
 type child struct {
-	spec     ThrallSpec
-	natsURL  string
-	app      string
-	caPath   string // TLS CA path injected to the thrall (empty = none)
-	nkeySeed string // nkey seed path injected to the thrall (empty = none)
+	spec         ThrallSpec
+	natsURL      string
+	app          string
+	caPath       string // TLS CA path injected to the thrall (empty = none)
+	nkeySeed     string // nkey seed path injected to the thrall (empty = none)
+	hbIntervalMs int    // heartbeat interval (ms) injected so the thrall beats at the configured rate
 
 	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
 	live    atomic.Bool // the process is currently running
@@ -64,6 +66,12 @@ func (c *child) env() []string {
 		if v := os.Getenv(key); v != "" {
 			env = append(env, key+"="+v)
 		}
+	}
+	// Appended last, so the manifest-configured interval is authoritative: it overrides any
+	// AETHER_HEARTBEAT_INTERVAL_MS inherited from the lord's own environment (last value wins),
+	// keeping the thrall's beat and the lord's reaper threshold derived from the same source.
+	if c.hbIntervalMs > 0 {
+		env = append(env, obs.EnvHeartbeatIntervalMs+"="+strconv.Itoa(c.hbIntervalMs))
 	}
 	return env
 }

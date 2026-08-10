@@ -511,7 +511,12 @@ room for an OTLP bridge later.
 **Heartbeat miss detection.** Heartbeats previously only flipped a thrall to `ready`. A reaper now
 tracks last-seen per thrall and marks one `stale` (with an event and a counter) when it stops
 heart-beating - catching a hung process the OS-level exit watcher cannot see. A resumed heartbeat
-flips it back to `ready`.
+flips it back to `ready`. The interval and the miss threshold are configurable (`[liveness]`): the
+lord injects the interval into the thralls and derives its reaper threshold from the same value,
+so a deployment can tighten detection without the two drifting. (Faster connection-loss detection
+via NATS `$SYS` events is deferred - it earns its keep only in a networked topology, and requires
+system-account access; the per-site model, where thralls connect to a local embedded NATS, is
+already well covered by the exit watcher plus this reaper.)
 
 **Tracing.** The envelope gained a `trace` correlation id, distinct from `id` (which pairs a
 request with its reply). An edge mints it; `ctx.Call` / `ctx.Cast` propagate the current message's

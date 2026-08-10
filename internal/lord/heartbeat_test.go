@@ -4,11 +4,39 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/hamicek/aether/internal/registry"
+	"github.com/hamicek/aether/internal/wire"
 )
+
+// TestConfiguredHeartbeatIntervalPropagates proves the whole chain end to end: a manifest
+// [liveness] interval reaches the thrall (via env injection) and the thrall beats at that faster
+// rate - so a tightened config really does speed up detection.
+func TestConfiguredHeartbeatIntervalPropagates(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "hbcfg", "one_for_one", spec("fast", "permanent", "local"))
+	m.Liveness = Liveness{HeartbeatIntervalMs: 200, StaleAfterMisses: 3}
+	startLord(t, eth, m)
+	waitReady(t, eth, "fast")
+
+	var count int32
+	sub, err := eth.Conn().Subscribe(wire.Heartbeat("fast"), func(*nats.Msg) { atomic.AddInt32(&count, 1) })
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+
+	time.Sleep(1200 * time.Millisecond)
+	// At 200ms the thrall beats ~6x in 1.2s; the default 2s would give ~0-1.
+	if n := atomic.LoadInt32(&count); n < 3 {
+		t.Errorf("heartbeats in ~1.2s = %d, want >= 3 (200ms interval - config not propagated to the thrall?)", n)
+	}
+}
 
 // metricValue extracts the value of a single exposition line by its `name{labels}` prefix.
 func metricValue(t *testing.T, exposition, seriesPrefix string) (float64, bool) {
