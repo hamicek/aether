@@ -88,6 +88,33 @@ func TestLabelValueEscaping(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesSeries(t *testing.T) {
+	m := NewMetrics()
+	m.Gauge("aether_mailbox_depth", "depth")
+	m.Set("aether_mailbox_depth", map[string]string{"name": "a"}, 3)
+	m.Set("aether_mailbox_depth", map[string]string{"name": "b"}, 4)
+
+	m.Delete("aether_mailbox_depth", map[string]string{"name": "a"})
+	out := render(t, m)
+	if strings.Contains(out, `name="a"`) {
+		t.Errorf("deleted series still present:\n%s", out)
+	}
+	if !strings.Contains(out, `aether_mailbox_depth{name="b"} 4`) {
+		t.Errorf("unrelated series dropped:\n%s", out)
+	}
+	// The metric stays registered (TYPE line remains) even with no series left for that label.
+	m.Delete("aether_mailbox_depth", map[string]string{"name": "b"})
+	if out := render(t, m); !strings.Contains(out, "# TYPE aether_mailbox_depth gauge") {
+		t.Errorf("metric registration dropped after deleting all series:\n%s", out)
+	}
+}
+
+func TestDeleteUnknownSeriesIsNoop(t *testing.T) {
+	m := NewMetrics()
+	m.Counter("c", "c")
+	m.Delete("c", map[string]string{"name": "nope"}) // must not panic
+}
+
 func TestFloatValueFormatting(t *testing.T) {
 	m := NewMetrics()
 	m.Gauge("aether_mailbox_latency_ms", "latency")

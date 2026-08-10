@@ -101,9 +101,12 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   });
 
   // handleCall/handleCast over the serialized mailbox (shared by the core and durable branches).
-  const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> =>
-    serialize(async () => {
-      const start = beginJob();
+  // beginJob runs at enqueue time (before the serialized job), so mailbox_depth counts messages
+  // waiting in the promise chain - matching the Go/Python SDKs, where begin() runs before the
+  // mailbox lock.
+  const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
+    const start = beginJob();
+    return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
       log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
@@ -123,10 +126,11 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         endJob(start);
       }
     });
+  };
 
-  const onCast = (e: Envelope): Promise<void> =>
-    serialize(async () => {
-      const start = beginJob();
+  const onCast = (e: Envelope): Promise<void> => {
+    const start = beginJob();
+    return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
       log.debug("handling cast", { op: e.op, trace: ctx.trace });
       try {
@@ -141,6 +145,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         endJob(start);
       }
     });
+  };
 
   if (durable) {
     // Durable thrall: call/info over core (synchronous), cast via JetStream (survives a crash).

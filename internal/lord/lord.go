@@ -608,6 +608,18 @@ func (l *Lord) emit(event, name string, pid int) {
 	_ = l.ether.Conn().Publish(wire.Events, data)
 }
 
+// forgetThrall drops all per-thrall observability state for a stopped thrall - the heartbeat
+// maps and the per-name metric series - so a long-lived lord with dynamic spawn/stop churn does
+// not accumulate stale entries.
+func (l *Lord) forgetThrall(name string) {
+	l.mu.Lock()
+	delete(l.ready, name)
+	delete(l.stale, name)
+	delete(l.lastSeen, name)
+	l.mu.Unlock()
+	l.metrics.forget(name)
+}
+
 func (l *Lord) childByName(name string) *child {
 	l.childrenMu.RLock()
 	defer l.childrenMu.RUnlock()

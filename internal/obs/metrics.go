@@ -90,6 +90,15 @@ func (m *Metrics) Set(name string, labels map[string]string, value float64) {
 	m.at(name, labels).value = value
 }
 
+// Delete removes the series identified by name+labels (the metric itself stays registered).
+// Unknown series are ignored. Used to drop a stopped thrall's per-name series so they do not
+// linger in the exposition with a frozen value.
+func (m *Metrics) Delete(name string, labels map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.series, seriesKey(name, labels))
+}
+
 // at returns the series for name+labels, creating it at zero if absent. Caller holds mu.
 func (m *Metrics) at(name string, labels map[string]string) *series {
 	key := seriesKey(name, labels)

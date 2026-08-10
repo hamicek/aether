@@ -2,7 +2,9 @@ package lord
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -29,6 +31,14 @@ const (
 // carries one series per status so a status that drops to zero still reports 0 (rather than
 // vanishing, which a scraper would read as "no data").
 var knownStatuses = []string{"starting", "ready", "down", "stale"}
+
+// perThrallMetrics are the metrics carrying a {name=...} label. When a dynamic thrall is
+// stopped its series in these are deleted, so a long-lived lord with spawn/stop churn does not
+// accumulate frozen series (memory and scrape-cardinality growth).
+var perThrallMetrics = []string{
+	metricRestarts, metricGaveUp, metricHeartbeatMiss,
+	metricMailboxDepth, metricMailboxLat, metricProcessed, metricDurableBacklog,
+}
 
 // lordMetrics owns the runtime metric registry and the derived per-status gauge. It tracks
 // each thrall's last status so the gauge can be recomputed on every change.
@@ -65,12 +75,18 @@ func (lm *lordMetrics) setStatus(name, status string) {
 	lm.recompute()
 }
 
-// forget drops a thrall from the status tracking (a dynamic child that was stopped).
+// forget drops a stopped thrall from the status tracking and deletes its per-name series, so
+// nothing lingers in the exposition after the thrall is gone.
 func (lm *lordMetrics) forget(name string) {
 	lm.mu.Lock()
-	defer lm.mu.Unlock()
 	delete(lm.status, name)
 	lm.recompute()
+	lm.mu.Unlock()
+
+	labels := map[string]string{"name": name}
+	for _, mname := range perThrallMetrics {
+		lm.reg.Delete(mname, labels)
+	}
 }
 
 // recompute sets the thralls gauge to the current per-status counts. Caller holds mu.
@@ -169,17 +185,23 @@ func (l *Lord) metricsHandler() http.Handler {
 }
 
 // startMetricsServer starts the Prometheus /metrics endpoint when an address is configured.
-// The endpoint is the lord's own HTTP server, independent of the NATS mode, so it works the
-// same embedded or external. It is shut down on Stop via stopMetricsServer.
+// The listener is bound synchronously so a misconfigured or occupied metrics_addr fails the
+// lord's start loudly, rather than silently disabling metrics from a detached goroutine. The
+// endpoint is the lord's own HTTP server, independent of the NATS mode, so it works the same
+// embedded or external. It is shut down on Stop via stopMetricsServer.
 func (l *Lord) startMetricsServer(addr string) error {
 	if addr == "" {
 		return nil
 	}
-	srv := &http.Server{Addr: addr, Handler: l.metricsHandler(), ReadHeaderTimeout: 5 * time.Second}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("metrics endpoint %q: %w", addr, err)
+	}
+	srv := &http.Server{Handler: l.metricsHandler(), ReadHeaderTimeout: 5 * time.Second}
 	l.httpSrv = srv
 	go func() {
 		l.log.Info("metrics endpoint listening", slog.String("addr", addr), slog.String("path", "/metrics"))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			l.log.Error("metrics endpoint failed", slog.Any("err", err))
 		}
 	}()

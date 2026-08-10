@@ -128,7 +128,7 @@ func (l *Lord) stopChild(name string) error {
 	target.requestDrain(l.ether.Conn(), defaultGrace)
 	l.setStatus(name, 0, "down")
 	l.emit("stopped", name, 0)
-	l.metrics.forget(name)
+	l.forgetThrall(name)
 	l.log.Info("dynamically stopped thrall", slog.String("name", name))
 	return nil
 }
