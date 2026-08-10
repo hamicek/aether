@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -45,6 +46,8 @@ type Lord struct {
 	children []*child
 	id       string
 	log      *slog.Logger
+	metrics  *lordMetrics
+	httpSrv  *http.Server
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
@@ -81,6 +84,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		locks:      locks,
 		id:         fmt.Sprintf("%s-%d", host, os.Getpid()),
 		log:        obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
+		metrics:    newLordMetrics(),
 		exits:      make(chan exit, len(m.Thralls)+8),
 		procCtx:    procCtx,
 		procCancel: procCancel,
@@ -101,6 +105,10 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 // Start provisions durable mailboxes, starts the supervisor loop, the heartbeat consumer and the thralls.
 func (l *Lord) Start(ctx context.Context) error {
 	l.appCtx = ctx
+
+	if err := l.startMetricsServer(l.manifest.Observability.MetricsAddr); err != nil {
+		return err
+	}
 
 	if err := l.provisionStreams(); err != nil {
 		return err
@@ -242,6 +250,7 @@ func (l *Lord) restartOne(ch *child) {
 		return
 	}
 	l.log.Warn("restarting thrall", slog.String("name", ch.spec.Name))
+	l.metrics.incRestart(ch.spec.Name)
 	l.emit("restarting", ch.spec.Name, 0)
 	if err := l.startChild(ch); err != nil {
 		l.log.Error("restart failed", slog.String("name", ch.spec.Name), slog.Any("err", err))
@@ -260,6 +269,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 		names[i] = ch.spec.Name
 	}
 	l.log.Warn("group restart", slog.String("strategy", strategy), slog.String("crashed", crashed.spec.Name), slog.String("group", strings.Join(names, " ")))
+	l.metrics.incRestart(crashed.spec.Name)
 	l.emit("group_restart", crashed.spec.Name, 0)
 
 	nc := l.ether.Conn()
@@ -291,6 +301,7 @@ func (l *Lord) overIntensity(ch *child) bool {
 	if max := l.manifest.RestartIntensity.Max; max > 0 && window > 0 {
 		if n := ch.restartsWithin(window); n > max {
 			l.log.Error("restart-intensity exceeded - giving up", slog.String("name", ch.spec.Name), slog.Int("starts", n), slog.Duration("within", window))
+			l.metrics.incGaveUp(ch.spec.Name)
 			l.emit("gave_up", ch.spec.Name, 0)
 			return true
 		}
@@ -441,6 +452,8 @@ func (l *Lord) onHeartbeat(name string) {
 // Stop performs a graceful drain of all thralls.
 func (l *Lord) Stop() {
 	l.draining.Store(true)
+	l.metrics.reg.Set(metricUp, nil, 0)
+	l.stopMetricsServer()
 	nc := l.ether.Conn()
 
 	// Snapshot under the lock; drain both static and dynamic children.
@@ -483,6 +496,7 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 	}); err != nil {
 		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))
 	}
+	l.metrics.setStatus(name, status)
 }
 
 // logExit records a thrall's process exit at a level reflecting its nature: an abnormal

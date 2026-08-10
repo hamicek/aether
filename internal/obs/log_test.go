@@ -10,14 +10,14 @@ import (
 
 func TestLevelFromEnv(t *testing.T) {
 	cases := map[string]slog.Level{
-		"debug":   slog.LevelDebug,
-		"info":    slog.LevelInfo,
-		"warn":    slog.LevelWarn,
-		"warning": slog.LevelWarn,
-		"error":   slog.LevelError,
-		"":        slog.LevelInfo, // default
+		"debug":    slog.LevelDebug,
+		"info":     slog.LevelInfo,
+		"warn":     slog.LevelWarn,
+		"warning":  slog.LevelWarn,
+		"error":    slog.LevelError,
+		"":         slog.LevelInfo, // default
 		"nonsense": slog.LevelInfo, // unknown -> default, never silent
-		"WARN":    slog.LevelWarn, // case-insensitive
+		"WARN":     slog.LevelWarn, // case-insensitive
 	}
 	for in, want := range cases {
 		t.Setenv(EnvLogLevel, in)
