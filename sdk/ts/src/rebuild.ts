@@ -30,15 +30,18 @@ export async function rebuild<S>(
   const stream = subjects.eventLogStream(ctx.app, ctx.name);
   const jsm = await nc.jetstreamManager();
   let last = 0;
+  let messages = 0;
   try {
     const info = await jsm.streams.info(stream);
     last = info.state.last_seq;
+    messages = info.state.messages;
   } catch (err) {
     throw new Error(`event log stream ${stream} (is event_log enabled?): ${String(err)}`);
   }
-  if (last === 0) return initial;
+  // Nothing to replay: an empty log, or one whose retention has purged every message.
+  if (last === 0 || messages === 0) return initial;
 
-  // Ephemeral consumer over the whole log; read up to the last sequence captured above.
+  // Ephemeral consumer over the whole log; read in batches until we reach the last sequence.
   const ci = await jsm.consumers.add(stream, {
     ack_policy: AckPolicy.None,
     deliver_policy: DeliverPolicy.All,
@@ -47,11 +50,19 @@ export async function rebuild<S>(
   const js = nc.jetstream();
   const consumer = await js.consumers.get(stream, ci.name);
 
+  // consume() delivers available messages as they arrive (no waiting for a batch count, unlike
+  // fetch), so replay is fast for any size; we stop once we have folded up to `last`.
   let state = initial;
-  const iter = await consumer.fetch({ max_messages: Number(last), expires: 5000 });
-  for await (const m of iter) {
-    state = await fold(jc.decode(m.data), state);
-    if (m.seq >= last) break;
+  let seq = 0;
+  const iter = await consumer.consume({ max_messages: 256 });
+  try {
+    for await (const m of iter) {
+      state = await fold(jc.decode(m.data), state);
+      seq = m.seq;
+      if (seq >= last) break;
+    }
+  } finally {
+    iter.stop();
   }
   return state;
 }

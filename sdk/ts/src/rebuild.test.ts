@@ -85,3 +85,21 @@ test.skipIf(!hasServer)("rebuild preserves append order", async () => {
   const got = await rebuild(ctxFor("seq"), [] as number[], (event, acc: number[]) => [...acc, (event as { n: number }).n]);
   expect(got).toEqual([0, 1, 2, 3, 4]);
 });
+
+test.skipIf(!hasServer)("rebuild of a bounded (purged) log folds only the retained tail, fast", async () => {
+  const jsm = await nc!.jetstreamManager();
+  await jsm.streams.add({
+    name: subjects.eventLogStream(app, "bounded"),
+    subjects: [subjects.eventLog(app, "bounded")],
+    retention: RetentionPolicy.Limits,
+    storage: StorageType.Memory,
+    max_msgs: 2, // keep only the last 2 events
+  });
+  for (let n = 1; n <= 5; n++) {
+    await appendEvent(nc!, app, "bounded", { n });
+  }
+  const start = Date.now();
+  const got = await rebuild(ctxFor("bounded"), [] as number[], (event, acc: number[]) => [...acc, (event as { n: number }).n]);
+  expect(got).toEqual([4, 5]);
+  expect(Date.now() - start).toBeLessThan(3000); // must not hang on the fetch/consume wait
+});

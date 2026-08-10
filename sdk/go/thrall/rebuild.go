@@ -51,8 +51,8 @@ func Rebuild[S any](ctx *Ctx, initial S, fold func(payload json.RawMessage, stat
 		return state, fmt.Errorf("event log stream %q (is event_log enabled?): %w", stream, err)
 	}
 	last := si.State.LastSeq
-	if last == 0 {
-		return state, nil // empty log -> initial state
+	if last == 0 || si.State.Msgs == 0 {
+		return state, nil // nothing to replay: empty log, or retention purged every message
 	}
 
 	// Ephemeral consumer over the whole log; we read up to the last sequence captured above.

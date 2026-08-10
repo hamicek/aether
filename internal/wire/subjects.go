@@ -18,6 +18,11 @@ func Stream(app, name string) string { return fmt.Sprintf("aether_%s_%s", app, n
 // EventLog = subject a thrall appends event-sourcing events to (opt-in). Unlike the WorkQueue
 // mailbox, these are captured by a separate RETENTION stream (EventLogStream) and are therefore
 // replayable in init to rebuild state ("log is truth, state is a projection").
+//
+// Note: this subject is under the mailbox wildcard Data (`aether.<app>.<name>.*`), so a
+// non-durable thrall receives its own appended events back on its data subscription; the mailbox
+// dispatch ignores the "evt" verb (only call/cast are handled), so it is harmless - just a small
+// self-echo. Durable thralls do not have the wildcard subscription and are unaffected.
 func EventLog(app, name string) string { return fmt.Sprintf("aether.%s.%s.evt", app, name) }
 
 // EventLogStream = name of the retention JetStream stream backing a thrall's event log.

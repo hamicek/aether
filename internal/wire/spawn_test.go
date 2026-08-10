@@ -9,7 +9,7 @@ import (
 // round-trip carried inside a ctl envelope's Payload, since the SDK marshals it and the
 // lord unmarshals it.
 func TestSpawnSpecRoundTrip(t *testing.T) {
-	in := SpawnSpec{Name: "worker-1", Cmd: "./bin/worker", Restart: "transient", Durable: true}
+	in := SpawnSpec{Name: "worker-1", Cmd: "./bin/worker", Restart: "transient", Durable: true, EventLog: true}
 	data, err := json.Marshal(in)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

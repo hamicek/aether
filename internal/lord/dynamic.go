@@ -64,11 +64,12 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 	}
 	ch := &child{
 		spec: ThrallSpec{
-			Name:    spec.Name,
-			Cmd:     spec.Cmd,
-			Restart: restart,
-			Scope:   "local",
-			Durable: spec.Durable,
+			Name:     spec.Name,
+			Cmd:      spec.Cmd,
+			Restart:  restart,
+			Scope:    "local",
+			Durable:  spec.Durable,
+			EventLog: spec.EventLog,
 		},
 		natsURL:  l.ether.URL(),
 		app:      l.manifest.App,

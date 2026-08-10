@@ -75,6 +75,25 @@ class RebuildTest(unittest.IsolatedAsyncioTestCase):
         got = await aether.rebuild(self._ctx("seq"), [], lambda ev, acc: acc + [ev["n"]])
         self.assertEqual(got, [0, 1, 2, 3, 4])
 
+    async def test_rebuild_bounded_log(self):
+        # A stream that keeps only the last 2 events: rebuild folds the retained tail, fast.
+        js = self.nc.jetstream()
+        await js.add_stream(
+            name=aether._stream_evt("es", "bounded"),
+            subjects=[aether._sub_evt("es", "bounded")],
+            retention=RetentionPolicy.LIMITS,
+            storage=StorageType.MEMORY,
+            max_msgs=2,
+        )
+        ctx = self._ctx("bounded")
+        for n in (1, 2, 3, 4, 5):
+            await ctx.append({"n": n})
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        got = await aether.rebuild(self._ctx("bounded"), [], lambda ev, acc: acc + [ev["n"]])
+        self.assertEqual(got, [4, 5])
+        self.assertLess(loop.time() - start, 3.0)  # must not hang on the fetch wait
+
 
 if __name__ == "__main__":
     unittest.main()

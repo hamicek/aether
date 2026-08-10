@@ -216,6 +216,7 @@ class SpawnSpec:
     cmd: str
     restart: str = ""  # permanent | transient | temporary (default permanent)
     durable: bool = False  # true -> casts go through JetStream
+    event_log: bool = False  # true -> provision an event-sourcing log (append/rebuild)
 
     def _payload(self) -> dict:
         # Omit empty optional fields for wire parity with the Go/TS json (omitempty).
@@ -224,6 +225,8 @@ class SpawnSpec:
             p["restart"] = self.restart
         if self.durable:
             p["durable"] = self.durable
+        if self.event_log:
+            p["event_log"] = self.event_log
         return p
 
 
@@ -741,7 +744,8 @@ async def rebuild(ctx: "Ctx", initial: Any, fold: Callable) -> Any:
     except Exception as ex:  # noqa: BLE001
         raise RuntimeError(f"event log stream {stream} (is event_log enabled?): {ex}")
     last = info.state.last_seq
-    if last == 0:
+    # Nothing to replay: an empty log, or one whose retention has purged every message.
+    if last == 0 or info.state.messages == 0:
         return initial
 
     psub = await js.pull_subscribe(
@@ -750,14 +754,17 @@ async def rebuild(ctx: "Ctx", initial: Any, fold: Callable) -> Any:
         stream=stream,
         config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL, ack_policy=AckPolicy.NONE),
     )
-    state = initial
-    seq = 0
-    while seq < last:
-        try:
-            msgs = await psub.fetch(256, timeout=5)
-        except Exception:  # noqa: BLE001  (timeout / no more)
-            break
-        for msg in msgs:
-            state = await _maybe(fold(json.loads(msg.data), state))
-            seq = msg.metadata.sequence.stream
-    return state
+    try:
+        state = initial
+        seq = 0
+        while seq < last:
+            try:
+                msgs = await psub.fetch(256, timeout=5)
+            except Exception:  # noqa: BLE001  (timeout / no more)
+                break
+            for msg in msgs:
+                state = await _maybe(fold(json.loads(msg.data), state))
+                seq = msg.metadata.sequence.stream
+        return state
+    finally:
+        await psub.unsubscribe()  # ephemeral consumer must be cleaned up (no self-clean)
