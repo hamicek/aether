@@ -157,6 +157,16 @@ def _stream(app: str, name: str) -> str:
     return f"aether_{app}_{name}"
 
 
+def _sub_evt(app: str, name: str) -> str:
+    # Event-sourcing append subject (opt-in), captured by a retention stream so it can be
+    # replayed in init - unlike the WorkQueue mailbox.
+    return f"aether.{app}.{name}.evt"
+
+
+def _stream_evt(app: str, name: str) -> str:
+    return f"aether_{app}_{name}_evt"
+
+
 def _encode(e: dict) -> bytes:
     return json.dumps(e).encode()
 
