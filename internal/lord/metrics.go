@@ -106,6 +106,55 @@ func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	lm.reg.Set(metricProcessed, labels, float64(hm.ProcessedTotal))
 }
 
+// pollDurableBacklog periodically samples the pending-message count of each durable thrall's
+// JetStream consumer and exposes it as a gauge. This is the accurate backlog (server-side
+// num_pending), complementing the thrall's own best-effort mailbox depth.
+func (l *Lord) pollDurableBacklog() {
+	if l.backlogPollEvery <= 0 {
+		return
+	}
+	t := time.NewTicker(l.backlogPollEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.appCtx.Done():
+			return
+		case <-t.C:
+			l.pollDurableBacklogOnce()
+		}
+	}
+}
+
+// pollDurableBacklogOnce reads num_pending for every durable child's consumer. A consumer that
+// does not exist yet (the thrall has not subscribed) is skipped, not reported as zero.
+func (l *Lord) pollDurableBacklogOnce() {
+	js, err := l.ether.Conn().JetStream()
+	if err != nil {
+		return
+	}
+	for _, ch := range l.durableChildren() {
+		stream := wire.Stream(l.manifest.App, ch.spec.Name)
+		ci, err := js.ConsumerInfo(stream, ch.spec.Name)
+		if err != nil {
+			continue // consumer not created yet, or stream gone - nothing to report
+		}
+		l.metrics.reg.Set(metricDurableBacklog, map[string]string{"name": ch.spec.Name}, float64(ci.NumPending))
+	}
+}
+
+// durableChildren returns the current children with a durable mailbox.
+func (l *Lord) durableChildren() []*child {
+	l.childrenMu.RLock()
+	defer l.childrenMu.RUnlock()
+	out := make([]*child, 0, len(l.children))
+	for _, ch := range l.children {
+		if ch.spec.Durable {
+			out = append(out, ch)
+		}
+	}
+	return out
+}
+
 // metricsHandler builds the HTTP handler serving the Prometheus /metrics endpoint from the
 // current registry. Extracted so it can be tested without binding a real port.
 func (l *Lord) metricsHandler() http.Handler {

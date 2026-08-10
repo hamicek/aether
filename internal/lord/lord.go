@@ -33,6 +33,8 @@ const (
 	heartbeatInterval = 2 * time.Second
 	// heartbeatMisses is how many intervals a thrall may skip before the lord marks it stale.
 	heartbeatMisses = 3
+	// backlogPollInterval is how often the lord samples durable consumer backlogs.
+	backlogPollInterval = 2 * time.Second
 )
 
 // exit reports the end of one process generation (sent by the watcher).
@@ -74,6 +76,8 @@ type Lord struct {
 	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
 	hbMissAfter  time.Duration // no heartbeat for this long -> stale
 	hbCheckEvery time.Duration // how often the reaper checks
+
+	backlogPollEvery time.Duration // how often durable consumer backlogs are sampled
 }
 
 // New creates the root lord from a manifest.
@@ -89,21 +93,22 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
 	l := &Lord{
-		manifest:     m,
-		ether:        eth,
-		reg:          reg,
-		locks:        locks,
-		id:           fmt.Sprintf("%s-%d", host, os.Getpid()),
-		log:          obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
-		metrics:      newLordMetrics(),
-		exits:        make(chan exit, len(m.Thralls)+8),
-		procCtx:      procCtx,
-		procCancel:   procCancel,
-		ready:        map[string]bool{},
-		stale:        map[string]bool{},
-		lastSeen:     map[string]time.Time{},
-		hbMissAfter:  heartbeatMisses * heartbeatInterval,
-		hbCheckEvery: heartbeatInterval,
+		manifest:         m,
+		ether:            eth,
+		reg:              reg,
+		locks:            locks,
+		id:               fmt.Sprintf("%s-%d", host, os.Getpid()),
+		log:              obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
+		metrics:          newLordMetrics(),
+		exits:            make(chan exit, len(m.Thralls)+8),
+		procCtx:          procCtx,
+		procCancel:       procCancel,
+		ready:            map[string]bool{},
+		stale:            map[string]bool{},
+		lastSeen:         map[string]time.Time{},
+		hbMissAfter:      heartbeatMisses * heartbeatInterval,
+		hbCheckEvery:     heartbeatInterval,
+		backlogPollEvery: backlogPollInterval,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
@@ -144,6 +149,7 @@ func (l *Lord) Start(ctx context.Context) error {
 
 	go l.supervisorLoop()
 	go l.reapHeartbeats()
+	go l.pollDurableBacklog()
 
 	for _, ch := range l.children {
 		if ch.spec.Scope == "singleton" {
