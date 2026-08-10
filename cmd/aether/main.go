@@ -180,7 +180,7 @@ func castCmd(argv []string) {
 	nc := connect(ep.URL)
 	defer nc.Close()
 
-	env := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	env := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
 	data, _ := json.Marshal(env)
 	if err := nc.Publish(wire.Cast(ep.App, name), data); err != nil {
 		log.Fatalf("publish: %v", err)
@@ -210,7 +210,7 @@ func callCmd(argv []string) {
 	nc := connect(ep.URL)
 	defer nc.Close()
 
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(wire.Call(ep.App, name), data, *timeout)
 	if err != nil {

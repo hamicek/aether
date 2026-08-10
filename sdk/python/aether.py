@@ -176,6 +176,21 @@ def _next_id() -> str:
     return f"{int(time.time() * 1000):x}-{_id_seq:x}"
 
 
+_trace_seq = 0
+
+
+def _new_trace() -> str:
+    """Mint a fresh correlation id for an edge (a message that starts a new operation)."""
+    global _trace_seq
+    _trace_seq += 1
+    return f"t-{int(time.time() * 1000):x}-{_trace_seq:x}"
+
+
+def _or_new_trace(trace: str) -> str:
+    """Return the given trace, or a fresh one when it is empty."""
+    return trace if trace else _new_trace()
+
+
 # Handler shapes hold the GenServer semantics:
 #   handle_call: (payload, state, ctx) -> (reply, new_state)
 #   handle_cast: (payload, state, ctx) -> new_state
@@ -224,6 +239,29 @@ class Ctx:
     # Structured logger pre-tagged with app and name, configured from the logging env the
     # lord injected - handlers should log through it.
     log: Any = None
+    # trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
+    # propagate it to downstream messages so one operation can be followed across processes.
+    trace: str = ""
+
+    async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0) -> Any:
+        """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
+        message carries the trace of the message currently being handled."""
+        req = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "call",
+               "to": target, "op": op, "payload": payload if payload is not None else {},
+               "ts": int(time.time() * 1000)}
+        msg = await self.nats.request(_sub_call(self.app, target), _encode(req), timeout=timeout)
+        reply = _decode(msg.data)
+        if reply.get("status") == "error":
+            err = reply.get("error") or {}
+            raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
+        return reply.get("payload")
+
+    async def cast(self, target: str, op: str, payload: Any = None) -> None:
+        """Trace-propagating fire-and-forget to another thrall (GenServer.cast)."""
+        e = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "cast",
+             "to": target, "op": op, "payload": payload if payload is not None else {},
+             "ts": int(time.time() * 1000)}
+        await self.nats.publish(_sub_cast(self.app, target), _encode(e))
 
     async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
         # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
@@ -292,6 +330,8 @@ async def start(defn: ThrallDef) -> None:
         start = stats.begin()
         try:
             async with lock:
+                ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_call.get(e.get("op"))
                 if handler is None:
                     await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
@@ -309,6 +349,8 @@ async def start(defn: ThrallDef) -> None:
         start = stats.begin()
         try:
             async with lock:
+                ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_cast.get(e.get("op"))
                 if handler is not None:
                     try:

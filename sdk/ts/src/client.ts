@@ -4,6 +4,9 @@ import { subjects } from "./subjects";
 
 export interface CallOpts {
   timeoutMs?: number;
+  // Correlation id to stamp on the outgoing message. Omitted -> a fresh trace is minted (edge);
+  // Ctx.call/Ctx.cast pass the current message's trace here to propagate it across a hop.
+  trace?: string;
 }
 
 // Shared connection for client calls (set by start(), or set manually by a
@@ -26,6 +29,16 @@ function nextId(): string {
   return `${Date.now().toString(36)}-${(seq++).toString(36)}`;
 }
 
+// newTrace mints a fresh correlation id for an edge (a message that starts a new operation).
+export function newTrace(): string {
+  return `t-${nextId()}`;
+}
+
+// orNewTrace returns the given trace, or a fresh one when it is empty.
+export function orNewTrace(trace?: string): string {
+  return trace && trace.length > 0 ? trace : newTrace();
+}
+
 function app(): string {
   return process.env.AETHER_APP ?? "";
 }
@@ -37,7 +50,7 @@ export async function call<R = unknown>(
   payload: unknown = {},
   opts: CallOpts = {},
 ): Promise<R> {
-  const req: Envelope = { v: 1, id: nextId(), kind: "call", to: target, op, payload, ts: Date.now() };
+  const req: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), kind: "call", to: target, op, payload, ts: Date.now() };
   const msg = await conn().request(subjects.call(app(), target), encode(req), {
     timeout: opts.timeoutMs ?? 5000,
   });
@@ -48,9 +61,10 @@ export async function call<R = unknown>(
   return reply.payload as R;
 }
 
-// cast = fire-and-forget (GenServer.cast).
-export function cast(target: string, op: string, payload: unknown = {}): void {
-  const e: Envelope = { v: 1, id: nextId(), kind: "cast", to: target, op, payload, ts: Date.now() };
+// cast = fire-and-forget (GenServer.cast). Pass opts.trace to propagate a trace (Ctx.cast
+// does this); omitted -> a fresh trace is minted.
+export function cast(target: string, op: string, payload: unknown = {}, opts: { trace?: string } = {}): void {
+  const e: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), kind: "cast", to: target, op, payload, ts: Date.now() };
   conn().publish(subjects.cast(app(), target), encode(e));
 }
 

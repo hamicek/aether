@@ -31,7 +31,7 @@ func goldenCases() map[string]Envelope {
 			Payload: json.RawMessage(`{"value":42}`)},
 		"reply_error": {V: 1, ID: "c-1", Kind: KindReply, Status: "error",
 			Error: &WireError{Type: "unknown_op", Message: "unknown call op: nope", Retryable: false}},
-		"hb":      {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
+		"hb": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
 		"hb_metrics": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000003,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 2, MailboxLatencyMs: 1.5, ProcessedTotal: 10})},
 		"ctl":     {V: 1, Kind: KindCtl, Op: "drain"},

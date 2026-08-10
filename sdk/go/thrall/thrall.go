@@ -59,6 +59,10 @@ type Ctx struct {
 	// Log is the thrall's structured logger, pre-tagged with app and name and configured
 	// from the logging env the lord injected - handlers should log through it.
 	Log *slog.Logger
+	// Trace is the correlation id of the message currently being handled. The SDK sets it
+	// before each handler runs; Ctx.Call/Ctx.Cast propagate it to downstream messages so one
+	// operation can be followed across processes. Handlers may include it in their own logs.
+	Trace string
 }
 
 // Handler shapes hold the GenServer semantics:
@@ -142,6 +146,8 @@ func Start[S any](def Def[S]) error {
 		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		ctx.Trace = orNewTrace(e.Trace)
+		log.Debug("handling call", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCall[e.Op]
 		if !ok {
 			_ = msg.Respond(mustJSON(errReply(e, "unknown_op", "unknown call op: "+e.Op)))
@@ -165,6 +171,8 @@ func Start[S any](def Def[S]) error {
 		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		ctx.Trace = orNewTrace(e.Trace)
+		log.Debug("handling cast", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCast[e.Op]
 		if !ok {
 			return
@@ -289,13 +297,39 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 	}
 }
 
-// Call = synchronous request/reply (GenServer.call) to another thrall.
+// Call = synchronous request/reply (GenServer.call) to another thrall. Called outside a
+// handler (standalone) it mints a fresh trace; from within a handler use Ctx.Call to
+// propagate the current trace instead.
 func Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
 	if sharedConn == nil {
 		return nil, fmt.Errorf("no connection - call Start() first")
 	}
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	msg, err := sharedConn.Request(wire.Call(os.Getenv("AETHER_APP"), target), mustJSON(req), timeout)
+	return doCall(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout)
+}
+
+// Cast = fire-and-forget (GenServer.cast) to another thrall. Mints a fresh trace; from within
+// a handler use Ctx.Cast to propagate the current trace.
+func Cast(target, op string, payload any) error {
+	if sharedConn == nil {
+		return fmt.Errorf("no connection - call Start() first")
+	}
+	return doCast(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload)
+}
+
+// Call is the trace-propagating request/reply from inside a handler: the downstream message
+// carries the trace of the message currently being handled.
+func (c *Ctx) Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+	return doCall(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout)
+}
+
+// Cast is the trace-propagating fire-and-forget from inside a handler.
+func (c *Ctx) Cast(target, op string, payload any) error {
+	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload)
+}
+
+func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+	msg, err := nc.Request(wire.Call(app, target), mustJSON(req), timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -309,13 +343,21 @@ func Call(target, op string, payload any, timeout time.Duration) (json.RawMessag
 	return reply.Payload, nil
 }
 
-// Cast = fire-and-forget (GenServer.cast) to another thrall.
-func Cast(target, op string, payload any) error {
-	if sharedConn == nil {
-		return fmt.Errorf("no connection - call Start() first")
+func doCast(nc *nats.Conn, app, trace, target, op string, payload any) error {
+	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+	return nc.Publish(wire.Cast(app, target), mustJSON(e))
+}
+
+// newTrace mints a fresh correlation id for an edge (a message that starts a new operation).
+func newTrace() string { return nats.NewInbox() }
+
+// orNewTrace returns the given trace, or a fresh one when it is empty (the message came in
+// without a trace, so this thrall is the edge that starts one).
+func orNewTrace(trace string) string {
+	if trace == "" {
+		return newTrace()
 	}
-	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	return sharedConn.Publish(wire.Cast(os.Getenv("AETHER_APP"), target), mustJSON(e))
+	return trace
 }
 
 // StartChild asks the lord to spawn a new thrall at runtime - a child not in the

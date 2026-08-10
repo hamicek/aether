@@ -2,7 +2,7 @@ import { AckPolicy, DeliverPolicy, type NatsConnection } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
-import { useConnection, startChild, stopChild, type SpawnSpec, type CallOpts } from "./client";
+import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
 import { newLogger, type Logger } from "./log";
 
 // Handler shapes hold the GenServer semantics:
@@ -28,6 +28,11 @@ export interface Ctx {
   // Structured logger pre-tagged with app and name, configured from the logging env the
   // lord injected - handlers should log through it.
   log: Logger;
+  // trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
+  // propagate it to downstream messages so one operation can be followed across processes.
+  trace: string;
+  call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
+  cast: (target: string, op: string, payload?: unknown) => void;
   // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
   // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
   // outside any manifest group strategy.
@@ -61,6 +66,9 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     name,
     app: env.app,
     log,
+    trace: "",
+    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
+    cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
@@ -96,6 +104,8 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> =>
     serialize(async () => {
       const start = beginJob();
+      ctx.trace = orNewTrace(e.trace);
+      log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCall?.[e.op ?? ""];
         if (!handler) {
@@ -117,6 +127,8 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const onCast = (e: Envelope): Promise<void> =>
     serialize(async () => {
       const start = beginJob();
+      ctx.trace = orNewTrace(e.trace);
+      log.debug("handling cast", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCast?.[e.op ?? ""];
         if (!handler) return;
