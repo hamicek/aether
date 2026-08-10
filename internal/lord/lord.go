@@ -130,7 +130,7 @@ func (l *Lord) Start(ctx context.Context) error {
 	}
 
 	if _, err := l.ether.Conn().Subscribe(wire.HeartbeatAll(), func(m *nats.Msg) {
-		l.onHeartbeat(nameFromHB(m.Subject))
+		l.onHeartbeat(nameFromHB(m.Subject), m.Data)
 	}); err != nil {
 		return err
 	}
@@ -442,7 +442,7 @@ func (l *Lord) renewLoop(ch *child, lock *singleton.Lock, stop <-chan struct{}) 
 	}
 }
 
-func (l *Lord) onHeartbeat(name string) {
+func (l *Lord) onHeartbeat(name string, data []byte) {
 	if name == "" {
 		return
 	}
@@ -454,6 +454,7 @@ func (l *Lord) onHeartbeat(name string) {
 	if pid == 0 {
 		return
 	}
+	l.recordHeartbeatMetrics(name, data)
 	l.setStatus(name, pid, "ready")
 	l.mu.Lock()
 	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
@@ -466,6 +467,24 @@ func (l *Lord) onHeartbeat(name string) {
 		l.log.Info("thrall ready (on the bus)", slog.String("name", name), slog.Int("pid", pid))
 		l.emit("ready", name, pid)
 	}
+}
+
+// recordHeartbeatMetrics parses a thrall's self-reported metrics from the heartbeat payload
+// and folds them into the registry. A heartbeat without a payload (older SDK, or none) is
+// simply ignored - liveness still works from the heartbeat itself.
+func (l *Lord) recordHeartbeatMetrics(name string, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	var e wire.Envelope
+	if json.Unmarshal(data, &e) != nil || len(e.Payload) == 0 {
+		return
+	}
+	var hm wire.HeartbeatMetrics
+	if json.Unmarshal(e.Payload, &hm) != nil {
+		return
+	}
+	l.metrics.recordHeartbeat(name, hm)
 }
 
 // reapHeartbeats periodically looks for ready thralls that stopped heart-beating (a hung

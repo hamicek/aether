@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -20,6 +21,34 @@ import (
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
 )
+
+// mailboxStats collects the thrall's self-metrics reported on each heartbeat: how many
+// messages it currently holds (depth), how long the most recent handler took (latency), and
+// how many it has processed in total. begin/end bracket every handled message.
+type mailboxStats struct {
+	depth     atomic.Int64
+	processed atomic.Uint64
+	lastNs    atomic.Int64 // duration of the most recent handler, in nanoseconds
+}
+
+func (s *mailboxStats) begin() time.Time {
+	s.depth.Add(1)
+	return time.Now()
+}
+
+func (s *mailboxStats) end(start time.Time) {
+	s.lastNs.Store(int64(time.Since(start)))
+	s.processed.Add(1)
+	s.depth.Add(-1)
+}
+
+func (s *mailboxStats) snapshot() wire.HeartbeatMetrics {
+	return wire.HeartbeatMetrics{
+		MailboxDepth:     int(s.depth.Load()),
+		MailboxLatencyMs: float64(s.lastNs.Load()) / float64(time.Millisecond),
+		ProcessedTotal:   s.processed.Load(),
+	}
+}
 
 // Ctx is passed to init and to every handler. WE DO NOT HIDE NATS BEHIND THE THRALL -
 // a thrall has full access to JetStream, KV and its own subjects via Ctx.NATS.
@@ -102,12 +131,15 @@ func Start[S any](def Def[S]) error {
 
 	// Serialized mailbox: a mutex around every state change (call and cast).
 	var mu sync.Mutex
+	stats := &mailboxStats{}
 
 	processCall := func(msg *nats.Msg) {
 		var e wire.Envelope
 		if json.Unmarshal(msg.Data, &e) != nil {
 			return
 		}
+		start := stats.begin()
+		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
 		h, ok := def.HandleCall[e.Op]
@@ -129,6 +161,8 @@ func Start[S any](def Def[S]) error {
 		if json.Unmarshal(data, &e) != nil {
 			return
 		}
+		start := stats.begin()
+		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
 		h, ok := def.HandleCast[e.Op]
@@ -191,7 +225,7 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 
-	go heartbeat(nc, name, stop)
+	go heartbeat(nc, name, stats, stop)
 
 	<-stop
 	if def.Terminate != nil {
@@ -325,9 +359,10 @@ func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.R
 	return reply.Payload, nil
 }
 
-func heartbeat(nc *nats.Conn, name string, stop <-chan struct{}) {
+func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan struct{}) {
 	tick := func() {
-		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli()}
+		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli(),
+			Payload: mustMarshal(stats.snapshot())}
 		_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
 	}
 	tick()

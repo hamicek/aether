@@ -30,9 +30,21 @@ func goldenCases() map[string]Envelope {
 		"reply_error": {V: 1, ID: "c-1", Kind: KindReply, Status: "error",
 			Error: &WireError{Type: "unknown_op", Message: "unknown call op: nope", Retryable: false}},
 		"hb":      {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
+		"hb_metrics": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000003,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 2, MailboxLatencyMs: 1.5, ProcessedTotal: 10})},
 		"ctl":     {V: 1, Kind: KindCtl, Op: "drain"},
 		"minimal": {V: 1, Kind: KindCall},
 	}
+}
+
+// mustHeartbeatMetrics marshals HeartbeatMetrics into the canonical payload bytes. Go is the
+// source of truth, so this fixes the byte order the TS and Python SDKs must reproduce.
+func mustHeartbeatMetrics(hm HeartbeatMetrics) json.RawMessage {
+	b, err := json.Marshal(hm)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 // TestEnvelopeGolden pins the canonical wire form of each case. With -update it (re)writes

@@ -34,6 +34,9 @@ CASES = {
                     "error": {"type": "unknown_op", "message": "unknown call op: nope",
                               "retryable": False}},
     "hb": {"v": 1, "kind": "hb", "to": "counter", "ts": 1700000000002},
+    "hb_metrics": {"v": 1, "kind": "hb", "to": "counter",
+                   "payload": {"mailbox_depth": 2, "mailbox_latency_ms": 1.5, "processed_total": 10},
+                   "ts": 1700000000003},
     "ctl": {"v": 1, "kind": "ctl", "op": "drain"},
     "minimal": {"v": 1, "kind": "call"},
 }

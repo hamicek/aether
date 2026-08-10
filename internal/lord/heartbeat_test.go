@@ -2,12 +2,28 @@ package lord
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hamicek/aether/internal/registry"
 )
+
+// metricValue extracts the value of a single exposition line by its `name{labels}` prefix.
+func metricValue(t *testing.T, exposition, seriesPrefix string) (float64, bool) {
+	t.Helper()
+	for _, line := range strings.Split(exposition, "\n") {
+		if strings.HasPrefix(line, seriesPrefix+" ") {
+			v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, seriesPrefix)), 64)
+			if err != nil {
+				t.Fatalf("bad metric line %q: %v", line, err)
+			}
+			return v, true
+		}
+	}
+	return 0, false
+}
 
 // TestHeartbeatMissMarksStaleAndRecovers drives the real reaper against an embedded NATS
 // server and a real beating thrall. A miss is forced by backdating the thrall's last-seen
@@ -62,4 +78,33 @@ func TestHeartbeatMissMarksStaleAndRecovers(t *testing.T) {
 		e, ok, err := reg.Get("beater")
 		return err == nil && ok && e.Status == "ready"
 	})
+}
+
+// TestHeartbeatMetricsRecorded proves the lord folds a real thrall's self-reported mailbox
+// metrics (carried on the heartbeat) into the /metrics exposition.
+func TestHeartbeatMetricsRecorded(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "hbm", "one_for_one", spec("worker", "permanent", "local"))
+	l := startLord(t, eth, m)
+
+	waitReady(t, eth, "worker")
+
+	// Drive some work so processed_total climbs.
+	for i := 0; i < 3; i++ {
+		cast(t, eth.Conn(), "hbm", "worker", "inc")
+	}
+
+	// A heartbeat carrying the metrics arrives within one interval (2s) plus slack.
+	waitFor(t, 5*time.Second, "worker processed metrics recorded", func() bool {
+		v, ok := metricValue(t, scrape(t, l), `aether_processed_total{name="worker"}`)
+		return ok && v >= 3
+	})
+
+	out := scrape(t, l)
+	if _, ok := metricValue(t, out, `aether_mailbox_depth{name="worker"}`); !ok {
+		t.Errorf("mailbox depth not reported:\n%s", out)
+	}
+	if !strings.Contains(out, `aether_mailbox_latency_ms{name="worker"}`) {
+		t.Errorf("mailbox latency not reported:\n%s", out)
+	}
 }

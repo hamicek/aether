@@ -80,6 +80,33 @@ def new_logger(**base) -> Logger:
     return Logger(base)
 
 
+class _MailboxStats:
+    """Thrall self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats):
+    depth = messages currently held, last_ms = duration of the most recent handler,
+    processed = cumulative count. begin/end bracket every handled message."""
+
+    def __init__(self):
+        self.depth = 0
+        self.processed = 0
+        self.last_ms = 0.0
+
+    def begin(self) -> float:
+        self.depth += 1
+        return time.perf_counter()
+
+    def end(self, start: float) -> None:
+        self.last_ms = (time.perf_counter() - start) * 1000.0
+        self.processed += 1
+        self.depth -= 1
+
+    def snapshot(self) -> dict:
+        return {
+            "mailbox_depth": self.depth,
+            "mailbox_latency_ms": self.last_ms,
+            "processed_total": self.processed,
+        }
+
+
 def _connect_kwargs(
     name: str, ca: Optional[str] = None, nkey_seed: Optional[str] = None
 ) -> dict:
@@ -258,29 +285,38 @@ async def start(defn: ThrallDef) -> None:
 
     stop = asyncio.Event()
     lock = asyncio.Lock()  # serialized mailbox: 1 handler changes state at a time
+    stats = _MailboxStats()
 
     async def process_call(e: dict, msg) -> None:
         nonlocal state
-        async with lock:
-            handler = defn.handle_call.get(e.get("op"))
-            if handler is None:
-                await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
-                return
-            try:
-                reply, state = await _maybe(handler(e.get("payload"), state, ctx))
-                await msg.respond(_encode(_ok_reply(e, reply)))
-            except Exception as ex:  # noqa: BLE001
-                await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+        start = stats.begin()
+        try:
+            async with lock:
+                handler = defn.handle_call.get(e.get("op"))
+                if handler is None:
+                    await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
+                    return
+                try:
+                    reply, state = await _maybe(handler(e.get("payload"), state, ctx))
+                    await msg.respond(_encode(_ok_reply(e, reply)))
+                except Exception as ex:  # noqa: BLE001
+                    await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+        finally:
+            stats.end(start)
 
     async def process_cast(e: dict) -> None:
         nonlocal state
-        async with lock:
-            handler = defn.handle_cast.get(e.get("op"))
-            if handler is not None:
-                try:
-                    state = await _maybe(handler(e.get("payload"), state, ctx))
-                except Exception as ex:  # noqa: BLE001
-                    ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
+        start = stats.begin()
+        try:
+            async with lock:
+                handler = defn.handle_cast.get(e.get("op"))
+                if handler is not None:
+                    try:
+                        state = await _maybe(handler(e.get("payload"), state, ctx))
+                    except Exception as ex:  # noqa: BLE001
+                        ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
+        finally:
+            stats.end(start)
 
     tasks: list[asyncio.Task] = []
 
@@ -344,7 +380,7 @@ async def start(defn: ThrallDef) -> None:
 
     async def heartbeat() -> None:
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "ts": int(time.time() * 1000)}
+            hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
             await nc.publish(_sub_hb(name), _encode(hb))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=2.0)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/internal/wire"
 )
 
 // Runtime metric names exposed on /metrics. Kept together so the exposition schema is
@@ -93,6 +94,16 @@ func (lm *lordMetrics) incGaveUp(name string) {
 
 func (lm *lordMetrics) incHeartbeatMiss(name string) {
 	lm.reg.Inc(metricHeartbeatMiss, map[string]string{"name": name})
+}
+
+// recordHeartbeat folds a thrall's self-reported mailbox metrics into the registry. The
+// processed total is cumulative and reported as an absolute value (it resets when the thrall
+// restarts, like any process-local counter).
+func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
+	labels := map[string]string{"name": name}
+	lm.reg.Set(metricMailboxDepth, labels, float64(hm.MailboxDepth))
+	lm.reg.Set(metricMailboxLat, labels, hm.MailboxLatencyMs)
+	lm.reg.Set(metricProcessed, labels, float64(hm.ProcessedTotal))
 }
 
 // metricsHandler builds the HTTP handler serving the Prometheus /metrics endpoint from the
