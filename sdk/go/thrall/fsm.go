@@ -104,7 +104,7 @@ func StartFSM[D any](def FSM[D]) error {
 		return fmt.Errorf("fsm %q: Init is required", name)
 	}
 	if _, ok := def.States[def.Initial]; !ok {
-		return fmt.Errorf("fsm %q: initial state %q is not in States", name, def.Initial)
+		return fmt.Errorf("fsm %q: initial state %q is not in states", name, def.Initial)
 	}
 	durable := os.Getenv("AETHER_DURABLE") == "1"
 

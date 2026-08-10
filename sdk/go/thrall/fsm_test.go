@@ -260,8 +260,8 @@ func TestStartFSMRejectsUnknownInitial(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an initial state not in States, got nil")
 	}
-	if !strings.Contains(err.Error(), "not in States") {
-		t.Fatalf("expected a %q error, got: %v", "not in States", err)
+	if !strings.Contains(err.Error(), "not in states") {
+		t.Fatalf("expected a %q error, got: %v", "not in states", err)
 	}
 }
 
