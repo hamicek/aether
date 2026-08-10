@@ -67,6 +67,9 @@ func (c *child) env() []string {
 			env = append(env, key+"="+v)
 		}
 	}
+	// Appended last, so the manifest-configured interval is authoritative: it overrides any
+	// AETHER_HEARTBEAT_INTERVAL_MS inherited from the lord's own environment (last value wins),
+	// keeping the thrall's beat and the lord's reaper threshold derived from the same source.
 	if c.hbIntervalMs > 0 {
 		env = append(env, obs.EnvHeartbeatIntervalMs+"="+strconv.Itoa(c.hbIntervalMs))
 	}
