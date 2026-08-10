@@ -71,11 +71,12 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 			Durable:  spec.Durable,
 			EventLog: spec.EventLog,
 		},
-		natsURL:  l.ether.URL(),
-		app:      l.manifest.App,
-		caPath:   l.manifest.Nats.TLS.CA,
-		nkeySeed: l.manifest.Nats.Auth.NkeySeed,
-		dynamic:  true,
+		natsURL:      l.ether.URL(),
+		app:          l.manifest.App,
+		caPath:       l.manifest.Nats.TLS.CA,
+		nkeySeed:     l.manifest.Nats.Auth.NkeySeed,
+		hbIntervalMs: l.manifest.Liveness.HeartbeatIntervalMs,
+		dynamic:      true,
 	}
 
 	// Reserve the name and append atomically, so a second spawn with the same name loses.

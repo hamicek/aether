@@ -29,10 +29,6 @@ const (
 	singletonRetry = 500 * time.Millisecond
 	singletonRenew = 1 * time.Second
 
-	// heartbeatInterval must match the SDK heartbeat ticker (thrall publishes every 2s).
-	heartbeatInterval = 2 * time.Second
-	// heartbeatMisses is how many intervals a thrall may skip before the lord marks it stale.
-	heartbeatMisses = 3
 	// backlogPollInterval is how often the lord samples durable consumer backlogs.
 	backlogPollInterval = 2 * time.Second
 )
@@ -92,6 +88,9 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	}
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
+	// Reaper timing derives from the manifest liveness config (already clamped in applyDefaults),
+	// the same interval that is injected into thralls, so the reaper and thralls never drift.
+	hbInterval := time.Duration(m.Liveness.HeartbeatIntervalMs) * time.Millisecond
 	l := &Lord{
 		manifest:         m,
 		ether:            eth,
@@ -106,17 +105,18 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		ready:            map[string]bool{},
 		stale:            map[string]bool{},
 		lastSeen:         map[string]time.Time{},
-		hbMissAfter:      heartbeatMisses * heartbeatInterval,
-		hbCheckEvery:     heartbeatInterval,
+		hbMissAfter:      hbInterval * time.Duration(m.Liveness.StaleAfterMisses),
+		hbCheckEvery:     hbInterval,
 		backlogPollEvery: backlogPollInterval,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
-			spec:     spec,
-			natsURL:  eth.URL(),
-			app:      m.App,
-			caPath:   m.Nats.TLS.CA,
-			nkeySeed: m.Nats.Auth.NkeySeed,
+			spec:         spec,
+			natsURL:      eth.URL(),
+			app:          m.App,
+			caPath:       m.Nats.TLS.CA,
+			nkeySeed:     m.Nats.Auth.NkeySeed,
+			hbIntervalMs: m.Liveness.HeartbeatIntervalMs,
 		})
 	}
 	return l, nil
