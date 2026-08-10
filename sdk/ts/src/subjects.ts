@@ -13,4 +13,8 @@ export const subjects = {
   events: "aether._lord.events",
   // JetStream stream for the durable mailbox (dots are not allowed in stream names).
   stream: (app: string, name: string) => `aether_${app}_${name}`,
+  // eventLog = subject for event-sourcing appends (opt-in), captured by a separate retention
+  // stream (eventLogStream) so it can be replayed in init - unlike the WorkQueue mailbox.
+  eventLog: (app: string, name: string) => `aether.${app}.${name}.evt`,
+  eventLogStream: (app: string, name: string) => `aether_${app}_${name}_evt`,
 } as const;

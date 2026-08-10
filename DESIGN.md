@@ -415,11 +415,12 @@ Durability is easy to over-read. Two things must be kept apart:
 - **Mailbox durability** - a durable thrall's *casts* are captured in a JetStream
   stream (`durable = true`), so a message survives even if the thrall crashes before
   handling it. This is a property of the **queue**.
-- **State durability** - the thrall's in-memory state. aether does **not** persist it:
-  like OTP, a restart runs a clean `init` and the previous state is gone. (Thrall
-  state persistence is deferred - see §14.)
+- **State durability** - the thrall's in-memory state. aether does **not** snapshot it:
+  like OTP, a restart runs a clean `init`. State is instead made durable by
+  **event-sourcing** (§13c): "the log is truth, state is a projection".
 
-So "durable" always means *the message is not lost*, never *the state is remembered*.
+So "durable" (the mailbox) always means *the message is not lost*, never *the state is
+remembered*; remembering state is the separate job of the event log.
 
 How long the mailbox survives then depends on **where JetStream stores it**, which is
 a deployment choice, not a thrall concern:
@@ -448,6 +449,39 @@ the cluster and the field is ignored.
 No-loss claims about restarts are measured **server-side** via the stream backlog
 (`StreamInfo().State.Msgs`), not via an in-process counter - the latter resets on
 restart, and a WorkQueue stream drops messages once they are delivered and acked.
+
+---
+
+## 13c. Event-sourced state (rebuild from the log)
+
+State that must survive a restart is made durable not by snapshotting the in-memory image
+(that was deliberately rejected - a snapshot fights the model), but by **event-sourcing**: the
+thrall appends domain events to a log and rebuilds its state by replaying that log in `init`.
+"The log is truth, state is a projection." An in-memory snapshot would have to be kept in sync
+with the events and could drift; replaying the log cannot.
+
+The event log is a **separate retention stream** (`event_log = true`), NOT the mailbox. The
+distinction is essential:
+
+| | Mailbox (`durable`) | Event log (`event_log`) |
+|---|---|---|
+| Stream policy | WorkQueue (consumed on ack) | Limits (retained, replayable) |
+| Holds | commands to process | the record of what happened |
+| Replayable | no (acked messages are gone) | yes (from the beginning, in order) |
+| Purpose | at-least-once delivery | rebuild state / audit trail |
+
+The two are independent: a thrall may have a mailbox, an event log, both, or neither. The lord
+provisions each opt-in stream. The SDK gives `Append` (a JetStream publish that waits for the
+stream ack) and `Rebuild(ctx, initial, fold)` (an ordered `DeliverAll` replay into a fold),
+callable from either behaviour's `init`. Because the mailbox is at-least-once and rebuild
+replays, **the fold and handlers must be idempotent** - the same discipline the SCADA design
+calls "idempotence from structure".
+
+Bounded memory: the event log is bounded only by its configured retention (`event_log_max_msgs`
+/ `event_log_max_age_ms`); snapshots and compaction (a state snapshot + replay-since) are
+deliberately future work. Whether the rebuilt state survives a *machine* restart depends on the
+same JetStream persistence as the mailbox (`store_dir` or external). This replaces the cancelled
+in-memory state-snapshot approach.
 
 ---
 

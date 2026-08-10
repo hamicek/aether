@@ -11,6 +11,7 @@ import { subjects } from "./subjects";
 import { open, readEnv } from "./connection";
 import { useConnection, call, cast, startChild, stopChild, orNewTrace } from "./client";
 import { newLogger, type Logger } from "./log";
+import { appendEvent } from "./rebuild";
 import {
   subscribeData,
   subscribeVerb,
@@ -228,6 +229,7 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
     trace: "",
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    append: (event) => appendEvent(nc, env.app, name, event),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };

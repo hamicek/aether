@@ -16,11 +16,16 @@ remain before it is production-grade. They are listed here so the trade-offs are
 
 ## State and durability
 
-- **Thrall state persistence.** Durability today covers the *mailbox* (casts survive a crash via
-  JetStream), not the *state*. Like OTP, a restarted thrall runs a clean `init` and loses its
-  in-memory state. Optional state snapshots/restore are future work.
-  The mailbox itself now survives a restart when JetStream storage is persistent - an embedded
-  `store_dir` or external NATS; see the durability model in [DESIGN.md §13](./DESIGN.md).
+**Delivered:** state that must survive a restart is made durable by **event-sourcing**
+(`event_log = true` + `Append`/`Rebuild`) - the thrall replays its retention event log in `init`
+to rebuild state, rather than snapshotting the in-memory image; see [DESIGN.md §13c](./DESIGN.md)
+and `examples/eventsourced/`. The mailbox survives a restart when JetStream storage is persistent
+(embedded `store_dir` or external NATS; [DESIGN.md §13](./DESIGN.md)).
+
+Still open:
+
+- **Snapshots / compaction.** The event log is bounded only by its configured retention; a state
+  snapshot + replay-since (so rebuild does not read full history) is future work.
 
 ## Observability and operations
 

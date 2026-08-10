@@ -34,6 +34,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
+| **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go) -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups |
@@ -58,6 +59,7 @@ sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm
 sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine)
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
 examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
+examples/eventsourced/ event-sourced rebuild demo - state that survives a restart
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 ```
 
@@ -180,6 +182,47 @@ durable mailbox survives depends on where JetStream stores it:
 Use `store_dir` for a single-host deployment that must keep the mailbox across restarts (see
 `examples/counter/aether-durable-persistent.toml`); use external NATS when durability must be
 independent of the application host. Full model: [DESIGN.md §13](./DESIGN.md).
+
+## Event-sourced rebuild
+
+The durable mailbox keeps *messages*, not *state* - a restarted thrall runs a clean `init`. To
+make **state** survive a restart, opt a thrall into an **event log** and rebuild from it: "the
+log is truth, state is a projection". The event log is a separate **retention** stream (kept, so
+it can be replayed), independent of the WorkQueue mailbox; the lord provisions it when the
+manifest sets `event_log = true`.
+
+```toml
+[[thrall]]
+name = "account"
+cmd  = "../../bin/account"
+event_log = true
+# event_log_max_msgs = 100000   # optional bounds on retention
+# event_log_max_age_ms = 604800000
+```
+
+A thrall `Append`s domain events as it handles messages, and `Rebuild`s its state from the log
+in `init` (works for both the GenServer and the FSM behaviour, since both have an `init`):
+
+```go
+Init: func(ctx *thrall.Ctx) (account, error) {
+  // replay the log into the balance; empty log -> the initial value
+  return thrall.Rebuild(ctx, account{}, apply)
+},
+HandleCast: map[string]thrall.CastFn[account]{
+  "deposit": func(payload json.RawMessage, acc account, ctx *thrall.Ctx) (account, error) {
+    ctx.Append(delta{Delta: amount}) // persist first (the log is the truth)
+    acc.Balance += amount
+    return acc, nil
+  },
+},
+```
+
+Replay is ordered and complete (single-writer = append order). Because the mailbox is
+at-least-once, **the fold and handlers must be idempotent** (an event may be replayed). With a
+persistent JetStream (`store_dir` or external), the rebuilt state survives stopping and starting
+`aether up`. Mirrored in all three SDKs (`ctx.append` + `rebuild` in TS/Python). Snapshots and
+compaction are future work - the event log is bounded only by its configured retention. Runnable
+demo: `examples/eventsourced/` (a bank account whose balance survives a restart).
 
 ## Observability
 

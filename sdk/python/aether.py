@@ -119,7 +119,7 @@ def _connect_kwargs(
     if nkey_seed:
         kwargs["nkeys_seed"] = nkey_seed
     return kwargs
-from nats.js.api import ConsumerConfig, DeliverPolicy
+from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
 
 # --- subjects (must match the Go and TS sides) ---
@@ -155,6 +155,16 @@ def _sub_lord_ctl() -> str:
 
 def _stream(app: str, name: str) -> str:
     return f"aether_{app}_{name}"
+
+
+def _sub_evt(app: str, name: str) -> str:
+    # Event-sourcing append subject (opt-in), captured by a retention stream so it can be
+    # replayed in init - unlike the WorkQueue mailbox.
+    return f"aether.{app}.{name}.evt"
+
+
+def _stream_evt(app: str, name: str) -> str:
+    return f"aether_{app}_{name}_evt"
 
 
 def _encode(e: dict) -> bytes:
@@ -206,6 +216,7 @@ class SpawnSpec:
     cmd: str
     restart: str = ""  # permanent | transient | temporary (default permanent)
     durable: bool = False  # true -> casts go through JetStream
+    event_log: bool = False  # true -> provision an event-sourcing log (append/rebuild)
 
     def _payload(self) -> dict:
         # Omit empty optional fields for wire parity with the Go/TS json (omitempty).
@@ -214,6 +225,8 @@ class SpawnSpec:
             p["restart"] = self.restart
         if self.durable:
             p["durable"] = self.durable
+        if self.event_log:
+            p["event_log"] = self.event_log
         return p
 
 
@@ -262,6 +275,13 @@ class Ctx:
              "to": target, "op": op, "payload": payload if payload is not None else {},
              "ts": int(time.time() * 1000)}
         await self.nats.publish(_sub_cast(self.app, target), _encode(e))
+
+    async def append(self, event: Any) -> None:
+        """Persist a domain event to this thrall's event log (a JetStream publish that waits for
+        the stream ack). Requires the thrall to have opted into an event log (event_log = true).
+        rebuild() replays it in init. Mirrors the Go SDK ctx.Append."""
+        js = self.nats.jetstream()
+        await js.publish(_sub_evt(self.app, self.name), _encode(event))
 
     async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
         # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
@@ -709,3 +729,42 @@ async def start_fsm(defn: FSM) -> None:
 def run_fsm(defn: FSM) -> None:
     """Convenient entry point: asyncio.run(start_fsm(defn))."""
     asyncio.run(start_fsm(defn))
+
+
+# --- event-sourced rebuild (mirrors the Go/TS SDKs) ---
+async def rebuild(ctx: "Ctx", initial: Any, fold: Callable) -> Any:
+    """Reconstruct state by replaying the event log in order from the beginning. Call it from
+    init: reads every persisted event (DeliverAll) into fold, starting from `initial`, and
+    returns the reconstructed state. An empty log yields `initial`. The fold must be idempotent
+    (the log is at-least-once). fold(event, state) may be sync or async."""
+    js = ctx.nats.jetstream()
+    stream = _stream_evt(ctx.app, ctx.name)
+    try:
+        info = await js.stream_info(stream)
+    except Exception as ex:  # noqa: BLE001
+        raise RuntimeError(f"event log stream {stream} (is event_log enabled?): {ex}")
+    last = info.state.last_seq
+    # Nothing to replay: an empty log, or one whose retention has purged every message.
+    if last == 0 or info.state.messages == 0:
+        return initial
+
+    psub = await js.pull_subscribe(
+        _sub_evt(ctx.app, ctx.name),
+        durable=None,  # ephemeral: a one-shot replay consumer
+        stream=stream,
+        config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL, ack_policy=AckPolicy.NONE),
+    )
+    try:
+        state = initial
+        seq = 0
+        while seq < last:
+            try:
+                msgs = await psub.fetch(256, timeout=5)
+            except Exception:  # noqa: BLE001  (timeout / no more)
+                break
+            for msg in msgs:
+                state = await _maybe(fold(json.loads(msg.data), state))
+                seq = msg.metadata.sequence.stream
+        return state
+    finally:
+        await psub.unsubscribe()  # ephemeral consumer must be cleaned up (no self-clean)
