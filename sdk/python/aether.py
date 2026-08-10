@@ -440,3 +440,272 @@ async def start(defn: ThrallDef) -> None:
 def run(defn: ThrallDef) -> None:
     """Convenient entry point: asyncio.run(start(defn))."""
     asyncio.run(start(defn))
+
+
+# --- FSM behaviour (mirrors the Go StartFSM and TS startFSM; an OTP gen_statem analogue) ---
+# A finite state machine: always in exactly one named state, dispatching an incoming message to
+# the current state's reaction for that op. Events on the wire are ordinary call/cast (the
+# envelope is unchanged), so FSM thralls interoperate with GenServer callers.
+
+_FSM_STATE_OP = "_state"  # reserved call op the machine answers with its current state
+
+
+@dataclass
+class Event:
+    op: str
+    payload: Any
+    kind: str  # call | cast | timeout
+
+
+@dataclass
+class StateTimeout:
+    after: float  # seconds (asyncio-native; the Go/TS SDKs use their own time units)
+    op: str
+
+
+@dataclass
+class Outcome:
+    data: Any
+    next: Optional[str] = None
+    reply: Any = None
+    timeout: Optional[StateTimeout] = None
+
+
+@dataclass
+class Reaction:
+    fn: Callable  # (Event, data, ctx) -> Outcome (sync or async)
+    guard: Optional[Callable] = None  # (data, Event) -> bool; absent = always
+
+
+@dataclass
+class State:
+    on: dict  # op -> Reaction
+    timeout: Optional[StateTimeout] = None
+
+
+@dataclass
+class FSM:
+    name: str
+    initial: str
+    init: Callable  # (ctx) -> data
+    states: dict  # state -> State
+    terminate: Optional[Callable] = None  # (reason, state, data)
+
+
+def def_fsm(name, initial, init, states, terminate=None) -> FSM:
+    return FSM(name, initial, init, states, terminate)
+
+
+class _Machine:
+    """Serialized state-machine core, independent of NATS (so it is unit-testable). All state
+    mutation happens under one asyncio lock, so events never interleave; a state timeout is
+    delivered as an event into the same lock via a generation-guarded timer."""
+
+    def __init__(self, defn: FSM, ctx: "Ctx", data: Any, log: Any):
+        self.defn = defn
+        self.ctx = ctx
+        self.log = log
+        self.cur = defn.initial
+        self.data = data
+        self._lock = asyncio.Lock()
+        self._stats = _MailboxStats()
+        self._timeout_gen = 0
+        self._timer = None
+
+    def state(self) -> str:
+        return self.cur
+
+    def snapshot(self) -> dict:
+        return self._stats.snapshot()
+
+    async def send(self, ev: Event, req=None, respond=None, gen=None) -> None:
+        start = self._stats.begin()
+        try:
+            async with self._lock:
+                if gen is not None and gen != self._timeout_gen:
+                    return  # superseded timeout
+                await self._dispatch(ev, req, respond)
+        finally:
+            self._stats.end(start)
+
+    async def _dispatch(self, ev: Event, req, respond) -> None:
+        self.ctx.trace = _or_new_trace("" if ev.kind == "timeout" else ((req or {}).get("trace") or ""))
+        self.log.debug("fsm event", state=self.cur, op=ev.op, kind=ev.kind, trace=self.ctx.trace)
+
+        if ev.kind == "call" and ev.op == _FSM_STATE_OP:
+            if respond is not None and req is not None:
+                respond(_ok_reply(req, {"state": self.cur}))
+            return
+
+        st = self.defn.states.get(self.cur)
+        r = st.on.get(ev.op) if st else None
+        if r is None:
+            self._unhandled(ev, req, respond, "no_transition", f"no transition for op {ev.op} in state {self.cur}")
+            return
+        if r.guard is not None and not r.guard(self.data, ev):
+            self._unhandled(ev, req, respond, "guard_rejected", f"guard rejected op {ev.op} in state {self.cur}")
+            return
+
+        try:
+            out = await _maybe(r.fn(ev, self.data, self.ctx))
+        except Exception as ex:  # noqa: BLE001
+            self.log.error("fsm handler failed", state=self.cur, op=ev.op, err=str(ex))
+            if respond is not None and req is not None:
+                respond(_err_reply(req, "handler_error", str(ex)))
+            return
+
+        self.data = out.data
+        if respond is not None and req is not None:
+            respond(_ok_reply(req, out.reply))
+        if out.next and out.next != self.cur:
+            self._enter(out.next, out.timeout)
+        elif out.timeout is not None:
+            self._arm(out.timeout)
+
+    def _unhandled(self, ev, req, respond, typ, message):
+        self.log.warn("fsm unhandled event", state=self.cur, op=ev.op, kind=ev.kind, reason=typ)
+        if respond is not None and req is not None:
+            respond(_err_reply(req, typ, message))
+
+    def _enter(self, nxt, override):
+        frm = self.cur
+        self.cur = nxt
+        self.log.info("fsm transition", **{"from": frm, "to": nxt})
+        to = override if override is not None else self.defn.states.get(nxt, State(on={})).timeout
+        self._arm(to)
+
+    def _arm(self, to):
+        self._timeout_gen += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if to is None:
+            return
+        gen = self._timeout_gen
+        op = to.op
+        loop = asyncio.get_running_loop()
+        self._timer = loop.call_later(
+            to.after,
+            lambda: asyncio.create_task(self.send(Event(op=op, payload={}, kind="timeout"), None, None, gen)),
+        )
+
+    def arm_initial(self):
+        """Arm the initial state's timeout. Called once from within the running loop."""
+        self._arm(self.defn.states.get(self.cur, State(on={})).timeout)
+
+    def stop(self):
+        self._timeout_gen += 1
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+
+
+async def start_fsm(defn: FSM) -> None:
+    """Connect a state-machine thrall to the ether and run its lifecycle."""
+    url = os.environ.get("AETHER_NATS_URL")
+    app = os.environ.get("AETHER_APP")
+    env_name = os.environ.get("AETHER_NAME", "")
+    if not url or not app:
+        raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
+    name = defn.name or env_name
+    if not defn.initial:
+        raise RuntimeError(f"fsm {name}: initial state is required")
+    durable = os.environ.get("AETHER_DURABLE") == "1"
+    ca = os.environ.get("AETHER_NATS_CA")
+    nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
+
+    nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    data = await _maybe(defn.init(ctx))
+    m = _Machine(defn, ctx, data, ctx.log)
+    m.arm_initial()
+
+    stop = asyncio.Event()
+
+    async def on_call(e: dict, msg) -> None:
+        box: dict = {}
+        await m.send(Event(op=e.get("op"), payload=e.get("payload"), kind="call"), e, lambda reply: box.__setitem__("r", reply))
+        if "r" in box:
+            await msg.respond(_encode(box["r"]))
+
+    async def on_cast(e: dict) -> None:
+        await m.send(Event(op=e.get("op"), payload=e.get("payload"), kind="cast"), e, None)
+
+    tasks: list[asyncio.Task] = []
+
+    if durable:
+        call_sub = await nc.subscribe(_sub_call(app, name))
+        info_sub = await nc.subscribe(_sub_info(app, name))
+
+        async def call_loop() -> None:
+            async for msg in call_sub.messages:
+                await on_call(_decode(msg.data), msg)
+
+        async def info_loop() -> None:
+            async for _msg in info_sub.messages:
+                pass  # info is out-of-band; not an FSM event yet
+
+        async def cast_pull_loop() -> None:
+            js = nc.jetstream()
+            psub = await js.pull_subscribe(
+                _sub_cast(app, name),
+                durable=name,
+                stream=_stream(app, name),
+                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
+            )
+            while not stop.is_set():
+                try:
+                    msgs = await psub.fetch(1, timeout=1)
+                except Exception:  # noqa: BLE001
+                    continue
+                for msg in msgs:
+                    await on_cast(_decode(msg.data))
+                    await msg.ack()
+
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+    else:
+        data_sub = await nc.subscribe(_sub_data(app, name))
+
+        async def data_loop() -> None:
+            async for msg in data_sub.messages:
+                verb = msg.subject.rsplit(".", 1)[1]
+                e = _decode(msg.data)
+                if verb == "call":
+                    await on_call(e, msg)
+                elif verb == "cast":
+                    await on_cast(e)
+
+        tasks.append(asyncio.create_task(data_loop()))
+
+    ctl_sub = await nc.subscribe(_sub_ctl(name))
+
+    async def ctl_loop() -> None:
+        async for msg in ctl_sub.messages:
+            e = _decode(msg.data)
+            if e.get("op") in ("drain", "shutdown"):
+                m.stop()
+                if defn.terminate:
+                    defn.terminate(e.get("op"), m.state(), m.data)
+                stop.set()
+                return
+
+    async def heartbeat() -> None:
+        while not stop.is_set():
+            hb = {"v": 1, "kind": "hb", "to": name, "payload": m.snapshot(), "ts": int(time.time() * 1000)}
+            await nc.publish(_sub_hb(name), _encode(hb))
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                pass
+
+    tasks += [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
+
+    await stop.wait()
+    for t in tasks:
+        t.cancel()
+    await nc.drain()
+
+
+def run_fsm(defn: FSM) -> None:
+    """Convenient entry point: asyncio.run(start_fsm(defn))."""
+    asyncio.run(start_fsm(defn))

@@ -29,6 +29,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Spawn** | ✅ | The lord starts thralls as OS processes, injects the `AETHER_*` env, watches their exit code |
 | **Polyglot SDK** | ✅ | **TS/Bun**, **Python**, **Go** - the same wire contract, indistinguishable to the lord |
 | **Messaging** | ✅ | `call` (sync request/reply), `cast` (fire-and-forget), a serialized mailbox |
+| **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`) and a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue) - see [State machine](#state-machine-fsm-behaviour) |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
@@ -52,10 +53,11 @@ internal/
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
-sdk/ts/               @hamicek/aether (Bun/TS): defThrall, start, call, cast
-sdk/python/           aether.py: def_thrall, start, run
-sdk/go/thrall/        thrall.Def[S], thrall.Start, thrall.Call/Cast
+sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM, call, cast
+sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm
+sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine)
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
+examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 ```
 
@@ -102,6 +104,47 @@ await start(counter);
 
 The same thrall also exists in `counter_py.py` (Python) and `counter_go.go` (Go) - functionally
 identical. Durability is purely a manifest concern (`durable = true`), not thrall code.
+
+## State machine (FSM) behaviour
+
+Alongside the GenServer thrall, a thrall can be a **finite state machine** - aether's analogue
+of OTP's `gen_statem`. Instead of a state field and a `switch` in a cast handler, you declare
+named states and per-op reactions; the SDK dispatches an event to the current state's reaction,
+applies the transition, and serializes everything through the same mailbox (so the machine's
+data needs no locks). Reactions may carry a **guard**, and a state may arm a **state timeout**.
+Events are ordinary call/cast, so an FSM thrall interoperates with any caller; a reserved
+`_state` call op reports the current state.
+
+```go
+fsm := thrall.FSM[int]{
+  Name: "turnstile", Initial: "locked",
+  Init: func(*thrall.Ctx) (int, error) { return 0, nil },
+  States: map[string]thrall.State[int]{
+    "locked": {On: map[string]thrall.Reaction[int]{
+      "coin": {Fn: func(_ thrall.Event, pushes int, ctx *thrall.Ctx) (thrall.Outcome[int], error) {
+        return thrall.Outcome[int]{Next: "unlocked", Data: pushes}, nil
+      }},
+    }},
+    "unlocked": {
+      On: map[string]thrall.Reaction[int]{
+        "push": {Fn: func(_ thrall.Event, pushes int, ctx *thrall.Ctx) (thrall.Outcome[int], error) {
+          return thrall.Outcome[int]{Next: "locked", Data: pushes + 1, Reply: pushes + 1}, nil
+        }},
+        "autolock": {Fn: func(_ thrall.Event, pushes int, ctx *thrall.Ctx) (thrall.Outcome[int], error) {
+          return thrall.Outcome[int]{Next: "locked", Data: pushes}, nil
+        }},
+      },
+      Timeout: &thrall.StateTimeout[int]{After: 5 * time.Second, Op: "autolock"}, // idle -> autolock
+    },
+  },
+}
+thrall.StartFSM(fsm)
+```
+
+An event with no reaction in the current state is rejected (`no_transition`), not silently lost.
+The FSM is deliberately domain-neutral - a lifecycle/alarm automaton is built *on top* of it, not
+inside it. Mirrored in all three SDKs (`startFSM`/`defFSM` in TS, `start_fsm`/`FSM` in Python).
+Runnable demo: `examples/fsm/`.
 
 ## Manifest (example)
 
