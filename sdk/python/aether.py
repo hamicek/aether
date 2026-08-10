@@ -13,11 +13,98 @@ import asyncio
 import json
 import os
 import ssl
+import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import nats
+
+
+# --- structured logging (mirrors internal/obs and the TS SDK log.ts) ---
+_LOG_LEVELS = {"debug": 10, "info": 20, "warn": 30, "warning": 30, "error": 40}
+
+
+def _level_from_env() -> int:
+    """Resolve AETHER_LOG_LEVEL; empty or unknown falls back to info, so a typo never
+    silences the runtime."""
+    return _LOG_LEVELS.get(os.environ.get("AETHER_LOG_LEVEL", "").strip().lower(), 20)
+
+
+def _format_from_env() -> str:
+    return "json" if os.environ.get("AETHER_LOG_FORMAT", "").strip().lower() == "json" else "text"
+
+
+def _render(fmt: str, level: str, msg: str, fields: dict) -> str:
+    ts = datetime.now(timezone.utc).isoformat()
+    if fmt == "json":
+        return json.dumps({"time": ts, "level": level, "msg": msg, **fields})
+    pairs = " ".join(f"{k}={v if isinstance(v, str) else json.dumps(v)}" for k, v in fields.items())
+    return f"{ts} {level} {msg}" + (f" {pairs}" if pairs else "")
+
+
+class Logger:
+    """A minimal structured logger with level filtering and JSON/text rendering. The level
+    and format come from the AETHER_LOG_* env the lord injects; base fields (app, name) are
+    merged into every record so lord and thrall logs stay tellable apart on a shared stream."""
+
+    def __init__(self, base=None, level=None, fmt=None, write=None):
+        self._base = dict(base or {})
+        self._level = level if level is not None else _level_from_env()
+        self._fmt = fmt or _format_from_env()
+        self._write = write or (lambda line: print(line, file=sys.stderr))
+
+    def _emit(self, level_name: str, at: int, msg: str, fields: dict) -> None:
+        if at < self._level:
+            return
+        self._write(_render(self._fmt, level_name, msg, {**self._base, **fields}))
+
+    def debug(self, msg: str, **fields) -> None:
+        self._emit("DEBUG", 10, msg, fields)
+
+    def info(self, msg: str, **fields) -> None:
+        self._emit("INFO", 20, msg, fields)
+
+    def warn(self, msg: str, **fields) -> None:
+        self._emit("WARN", 30, msg, fields)
+
+    def error(self, msg: str, **fields) -> None:
+        self._emit("ERROR", 40, msg, fields)
+
+    def with_(self, **fields) -> "Logger":
+        return Logger({**self._base, **fields}, self._level, self._fmt, self._write)
+
+
+def new_logger(**base) -> Logger:
+    return Logger(base)
+
+
+class _MailboxStats:
+    """Thrall self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats):
+    depth = messages currently held, last_ms = duration of the most recent handler,
+    processed = cumulative count. begin/end bracket every handled message."""
+
+    def __init__(self):
+        self.depth = 0
+        self.processed = 0
+        self.last_ms = 0.0
+
+    def begin(self) -> float:
+        self.depth += 1
+        return time.perf_counter()
+
+    def end(self, start: float) -> None:
+        self.last_ms = (time.perf_counter() - start) * 1000.0
+        self.processed += 1
+        self.depth -= 1
+
+    def snapshot(self) -> dict:
+        return {
+            "mailbox_depth": self.depth,
+            "mailbox_latency_ms": self.last_ms,
+            "processed_total": self.processed,
+        }
 
 
 def _connect_kwargs(
@@ -89,6 +176,21 @@ def _next_id() -> str:
     return f"{int(time.time() * 1000):x}-{_id_seq:x}"
 
 
+_trace_seq = 0
+
+
+def _new_trace() -> str:
+    """Mint a fresh correlation id for an edge (a message that starts a new operation)."""
+    global _trace_seq
+    _trace_seq += 1
+    return f"t-{int(time.time() * 1000):x}-{_trace_seq:x}"
+
+
+def _or_new_trace(trace: str) -> str:
+    """Return the given trace, or a fresh one when it is empty."""
+    return trace if trace else _new_trace()
+
+
 # Handler shapes hold the GenServer semantics:
 #   handle_call: (payload, state, ctx) -> (reply, new_state)
 #   handle_cast: (payload, state, ctx) -> new_state
@@ -134,6 +236,32 @@ class Ctx:
     nats: Any
     name: str
     app: str
+    # Structured logger pre-tagged with app and name, configured from the logging env the
+    # lord injected - handlers should log through it.
+    log: Any = None
+    # trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
+    # propagate it to downstream messages so one operation can be followed across processes.
+    trace: str = ""
+
+    async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0) -> Any:
+        """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
+        message carries the trace of the message currently being handled."""
+        req = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "call",
+               "to": target, "op": op, "payload": payload if payload is not None else {},
+               "ts": int(time.time() * 1000)}
+        msg = await self.nats.request(_sub_call(self.app, target), _encode(req), timeout=timeout)
+        reply = _decode(msg.data)
+        if reply.get("status") == "error":
+            err = reply.get("error") or {}
+            raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
+        return reply.get("payload")
+
+    async def cast(self, target: str, op: str, payload: Any = None) -> None:
+        """Trace-propagating fire-and-forget to another thrall (GenServer.cast)."""
+        e = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "cast",
+             "to": target, "op": op, "payload": payload if payload is not None else {},
+             "ts": int(time.time() * 1000)}
+        await self.nats.publish(_sub_cast(self.app, target), _encode(e))
 
     async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
         # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
@@ -190,34 +318,47 @@ async def start(defn: ThrallDef) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app)
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
     state = await _maybe(defn.init(ctx))
 
     stop = asyncio.Event()
     lock = asyncio.Lock()  # serialized mailbox: 1 handler changes state at a time
+    stats = _MailboxStats()
 
     async def process_call(e: dict, msg) -> None:
         nonlocal state
-        async with lock:
-            handler = defn.handle_call.get(e.get("op"))
-            if handler is None:
-                await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
-                return
-            try:
-                reply, state = await _maybe(handler(e.get("payload"), state, ctx))
-                await msg.respond(_encode(_ok_reply(e, reply)))
-            except Exception as ex:  # noqa: BLE001
-                await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+        start = stats.begin()
+        try:
+            async with lock:
+                ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
+                handler = defn.handle_call.get(e.get("op"))
+                if handler is None:
+                    await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
+                    return
+                try:
+                    reply, state = await _maybe(handler(e.get("payload"), state, ctx))
+                    await msg.respond(_encode(_ok_reply(e, reply)))
+                except Exception as ex:  # noqa: BLE001
+                    await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+        finally:
+            stats.end(start)
 
     async def process_cast(e: dict) -> None:
         nonlocal state
-        async with lock:
-            handler = defn.handle_cast.get(e.get("op"))
-            if handler is not None:
-                try:
-                    state = await _maybe(handler(e.get("payload"), state, ctx))
-                except Exception as ex:  # noqa: BLE001
-                    print(f"[{name}] cast {e.get('op')} failed: {ex}")
+        start = stats.begin()
+        try:
+            async with lock:
+                ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
+                handler = defn.handle_cast.get(e.get("op"))
+                if handler is not None:
+                    try:
+                        state = await _maybe(handler(e.get("payload"), state, ctx))
+                    except Exception as ex:  # noqa: BLE001
+                        ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
+        finally:
+            stats.end(start)
 
     tasks: list[asyncio.Task] = []
 
@@ -281,7 +422,7 @@ async def start(defn: ThrallDef) -> None:
 
     async def heartbeat() -> None:
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "ts": int(time.time() * 1000)}
+            hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
             await nc.publish(_sub_hb(name), _encode(hb))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=2.0)

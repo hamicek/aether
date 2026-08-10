@@ -56,6 +56,19 @@ func runProbe() {
 		HandleCast: map[string]thrall.CastFn[int]{
 			"inc":   func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { return s + 1, nil },
 			"crash": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { os.Exit(1); return s, nil },
+			// emit_trace publishes the trace of the message currently being handled to a
+			// per-thrall subject, so a test can observe what reached the handler via ctx.
+			"emit_trace": func(_ json.RawMessage, s int, ctx *thrall.Ctx) (int, error) {
+				_ = ctx.NATS.Publish("test.trace."+ctx.Name, []byte(ctx.Trace))
+				_ = ctx.NATS.Flush()
+				return s, nil
+			},
+			// relay forwards to the "sink" thrall via ctx.Cast, which must propagate the
+			// current trace to the downstream message (cross-hop propagation).
+			"relay": func(_ json.RawMessage, s int, ctx *thrall.Ctx) (int, error) {
+				_ = ctx.Cast("sink", "emit_trace", map[string]any{})
+				return s, nil
+			},
 		},
 	}
 	if err := thrall.Start(def); err != nil {

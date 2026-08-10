@@ -8,11 +8,18 @@ import (
 
 // Manifest = the contents of aether.toml (the supervision tree topology).
 type Manifest struct {
-	App              string       `toml:"app"`
-	Strategy         string       `toml:"strategy"` // one_for_one | one_for_all | rest_for_one
-	RestartIntensity Intensity    `toml:"restart_intensity"`
-	Nats             ether.Config `toml:"nats"`
-	Thralls          []ThrallSpec `toml:"thrall"`
+	App              string        `toml:"app"`
+	Strategy         string        `toml:"strategy"` // one_for_one | one_for_all | rest_for_one
+	RestartIntensity Intensity     `toml:"restart_intensity"`
+	Nats             ether.Config  `toml:"nats"`
+	Observability    Observability `toml:"observability"`
+	Thralls          []ThrallSpec  `toml:"thrall"`
+}
+
+// Observability configures the runtime's telemetry. An empty MetricsAddr keeps the
+// Prometheus endpoint off (opt-in), so plain runs stay free of an open HTTP port.
+type Observability struct {
+	MetricsAddr string `toml:"metrics_addr"` // host:port for the Prometheus /metrics endpoint (empty = disabled)
 }
 
 // Intensity = the restart-intensity window (max restarts within a given time).

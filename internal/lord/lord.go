@@ -8,7 +8,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
@@ -26,6 +28,13 @@ import (
 const (
 	singletonRetry = 500 * time.Millisecond
 	singletonRenew = 1 * time.Second
+
+	// heartbeatInterval must match the SDK heartbeat ticker (thrall publishes every 2s).
+	heartbeatInterval = 2 * time.Second
+	// heartbeatMisses is how many intervals a thrall may skip before the lord marks it stale.
+	heartbeatMisses = 3
+	// backlogPollInterval is how often the lord samples durable consumer backlogs.
+	backlogPollInterval = 2 * time.Second
 )
 
 // exit reports the end of one process generation (sent by the watcher).
@@ -43,6 +52,9 @@ type Lord struct {
 	locks    *singleton.Manager
 	children []*child
 	id       string
+	log      *slog.Logger
+	metrics  *lordMetrics
+	httpSrv  *http.Server
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
@@ -56,8 +68,16 @@ type Lord struct {
 	// callback goroutine, so every reader/writer of the slice takes this lock.
 	childrenMu sync.RWMutex
 
-	mu    sync.Mutex
-	ready map[string]bool
+	mu       sync.Mutex
+	ready    map[string]bool
+	stale    map[string]bool      // thralls currently flagged as heartbeat-missed
+	lastSeen map[string]time.Time // last heartbeat per thrall (for miss detection)
+
+	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
+	hbMissAfter  time.Duration // no heartbeat for this long -> stale
+	hbCheckEvery time.Duration // how often the reaper checks
+
+	backlogPollEvery time.Duration // how often durable consumer backlogs are sampled
 }
 
 // New creates the root lord from a manifest.
@@ -73,15 +93,22 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
 	l := &Lord{
-		manifest:   m,
-		ether:      eth,
-		reg:        reg,
-		locks:      locks,
-		id:         fmt.Sprintf("%s-%d", host, os.Getpid()),
-		exits:      make(chan exit, len(m.Thralls)+8),
-		procCtx:    procCtx,
-		procCancel: procCancel,
-		ready:      map[string]bool{},
+		manifest:         m,
+		ether:            eth,
+		reg:              reg,
+		locks:            locks,
+		id:               fmt.Sprintf("%s-%d", host, os.Getpid()),
+		log:              obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
+		metrics:          newLordMetrics(),
+		exits:            make(chan exit, len(m.Thralls)+8),
+		procCtx:          procCtx,
+		procCancel:       procCancel,
+		ready:            map[string]bool{},
+		stale:            map[string]bool{},
+		lastSeen:         map[string]time.Time{},
+		hbMissAfter:      heartbeatMisses * heartbeatInterval,
+		hbCheckEvery:     heartbeatInterval,
+		backlogPollEvery: backlogPollInterval,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
@@ -99,12 +126,16 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 func (l *Lord) Start(ctx context.Context) error {
 	l.appCtx = ctx
 
+	if err := l.startMetricsServer(l.manifest.Observability.MetricsAddr); err != nil {
+		return err
+	}
+
 	if err := l.provisionStreams(); err != nil {
 		return err
 	}
 
 	if _, err := l.ether.Conn().Subscribe(wire.HeartbeatAll(), func(m *nats.Msg) {
-		l.onHeartbeat(nameFromHB(m.Subject))
+		l.onHeartbeat(nameFromHB(m.Subject), m.Data)
 	}); err != nil {
 		return err
 	}
@@ -117,6 +148,8 @@ func (l *Lord) Start(ctx context.Context) error {
 	}
 
 	go l.supervisorLoop()
+	go l.reapHeartbeats()
+	go l.pollDurableBacklog()
 
 	for _, ch := range l.children {
 		if ch.spec.Scope == "singleton" {
@@ -160,7 +193,7 @@ func (l *Lord) provisionStream(ch *child) error {
 	}); err != nil {
 		return err
 	}
-	log.Printf("[lord] durable mailbox: stream %q for subject %q", stream, subject)
+	l.log.Info("durable mailbox provisioned", slog.String("stream", stream), slog.String("subject", subject))
 	return nil
 }
 
@@ -172,7 +205,7 @@ func (l *Lord) startChild(ch *child) error {
 	}
 	pid := ch.pid()
 	l.setStatus(ch.spec.Name, pid, "starting")
-	log.Printf("[lord] starting thrall %q (pid=%d, restart=%s)", ch.spec.Name, pid, ch.spec.Restart)
+	l.log.Info("starting thrall", slog.String("name", ch.spec.Name), slog.Int("pid", pid), slog.String("restart", ch.spec.Restart))
 	l.emit("spawned", ch.spec.Name, pid)
 	go l.watch(ch, gen)
 	return nil
@@ -203,7 +236,7 @@ func (l *Lord) supervisorLoop() {
 			continue
 		}
 		l.setStatus(ev.ch.spec.Name, 0, "down")
-		log.Printf("[lord] thrall %q exited (abnormal=%v)", ev.ch.spec.Name, ev.abnormal)
+		l.logExit(ev.ch.spec.Name, ev.abnormal)
 		l.emit("down", ev.ch.spec.Name, 0)
 		l.handleCrash(ev.ch, ev.abnormal)
 	}
@@ -220,7 +253,7 @@ func (l *Lord) handleCrash(ch *child, abnormal bool) {
 	}
 	switch action {
 	case DontRestart:
-		log.Printf("[lord] thrall %q is not restarted (policy=%s)", ch.spec.Name, ch.spec.Restart)
+		l.log.Info("thrall not restarted", slog.String("name", ch.spec.Name), slog.String("policy", ch.spec.Restart))
 	case RestartOne:
 		l.restartOne(ch)
 	case RestartAll:
@@ -238,10 +271,11 @@ func (l *Lord) restartOne(ch *child) {
 	if l.backoff() {
 		return
 	}
-	log.Printf("[lord] restarting thrall %q", ch.spec.Name)
+	l.log.Warn("restarting thrall", slog.String("name", ch.spec.Name))
+	l.metrics.incRestart(ch.spec.Name)
 	l.emit("restarting", ch.spec.Name, 0)
 	if err := l.startChild(ch); err != nil {
-		log.Printf("[lord] restart of %q failed: %v", ch.spec.Name, err)
+		l.log.Error("restart failed", slog.String("name", ch.spec.Name), slog.Any("err", err))
 	}
 }
 
@@ -256,7 +290,8 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 	for i, ch := range group {
 		names[i] = ch.spec.Name
 	}
-	log.Printf("[lord] %s: crash of %q -> restarting group [%s]", strategy, crashed.spec.Name, strings.Join(names, " "))
+	l.log.Warn("group restart", slog.String("strategy", strategy), slog.String("crashed", crashed.spec.Name), slog.String("group", strings.Join(names, " ")))
+	l.metrics.incRestart(crashed.spec.Name)
 	l.emit("group_restart", crashed.spec.Name, 0)
 
 	nc := l.ether.Conn()
@@ -266,7 +301,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 		if ch == crashed || !ch.running() {
 			continue
 		}
-		log.Printf("[lord] %s: stopping sibling %q", strategy, ch.spec.Name)
+		l.log.Info("stopping sibling", slog.String("strategy", strategy), slog.String("name", ch.spec.Name))
 		ch.requestDrain(nc, defaultGrace) // blocks until done; its exit event will then be stale
 	}
 
@@ -277,7 +312,7 @@ func (l *Lord) restartGroup(strategy string, group []*child, crashed *child) {
 	// 2) restart the whole group in order
 	for _, ch := range group {
 		if err := l.startChild(ch); err != nil {
-			log.Printf("[lord] restart of %q failed: %v", ch.spec.Name, err)
+			l.log.Error("restart failed", slog.String("name", ch.spec.Name), slog.Any("err", err))
 		}
 	}
 }
@@ -287,7 +322,8 @@ func (l *Lord) overIntensity(ch *child) bool {
 	window := time.Duration(l.manifest.RestartIntensity.WithinMs) * time.Millisecond
 	if max := l.manifest.RestartIntensity.Max; max > 0 && window > 0 {
 		if n := ch.restartsWithin(window); n > max {
-			log.Printf("[lord] thrall %q exceeded restart-intensity (%d starts / %s) - giving up", ch.spec.Name, n, window)
+			l.log.Error("restart-intensity exceeded - giving up", slog.String("name", ch.spec.Name), slog.Int("starts", n), slog.Duration("within", window))
+			l.metrics.incGaveUp(ch.spec.Name)
 			l.emit("gave_up", ch.spec.Name, 0)
 			return true
 		}
@@ -335,7 +371,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		lock, ok, err := l.locks.TryAcquire(name, l.id)
 		if err != nil {
-			log.Printf("[lord] singleton %q: lock error: %v", name, err)
+			l.log.Error("singleton lock error", slog.String("name", name), slog.Any("err", err))
 			if l.sleep(singletonRetry) {
 				return
 			}
@@ -343,7 +379,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		if !ok {
 			if !waiting {
-				log.Printf("[lord] singleton %q: lock held by another lord - waiting", name)
+				l.log.Info("singleton lock held by another lord - waiting", slog.String("name", name))
 				waiting = true
 			}
 			if l.sleep(singletonRetry) {
@@ -352,14 +388,14 @@ func (l *Lord) manageSingleton(ch *child) {
 			continue
 		}
 		waiting = false
-		log.Printf("[lord] singleton %q: lock ACQUIRED (%s) - starting", name, l.id)
+		l.log.Info("singleton lock acquired - starting", slog.String("name", name), slog.String("lord", l.id))
 		l.emit("lock_acquired", name, 0)
 
 		renewStop := make(chan struct{})
 		go l.renewLoop(ch, lock, renewStop)
 
 		if _, err := ch.spawn(l.procCtx); err != nil {
-			log.Printf("[lord] singleton %q: spawn failed: %v", name, err)
+			l.log.Error("singleton spawn failed", slog.String("name", name), slog.Any("err", err))
 			close(renewStop)
 			_ = lock.Release()
 			if l.sleep(restartBackoff) {
@@ -369,7 +405,7 @@ func (l *Lord) manageSingleton(ch *child) {
 		}
 		pid := ch.pid()
 		l.setStatus(name, pid, "starting")
-		log.Printf("[lord] starting thrall %q (pid=%d, singleton)", name, pid)
+		l.log.Info("starting thrall", slog.String("name", name), slog.Int("pid", pid), slog.String("scope", "singleton"))
 		l.emit("spawned", name, pid)
 
 		abnormal := ch.wait()
@@ -379,14 +415,14 @@ func (l *Lord) manageSingleton(ch *child) {
 		l.mu.Lock()
 		l.ready[name] = false
 		l.mu.Unlock()
-		log.Printf("[lord] singleton %q: process exited (abnormal=%v), lock released", name, abnormal)
+		l.logExit(name, abnormal)
 		l.emit("lock_released", name, 0)
 
 		if l.stopping() {
 			return
 		}
 		if decide(ch.spec.Restart, l.manifest.Strategy, abnormal) == DontRestart {
-			log.Printf("[lord] singleton %q is not restarted (policy=%s)", name, ch.spec.Restart)
+			l.log.Info("singleton not restarted", slog.String("name", name), slog.String("policy", ch.spec.Restart))
 			return
 		}
 		if l.sleep(restartBackoff) {
@@ -404,7 +440,7 @@ func (l *Lord) renewLoop(ch *child, lock *singleton.Lock, stop <-chan struct{}) 
 			return
 		case <-t.C:
 			if err := lock.Renew(); err != nil {
-				log.Printf("[lord] singleton %q: lock LOST (%v) - terminating local instance", ch.spec.Name, err)
+				l.log.Warn("singleton lock lost - terminating local instance", slog.String("name", ch.spec.Name), slog.Any("err", err))
 				ch.kill()
 				return
 			}
@@ -412,7 +448,7 @@ func (l *Lord) renewLoop(ch *child, lock *singleton.Lock, stop <-chan struct{}) 
 	}
 }
 
-func (l *Lord) onHeartbeat(name string) {
+func (l *Lord) onHeartbeat(name string, data []byte) {
 	if name == "" {
 		return
 	}
@@ -424,20 +460,89 @@ func (l *Lord) onHeartbeat(name string) {
 	if pid == 0 {
 		return
 	}
+	l.recordHeartbeatMetrics(name, data)
 	l.setStatus(name, pid, "ready")
 	l.mu.Lock()
-	first := !l.ready[name]
+	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
+	announce := !l.ready[name] || l.stale[name]
 	l.ready[name] = true
+	delete(l.stale, name)
+	l.lastSeen[name] = time.Now()
 	l.mu.Unlock()
-	if first {
-		log.Printf("[lord] thrall %q is ready (on the bus)", name)
+	if announce {
+		l.log.Info("thrall ready (on the bus)", slog.String("name", name), slog.Int("pid", pid))
 		l.emit("ready", name, pid)
+	}
+}
+
+// recordHeartbeatMetrics parses a thrall's self-reported metrics from the heartbeat payload
+// and folds them into the registry. A heartbeat without a payload (older SDK, or none) is
+// simply ignored - liveness still works from the heartbeat itself.
+func (l *Lord) recordHeartbeatMetrics(name string, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	var e wire.Envelope
+	if json.Unmarshal(data, &e) != nil || len(e.Payload) == 0 {
+		return
+	}
+	var hm wire.HeartbeatMetrics
+	if json.Unmarshal(e.Payload, &hm) != nil {
+		return
+	}
+	l.metrics.recordHeartbeat(name, hm)
+}
+
+// reapHeartbeats periodically looks for ready thralls that stopped heart-beating (a hung
+// process the OS watcher cannot see) and marks them stale.
+func (l *Lord) reapHeartbeats() {
+	if l.hbMissAfter <= 0 || l.hbCheckEvery <= 0 {
+		return
+	}
+	t := time.NewTicker(l.hbCheckEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.appCtx.Done():
+			return
+		case now := <-t.C:
+			l.checkHeartbeats(now)
+		}
+	}
+}
+
+// checkHeartbeats marks every ready thrall whose last heartbeat is older than hbMissAfter as
+// stale (once per outage), emitting an event and counting the miss. Recovery back to ready is
+// handled by onHeartbeat when a heartbeat resumes.
+func (l *Lord) checkHeartbeats(now time.Time) {
+	l.mu.Lock()
+	var newlyStale []string
+	for name, seen := range l.lastSeen {
+		if l.ready[name] && !l.stale[name] && now.Sub(seen) > l.hbMissAfter {
+			l.stale[name] = true
+			l.ready[name] = false
+			newlyStale = append(newlyStale, name)
+		}
+	}
+	l.mu.Unlock()
+
+	for _, name := range newlyStale {
+		pid := 0
+		if ch := l.childByName(name); ch != nil {
+			pid = ch.pid()
+		}
+		l.setStatus(name, pid, "stale")
+		l.metrics.incHeartbeatMiss(name)
+		l.emit("stale", name, pid)
+		l.log.Warn("thrall heartbeat missed - marking stale", slog.String("name", name))
 	}
 }
 
 // Stop performs a graceful drain of all thralls.
 func (l *Lord) Stop() {
 	l.draining.Store(true)
+	l.metrics.reg.Set(metricUp, nil, 0)
+	l.stopMetricsServer()
 	nc := l.ether.Conn()
 
 	// Snapshot under the lock; drain both static and dynamic children.
@@ -478,8 +583,19 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 	if err := l.reg.Set(name, registry.Entry{
 		PID: pid, Node: l.id, Status: status, UpdatedMs: time.Now().UnixMilli(),
 	}); err != nil {
-		log.Printf("[lord] registry Set(%q) failed: %v", name, err)
+		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))
 	}
+	l.metrics.setStatus(name, status)
+}
+
+// logExit records a thrall's process exit at a level reflecting its nature: an abnormal
+// exit (non-zero / signalled) is a warning, a clean exit is informational.
+func (l *Lord) logExit(name string, abnormal bool) {
+	if abnormal {
+		l.log.Warn("thrall exited", slog.String("name", name), slog.Bool("abnormal", true))
+		return
+	}
+	l.log.Info("thrall exited", slog.String("name", name), slog.Bool("abnormal", false))
 }
 
 func (l *Lord) emit(event, name string, pid int) {
@@ -490,6 +606,18 @@ func (l *Lord) emit(event, name string, pid int) {
 		return
 	}
 	_ = l.ether.Conn().Publish(wire.Events, data)
+}
+
+// forgetThrall drops all per-thrall observability state for a stopped thrall - the heartbeat
+// maps and the per-name metric series - so a long-lived lord with dynamic spawn/stop churn does
+// not accumulate stale entries.
+func (l *Lord) forgetThrall(name string) {
+	l.mu.Lock()
+	delete(l.ready, name)
+	delete(l.stale, name)
+	delete(l.lastSeen, name)
+	l.mu.Unlock()
+	l.metrics.forget(name)
 }
 
 func (l *Lord) childByName(name string) *child {

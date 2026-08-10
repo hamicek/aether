@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
 import type { NatsConnection } from "nats";
-import { startChild, stopChild } from "./client";
+import { startChild, stopChild, call, cast, useConnection } from "./client";
 import { decode, encode, type Envelope } from "./envelope";
 
 // fakeLord returns a NatsConnection whose request() decodes the ctl envelope, hands it
@@ -77,4 +77,35 @@ test("startChild propagates a request timeout", async () => {
   } as unknown as NatsConnection;
 
   await expect(startChild(nc, { name: "x", cmd: "./x" }, { timeoutMs: 100 })).rejects.toThrow();
+});
+
+test("call stamps a provided trace and mints one when absent", async () => {
+  let seen: Envelope = { v: 1, kind: "call" };
+  const nc = {
+    request: async (_s: string, d: Uint8Array) => {
+      seen = decode(d);
+      return { data: encode({ v: 1, id: seen.id, kind: "reply", status: "ok", payload: {} }) };
+    },
+  } as unknown as NatsConnection;
+  useConnection(nc);
+
+  await call("t", "op", {}, { trace: "T-1" });
+  expect(seen.trace).toBe("T-1");
+
+  await call("t", "op", {});
+  expect((seen.trace ?? "").length).toBeGreaterThan(0);
+  expect(seen.trace).not.toBe("T-1");
+});
+
+test("cast stamps a provided trace", () => {
+  let seen: Envelope = { v: 1, kind: "cast" };
+  const nc = {
+    publish: (_s: string, d: Uint8Array) => {
+      seen = decode(d);
+    },
+  } as unknown as NatsConnection;
+  useConnection(nc);
+
+  cast("t", "op", {}, { trace: "T-2" });
+  expect(seen.trace).toBe("T-2");
 });

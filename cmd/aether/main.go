@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/hamicek/aether/internal/ether"
 	"github.com/hamicek/aether/internal/lord"
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/wire"
 )
@@ -65,12 +67,14 @@ func up(argv []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	logger := obs.NewLogger().With(slog.String("component", "aether"), slog.String("app", m.App))
+
 	eth, err := ether.Start(ctx, m.Nats)
 	if err != nil {
 		log.Fatalf("ether: %v", err)
 	}
 	defer eth.Stop()
-	log.Printf("ether running at %s (mode=%s)", eth.URL(), m.Nats.Mode)
+	logger.Info("ether running", slog.String("url", eth.URL()), slog.String("mode", m.Nats.Mode))
 
 	writeEndpoint(endpoint{URL: eth.URL(), App: m.App})
 	defer os.Remove(endpointFile)
@@ -84,7 +88,7 @@ func up(argv []string) {
 	}
 
 	<-ctx.Done()
-	log.Println("shutdown: graceful drain of thralls...")
+	logger.Info("shutdown: graceful drain of thralls")
 	root.Stop()
 }
 
@@ -176,7 +180,7 @@ func castCmd(argv []string) {
 	nc := connect(ep.URL)
 	defer nc.Close()
 
-	env := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	env := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
 	data, _ := json.Marshal(env)
 	if err := nc.Publish(wire.Cast(ep.App, name), data); err != nil {
 		log.Fatalf("publish: %v", err)
@@ -206,7 +210,7 @@ func callCmd(argv []string) {
 	nc := connect(ep.URL)
 	defer nc.Close()
 
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(wire.Call(ep.App, name), data, *timeout)
 	if err != nil {

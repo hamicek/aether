@@ -10,14 +10,45 @@ package thrall
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
 )
+
+// mailboxStats collects the thrall's self-metrics reported on each heartbeat: how many
+// messages it currently holds (depth), how long the most recent handler took (latency), and
+// how many it has processed in total. begin/end bracket every handled message.
+type mailboxStats struct {
+	depth     atomic.Int64
+	processed atomic.Uint64
+	lastNs    atomic.Int64 // duration of the most recent handler, in nanoseconds
+}
+
+func (s *mailboxStats) begin() time.Time {
+	s.depth.Add(1)
+	return time.Now()
+}
+
+func (s *mailboxStats) end(start time.Time) {
+	s.lastNs.Store(int64(time.Since(start)))
+	s.processed.Add(1)
+	s.depth.Add(-1)
+}
+
+func (s *mailboxStats) snapshot() wire.HeartbeatMetrics {
+	return wire.HeartbeatMetrics{
+		MailboxDepth:     int(s.depth.Load()),
+		MailboxLatencyMs: float64(s.lastNs.Load()) / float64(time.Millisecond),
+		ProcessedTotal:   s.processed.Load(),
+	}
+}
 
 // Ctx is passed to init and to every handler. WE DO NOT HIDE NATS BEHIND THE THRALL -
 // a thrall has full access to JetStream, KV and its own subjects via Ctx.NATS.
@@ -25,6 +56,13 @@ type Ctx struct {
 	NATS *nats.Conn
 	Name string
 	App  string
+	// Log is the thrall's structured logger, pre-tagged with app and name and configured
+	// from the logging env the lord injected - handlers should log through it.
+	Log *slog.Logger
+	// Trace is the correlation id of the message currently being handled. The SDK sets it
+	// before each handler runs; Ctx.Call/Ctx.Cast propagate it to downstream messages so one
+	// operation can be followed across processes. Handlers may include it in their own logs.
+	Trace string
 }
 
 // Handler shapes hold the GenServer semantics:
@@ -87,7 +125,8 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 	sharedConn = nc
-	ctx := &Ctx{NATS: nc, Name: name, App: app}
+	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
 
 	state, err := def.Init(ctx)
 	if err != nil {
@@ -96,14 +135,19 @@ func Start[S any](def Def[S]) error {
 
 	// Serialized mailbox: a mutex around every state change (call and cast).
 	var mu sync.Mutex
+	stats := &mailboxStats{}
 
 	processCall := func(msg *nats.Msg) {
 		var e wire.Envelope
 		if json.Unmarshal(msg.Data, &e) != nil {
 			return
 		}
+		start := stats.begin()
+		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		ctx.Trace = orNewTrace(e.Trace)
+		log.Debug("handling call", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCall[e.Op]
 		if !ok {
 			_ = msg.Respond(mustJSON(errReply(e, "unknown_op", "unknown call op: "+e.Op)))
@@ -123,15 +167,19 @@ func Start[S any](def Def[S]) error {
 		if json.Unmarshal(data, &e) != nil {
 			return
 		}
+		start := stats.begin()
+		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		ctx.Trace = orNewTrace(e.Trace)
+		log.Debug("handling cast", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCast[e.Op]
 		if !ok {
 			return
 		}
 		next, herr := h(e.Payload, state, ctx)
 		if herr != nil {
-			fmt.Fprintf(os.Stderr, "[%s] cast %s failed: %v\n", name, e.Op, herr)
+			log.Error("cast handler failed", slog.String("op", e.Op), slog.Any("err", herr))
 			return
 		}
 		state = next
@@ -154,7 +202,7 @@ func Start[S any](def Def[S]) error {
 		}
 		go verbLoop(infoSub, stop, func(_ *nats.Msg) {}) // TODO handleInfo
 
-		go consumeDurableCast(nc, app, name, stop, processCast)
+		go consumeDurableCast(nc, app, name, log, stop, processCast)
 	} else {
 		// Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
 		dataSub, err := nc.SubscribeSync(wire.Data(app, name))
@@ -185,7 +233,7 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 
-	go heartbeat(nc, name, stop)
+	go heartbeat(nc, name, stats, stop)
 
 	<-stop
 	if def.Terminate != nil {
@@ -220,16 +268,16 @@ func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Ms
 // consumeDurableCast reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
-func consumeDurableCast(nc *nats.Conn, app, name string, stop <-chan struct{}, processCast func([]byte)) {
+func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop <-chan struct{}, processCast func([]byte)) {
 	js, err := nc.JetStream()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] jetstream: %v\n", name, err)
+		log.Error("jetstream unavailable", slog.Any("err", err))
 		return
 	}
 	sub, err := js.PullSubscribe(wire.Cast(app, name), name,
 		nats.BindStream(wire.Stream(app, name)), nats.DeliverAll())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] durable consumer: %v\n", name, err)
+		log.Error("durable consumer setup failed", slog.Any("err", err))
 		return
 	}
 	for {
@@ -249,13 +297,39 @@ func consumeDurableCast(nc *nats.Conn, app, name string, stop <-chan struct{}, p
 	}
 }
 
-// Call = synchronous request/reply (GenServer.call) to another thrall.
+// Call = synchronous request/reply (GenServer.call) to another thrall. Called outside a
+// handler (standalone) it mints a fresh trace; from within a handler use Ctx.Call to
+// propagate the current trace instead.
 func Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
 	if sharedConn == nil {
 		return nil, fmt.Errorf("no connection - call Start() first")
 	}
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	msg, err := sharedConn.Request(wire.Call(os.Getenv("AETHER_APP"), target), mustJSON(req), timeout)
+	return doCall(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout)
+}
+
+// Cast = fire-and-forget (GenServer.cast) to another thrall. Mints a fresh trace; from within
+// a handler use Ctx.Cast to propagate the current trace.
+func Cast(target, op string, payload any) error {
+	if sharedConn == nil {
+		return fmt.Errorf("no connection - call Start() first")
+	}
+	return doCast(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload)
+}
+
+// Call is the trace-propagating request/reply from inside a handler: the downstream message
+// carries the trace of the message currently being handled.
+func (c *Ctx) Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+	return doCall(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout)
+}
+
+// Cast is the trace-propagating fire-and-forget from inside a handler.
+func (c *Ctx) Cast(target, op string, payload any) error {
+	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload)
+}
+
+func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+	msg, err := nc.Request(wire.Call(app, target), mustJSON(req), timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -269,13 +343,21 @@ func Call(target, op string, payload any, timeout time.Duration) (json.RawMessag
 	return reply.Payload, nil
 }
 
-// Cast = fire-and-forget (GenServer.cast) to another thrall.
-func Cast(target, op string, payload any) error {
-	if sharedConn == nil {
-		return fmt.Errorf("no connection - call Start() first")
+func doCast(nc *nats.Conn, app, trace, target, op string, payload any) error {
+	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+	return nc.Publish(wire.Cast(app, target), mustJSON(e))
+}
+
+// newTrace mints a fresh correlation id for an edge (a message that starts a new operation).
+func newTrace() string { return nats.NewInbox() }
+
+// orNewTrace returns the given trace, or a fresh one when it is empty (the message came in
+// without a trace, so this thrall is the edge that starts one).
+func orNewTrace(trace string) string {
+	if trace == "" {
+		return newTrace()
 	}
-	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	return sharedConn.Publish(wire.Cast(os.Getenv("AETHER_APP"), target), mustJSON(e))
+	return trace
 }
 
 // StartChild asks the lord to spawn a new thrall at runtime - a child not in the
@@ -319,9 +401,10 @@ func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.R
 	return reply.Payload, nil
 }
 
-func heartbeat(nc *nats.Conn, name string, stop <-chan struct{}) {
+func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan struct{}) {
 	tick := func() {
-		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli()}
+		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli(),
+			Payload: mustMarshal(stats.snapshot())}
 		_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
 	}
 	tick()

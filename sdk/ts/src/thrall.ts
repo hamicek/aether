@@ -2,7 +2,8 @@ import { AckPolicy, DeliverPolicy, type NatsConnection } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
-import { useConnection, startChild, stopChild, type SpawnSpec, type CallOpts } from "./client";
+import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
+import { newLogger, type Logger } from "./log";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -24,6 +25,14 @@ export interface Ctx {
   nats: NatsConnection;
   name: string;
   app: string;
+  // Structured logger pre-tagged with app and name, configured from the logging env the
+  // lord injected - handlers should log through it.
+  log: Logger;
+  // trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
+  // propagate it to downstream messages so one operation can be followed across processes.
+  trace: string;
+  call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
+  cast: (target: string, op: string, payload?: unknown) => void;
   // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
   // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
   // outside any manifest group strategy.
@@ -51,10 +60,15 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const durable = process.env.AETHER_DURABLE === "1";
   const nc = await open(env);
   useConnection(nc); // so this thrall can call()/cast() other thralls
+  const log = newLogger({ component: "thrall", app: env.app, name });
   const ctx: Ctx = {
     nats: nc,
     name,
     app: env.app,
+    log,
+    trace: "",
+    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
+    cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
@@ -68,33 +82,70 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     return tail;
   };
 
-  // handleCall/handleCast over the serialized mailbox (shared by the core and durable branches).
-  const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> =>
-    serialize(async () => {
-      const handler = def.handleCall?.[e.op ?? ""];
-      if (!handler) {
-        respond(encode(errReply(e, "unknown_op", `unknown call op: ${e.op}`)));
-        return;
-      }
-      try {
-        const [reply, next] = await handler(e.payload, state, ctx);
-        state = next;
-        respond(encode(okReply(e, reply)));
-      } catch (err) {
-        respond(encode(errReply(e, "handler_error", String(err))));
-      }
-    });
+  // Self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats): depth = messages
+  // currently held, lastMs = duration of the most recent handler, processed = cumulative count.
+  const stats = { depth: 0, processed: 0, lastMs: 0 };
+  const beginJob = (): number => {
+    stats.depth++;
+    return performance.now();
+  };
+  const endJob = (start: number): void => {
+    stats.lastMs = performance.now() - start;
+    stats.processed++;
+    stats.depth--;
+  };
+  const snapshot = () => ({
+    mailbox_depth: stats.depth,
+    mailbox_latency_ms: stats.lastMs,
+    processed_total: stats.processed,
+  });
 
-  const onCast = (e: Envelope): Promise<void> =>
-    serialize(async () => {
-      const handler = def.handleCast?.[e.op ?? ""];
-      if (!handler) return;
+  // handleCall/handleCast over the serialized mailbox (shared by the core and durable branches).
+  // beginJob runs at enqueue time (before the serialized job), so mailbox_depth counts messages
+  // waiting in the promise chain - matching the Go/Python SDKs, where begin() runs before the
+  // mailbox lock.
+  const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
+    const start = beginJob();
+    return serialize(async () => {
+      ctx.trace = orNewTrace(e.trace);
+      log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
-        state = await handler(e.payload, state, ctx);
-      } catch (err) {
-        console.error(`[${name}] cast ${e.op} failed:`, err);
+        const handler = def.handleCall?.[e.op ?? ""];
+        if (!handler) {
+          respond(encode(errReply(e, "unknown_op", `unknown call op: ${e.op}`)));
+          return;
+        }
+        try {
+          const [reply, next] = await handler(e.payload, state, ctx);
+          state = next;
+          respond(encode(okReply(e, reply)));
+        } catch (err) {
+          respond(encode(errReply(e, "handler_error", String(err))));
+        }
+      } finally {
+        endJob(start);
       }
     });
+  };
+
+  const onCast = (e: Envelope): Promise<void> => {
+    const start = beginJob();
+    return serialize(async () => {
+      ctx.trace = orNewTrace(e.trace);
+      log.debug("handling cast", { op: e.op, trace: ctx.trace });
+      try {
+        const handler = def.handleCast?.[e.op ?? ""];
+        if (!handler) return;
+        try {
+          state = await handler(e.payload, state, ctx);
+        } catch (err) {
+          log.error("cast handler failed", { op: e.op, err: String(err) });
+        }
+      } finally {
+        endJob(start);
+      }
+    });
+  };
 
   if (durable) {
     // Durable thrall: call/info over core (synchronous), cast via JetStream (survives a crash).
@@ -120,7 +171,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     }
   })();
 
-  startHeartbeat(nc, name);
+  startHeartbeat(nc, name, snapshot);
 }
 
 // subscribeData: a single wildcard subscription (call/cast/info) for a non-durable thrall.
@@ -201,9 +252,9 @@ function errReply(req: Envelope, type: string, message: string): Envelope {
   };
 }
 
-function startHeartbeat(nc: NatsConnection, name: string): void {
+function startHeartbeat(nc: NatsConnection, name: string, snapshot: () => unknown): void {
   const tick = () => {
-    const hb: Envelope = { v: 1, kind: "hb", to: name, ts: Date.now() };
+    const hb: Envelope = { v: 1, kind: "hb", to: name, payload: snapshot(), ts: Date.now() };
     nc.publish(subjects.hb(name), encode(hb));
   };
   tick();
