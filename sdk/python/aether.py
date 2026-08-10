@@ -348,6 +348,8 @@ async def start(defn: ThrallDef) -> None:
     if not url or not app:
         raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
     name = defn.name or env_name
+    if defn.init is None:
+        raise RuntimeError(f"thrall {name}: init is required")
     durable = os.environ.get("AETHER_DURABLE") == "1"
     ca = os.environ.get("AETHER_NATS_CA")
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
@@ -605,6 +607,8 @@ class _Machine:
 
     def _enter(self, nxt, override):
         frm = self.cur
+        if nxt not in self.defn.states:
+            self.log.warn("fsm transition to unknown state", **{"from": frm, "to": nxt})
         self.cur = nxt
         self.log.info("fsm transition", **{"from": frm, "to": nxt})
         to = override if override is not None else self.defn.states.get(nxt, State(on={})).timeout
@@ -646,6 +650,10 @@ async def start_fsm(defn: FSM) -> None:
     name = defn.name or env_name
     if not defn.initial:
         raise RuntimeError(f"fsm {name}: initial state is required")
+    if defn.init is None:
+        raise RuntimeError(f"fsm {name}: init is required")
+    if defn.initial not in defn.states:
+        raise RuntimeError(f"fsm {name}: initial state {defn.initial} is not in states")
     durable = os.environ.get("AETHER_DURABLE") == "1"
     ca = os.environ.get("AETHER_NATS_CA")
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
