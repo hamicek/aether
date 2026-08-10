@@ -3,6 +3,7 @@ package thrall
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
@@ -46,7 +47,51 @@ func (testError) Error() string { return "boom" }
 func newRunner(def FSM[int]) *fsmRunner[int] {
 	ctx := &Ctx{Log: obs.NewLogger(), Name: def.Name, App: "test"}
 	data, _ := def.Init(ctx)
-	return &fsmRunner[int]{def: def, ctx: ctx, log: ctx.Log, stats: &mailboxStats{}, cur: def.Initial, data: data}
+	r := &fsmRunner[int]{def: def, ctx: ctx, log: ctx.Log, stats: &mailboxStats{}, cur: def.Initial, data: data}
+	// Arm the initial state's timeout, as StartFSM does.
+	r.mu.Lock()
+	r.armLocked(def.States[r.cur].Timeout)
+	r.mu.Unlock()
+	return r
+}
+
+// waitState polls until the runner reaches want, or fails after timeout.
+func waitState(t *testing.T, r *fsmRunner[int], want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if got, _ := r.snapshot(); got == want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	got, _ := r.snapshot()
+	t.Fatalf("timeout waiting for state %q, still in %q", want, got)
+}
+
+// timeoutMachine: "waiting" auto-transitions to "expired" after a state timeout (op "tick"),
+// unless "ping" moves it to "active" (which has no timeout) first.
+func timeoutMachine(after time.Duration) FSM[int] {
+	return FSM[int]{
+		Name:    "tmo",
+		Initial: "waiting",
+		Init:    func(*Ctx) (int, error) { return 0, nil },
+		States: map[string]State[int]{
+			"waiting": {
+				On: map[string]Reaction[int]{
+					"ping": {Fn: func(_ Event, d int, _ *Ctx) (Outcome[int], error) {
+						return Outcome[int]{Next: "active", Data: d}, nil
+					}},
+					"tick": {Fn: func(_ Event, d int, _ *Ctx) (Outcome[int], error) {
+						return Outcome[int]{Next: "expired", Data: d + 1}, nil
+					}},
+				},
+				Timeout: &StateTimeout[int]{After: after, Op: "tick"},
+			},
+			"active":  {On: map[string]Reaction[int]{}},
+			"expired": {On: map[string]Reaction[int]{}},
+		},
+	}
 }
 
 // call dispatches a call event and returns the reply envelope.
@@ -146,5 +191,53 @@ func TestFSMCastTransitionsWithoutReply(t *testing.T) {
 	cast(r, "coin") // must not panic on nil respond
 	if got, _ := r.snapshot(); got != "unlocked" {
 		t.Errorf("after cast coin, state = %q, want unlocked", got)
+	}
+}
+
+func TestFSMStateTimeoutFiresTransition(t *testing.T) {
+	r := newRunner(timeoutMachine(30 * time.Millisecond))
+	waitState(t, r, "expired", time.Second)
+	if _, d := r.snapshot(); d != 1 {
+		t.Errorf("timeout data = %d, want 1", d)
+	}
+}
+
+func TestFSMEventCancelsStateTimeout(t *testing.T) {
+	r := newRunner(timeoutMachine(30 * time.Millisecond))
+	cast(r, "ping") // -> active (no timeout) before the 30ms elapses
+	if got, _ := r.snapshot(); got != "active" {
+		t.Fatalf("after ping, state = %q, want active", got)
+	}
+	// The waiting-state timer must not fire "tick" now that we left the state.
+	time.Sleep(80 * time.Millisecond)
+	if got, _ := r.snapshot(); got != "active" {
+		t.Errorf("state timeout fired after leaving the state: state = %q", got)
+	}
+}
+
+func TestFSMOutcomeReArmsTimeoutWhileStaying(t *testing.T) {
+	// A state that, on "poke", stays put but re-arms its timeout; the timeout fires "done".
+	def := FSM[int]{
+		Name: "rearm", Initial: "idle", Init: func(*Ctx) (int, error) { return 0, nil },
+		States: map[string]State[int]{
+			"idle": {On: map[string]Reaction[int]{
+				"poke": {Fn: func(_ Event, d int, _ *Ctx) (Outcome[int], error) {
+					return Outcome[int]{Data: d + 1, Timeout: &StateTimeout[int]{After: 30 * time.Millisecond, Op: "done"}}, nil
+				}},
+				"done": {Fn: func(_ Event, d int, _ *Ctx) (Outcome[int], error) {
+					return Outcome[int]{Next: "finished", Data: d}, nil
+				}},
+			}},
+			"finished": {On: map[string]Reaction[int]{}},
+		},
+	}
+	r := newRunner(def)
+	cast(r, "poke") // stays in idle, arms a 30ms timeout
+	if got, _ := r.snapshot(); got != "idle" {
+		t.Fatalf("after poke, state = %q, want idle", got)
+	}
+	waitState(t, r, "finished", time.Second)
+	if _, d := r.snapshot(); d != 1 {
+		t.Errorf("data after re-armed timeout = %d, want 1", d)
 	}
 }

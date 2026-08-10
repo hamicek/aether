@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -24,20 +25,32 @@ import (
 // machine is observable from outside without any application code.
 const fsmStateOp = "_state"
 
-// Event is one input to the machine: an op (from the message), its payload, and how it
-// arrived (call | cast | timeout).
+// EventTimeout is the Kind of an event delivered by a state timeout (vs KindCall / KindCast).
+const EventTimeout = "timeout"
+
+// Event is one input to the machine: an op (from the message or the state timeout), its
+// payload, and how it arrived (call | cast | timeout).
 type Event struct {
 	Op      string
 	Payload json.RawMessage
 	Kind    string
 }
 
-// Outcome is what a reaction returns: the next state ("" = stay), the new data, and (for a
-// call event) the reply to send back.
+// StateTimeout arms a timeout on a state: if no transition OUT of the state happens within
+// After, the SDK delivers a timeout event with op Op to the current state (so a reaction for
+// that op can fire the transition). It is a first-class mailbox event, not a manual ticker.
+type StateTimeout[D any] struct {
+	After time.Duration
+	Op    string
+}
+
+// Outcome is what a reaction returns: the next state ("" = stay), the new data, (for a call
+// event) the reply, and optionally a state timeout to (re-)arm - even while staying.
 type Outcome[D any] struct {
-	Next  string
-	Data  D
-	Reply any
+	Next    string
+	Data    D
+	Reply   any
+	Timeout *StateTimeout[D]
 }
 
 // Reaction handles one op in one state. Guard (optional) gates the transition on the current
@@ -48,9 +61,11 @@ type Reaction[D any] struct {
 	Fn    func(ev Event, data D, ctx *Ctx) (Outcome[D], error)
 }
 
-// State is one named state: the reactions it has, keyed by op.
+// State is one named state: the reactions it has (keyed by op) and an optional state timeout
+// armed when the machine enters the state.
 type State[D any] struct {
-	On map[string]Reaction[D]
+	On      map[string]Reaction[D]
+	Timeout *StateTimeout[D]
 }
 
 // FSM defines a state-machine thrall with extended data of type D.
@@ -109,6 +124,11 @@ func StartFSM[D any](def FSM[D]) error {
 
 	m := &fsmRunner[D]{def: def, ctx: ctx, log: log, cur: def.Initial, data: data, stats: &mailboxStats{}}
 
+	// Arm the initial state's timeout before any events can arrive.
+	m.mu.Lock()
+	m.armLocked(def.States[m.cur].Timeout)
+	m.mu.Unlock()
+
 	stop := make(chan struct{})
 	stopped := false
 
@@ -156,6 +176,9 @@ func StartFSM[D any](def FSM[D]) error {
 	go heartbeat(nc, name, m.stats, stop)
 
 	<-stop
+	m.mu.Lock()
+	m.stopTimer()
+	m.mu.Unlock()
 	if def.Terminate != nil {
 		cur, d := m.snapshot()
 		def.Terminate("drain", cur, d)
@@ -171,9 +194,11 @@ type fsmRunner[D any] struct {
 	log   *slog.Logger
 	stats *mailboxStats
 
-	mu   sync.Mutex
-	cur  string
-	data D
+	mu         sync.Mutex
+	cur        string
+	data       D
+	timer      *time.Timer // the current state's timeout timer (nil = none)
+	timeoutGen uint64      // bumped on every (re)arm so a stale fire is ignored
 }
 
 func (m *fsmRunner[D]) snapshot() (string, D) {
@@ -249,7 +274,10 @@ func (m *fsmRunner[D]) dispatchLocked(ev Event, trace string, respond func(wire.
 		respond(okReply(req, out.Reply))
 	}
 	if out.Next != "" && out.Next != m.cur {
-		m.enter(out.Next)
+		m.enter(out.Next, out.Timeout)
+	} else if out.Timeout != nil {
+		// Staying in the state but (re-)arming its timeout to a new duration.
+		m.armLocked(out.Timeout)
 	}
 }
 
@@ -262,9 +290,54 @@ func (m *fsmRunner[D]) unhandled(ev Event, respond func(wire.Envelope), req wire
 	}
 }
 
-// enter transitions to a new state.
-func (m *fsmRunner[D]) enter(next string) {
+// enter transitions to a new state and arms that state's timeout (or the override). Caller
+// holds mu.
+func (m *fsmRunner[D]) enter(next string, override *StateTimeout[D]) {
 	from := m.cur
 	m.cur = next
 	m.log.Info("fsm transition", slog.String("from", from), slog.String("to", next))
+	to := override
+	if to == nil {
+		to = m.def.States[next].Timeout
+	}
+	m.armLocked(to)
+}
+
+// armLocked stops any pending timeout and arms a new one (nil = disarm). A generation token is
+// bumped so a timer that fires after being superseded is recognized as stale and ignored.
+// Caller holds mu.
+func (m *fsmRunner[D]) armLocked(to *StateTimeout[D]) {
+	m.timeoutGen++
+	if m.timer != nil {
+		m.timer.Stop()
+		m.timer = nil
+	}
+	if to == nil {
+		return
+	}
+	gen := m.timeoutGen
+	op := to.Op
+	m.timer = time.AfterFunc(to.After, func() { m.onTimeout(gen, op) })
+}
+
+// onTimeout delivers a state-timeout event into the serialized mailbox, unless a later (re)arm
+// or transition has superseded this timer (stale generation).
+func (m *fsmRunner[D]) onTimeout(gen uint64, op string) {
+	start := m.stats.begin()
+	defer m.stats.end(start)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if gen != m.timeoutGen {
+		return // superseded - a newer arm or transition happened first
+	}
+	m.dispatchLocked(Event{Op: op, Kind: EventTimeout}, "", nil, wire.Envelope{})
+}
+
+// stopTimer disarms any pending timeout (on shutdown). Caller holds mu.
+func (m *fsmRunner[D]) stopTimer() {
+	m.timeoutGen++
+	if m.timer != nil {
+		m.timer.Stop()
+		m.timer = nil
+	}
 }
