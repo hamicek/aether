@@ -10,12 +10,14 @@ package thrall
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -25,6 +27,9 @@ type Ctx struct {
 	NATS *nats.Conn
 	Name string
 	App  string
+	// Log is the thrall's structured logger, pre-tagged with app and name and configured
+	// from the logging env the lord injected - handlers should log through it.
+	Log *slog.Logger
 }
 
 // Handler shapes hold the GenServer semantics:
@@ -87,7 +92,8 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 	sharedConn = nc
-	ctx := &Ctx{NATS: nc, Name: name, App: app}
+	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
 
 	state, err := def.Init(ctx)
 	if err != nil {
@@ -131,7 +137,7 @@ func Start[S any](def Def[S]) error {
 		}
 		next, herr := h(e.Payload, state, ctx)
 		if herr != nil {
-			fmt.Fprintf(os.Stderr, "[%s] cast %s failed: %v\n", name, e.Op, herr)
+			log.Error("cast handler failed", slog.String("op", e.Op), slog.Any("err", herr))
 			return
 		}
 		state = next
@@ -154,7 +160,7 @@ func Start[S any](def Def[S]) error {
 		}
 		go verbLoop(infoSub, stop, func(_ *nats.Msg) {}) // TODO handleInfo
 
-		go consumeDurableCast(nc, app, name, stop, processCast)
+		go consumeDurableCast(nc, app, name, log, stop, processCast)
 	} else {
 		// Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
 		dataSub, err := nc.SubscribeSync(wire.Data(app, name))
@@ -220,16 +226,16 @@ func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Ms
 // consumeDurableCast reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
-func consumeDurableCast(nc *nats.Conn, app, name string, stop <-chan struct{}, processCast func([]byte)) {
+func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop <-chan struct{}, processCast func([]byte)) {
 	js, err := nc.JetStream()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] jetstream: %v\n", name, err)
+		log.Error("jetstream unavailable", slog.Any("err", err))
 		return
 	}
 	sub, err := js.PullSubscribe(wire.Cast(app, name), name,
 		nats.BindStream(wire.Stream(app, name)), nats.DeliverAll())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] durable consumer: %v\n", name, err)
+		log.Error("durable consumer setup failed", slog.Any("err", err))
 		return
 	}
 	for {
