@@ -107,6 +107,21 @@ class _MailboxStats:
         }
 
 
+def _heartbeat_interval() -> float:
+    """Seconds between heartbeats, from AETHER_HEARTBEAT_INTERVAL_MS (mirrors internal/obs): the
+    lord injects it and derives its reaper threshold from the same value. Empty/invalid -> default
+    2.0s; too-small -> floored to 0.1s."""
+    try:
+        ms = int(os.environ.get("AETHER_HEARTBEAT_INTERVAL_MS", ""))
+    except (TypeError, ValueError):
+        ms = 0
+    if ms <= 0:
+        ms = 2000
+    elif ms < 100:
+        ms = 100
+    return ms / 1000.0
+
+
 def _connect_kwargs(
     name: str, ca: Optional[str] = None, nkey_seed: Optional[str] = None
 ) -> dict:
@@ -441,11 +456,12 @@ async def start(defn: ThrallDef) -> None:
                 return
 
     async def heartbeat() -> None:
+        interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
             hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
             await nc.publish(_sub_hb(name), _encode(hb))
             try:
-                await asyncio.wait_for(stop.wait(), timeout=2.0)
+                await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
@@ -710,11 +726,12 @@ async def start_fsm(defn: FSM) -> None:
                 return
 
     async def heartbeat() -> None:
+        interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
             hb = {"v": 1, "kind": "hb", "to": name, "payload": m.snapshot(), "ts": int(time.time() * 1000)}
             await nc.publish(_sub_hb(name), _encode(hb))
             try:
-                await asyncio.wait_for(stop.wait(), timeout=2.0)
+                await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 
