@@ -265,6 +265,22 @@ Thralls report their own mailbox metrics on the heartbeat they already send ever
 aggregates them plus its own supervision counters. A thrall that stops heart-beating is marked
 `stale` and counted (`aether_heartbeat_misses_total`) even though its process is still alive.
 
+**Tuning liveness detection.** The heartbeat interval and how many misses count as `stale` are
+configurable, so a latency-sensitive deployment can detect a hung thrall faster than the default
+~6s. The lord injects the interval into the thralls and derives its own reaper threshold from the
+same value, so the two never drift:
+
+```toml
+[liveness]
+heartbeat_interval_ms = 500   # default 2000
+stale_after_misses    = 2     # default 3   -> stale after 1s instead of 6s
+```
+
+(Process death is already detected instantly by the OS watcher; this tunes detection of the
+hung-but-alive case. Faster connection-loss detection via NATS `$SYS` events is future work,
+relevant to a networked topology where thralls connect over a network rather than to a local
+embedded NATS.)
+
 **Tracing.** The envelope carries a `trace` correlation id propagated across `call`/`cast` hops:
 an edge (the CLI, or the first message) mints it, `ctx.Call` / `ctx.Cast` pass it downstream, and
 it appears in the logs - so one logical operation can be followed across processes. See

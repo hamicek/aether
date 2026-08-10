@@ -408,7 +408,9 @@ func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan stru
 		_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
 	}
 	tick()
-	t := time.NewTicker(2 * time.Second)
+	// Beat at the interval the lord injected (AETHER_HEARTBEAT_INTERVAL_MS); default 2s. The lord
+	// derives its reaper threshold from the same value, so they never drift.
+	t := time.NewTicker(obs.HeartbeatInterval())
 	defer t.Stop()
 	for {
 		select {

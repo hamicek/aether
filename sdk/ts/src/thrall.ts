@@ -5,6 +5,7 @@ import { open, readEnv, type Env } from "./connection";
 import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent } from "./rebuild";
+import { heartbeatIntervalMs } from "./heartbeat";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -263,6 +264,6 @@ export function startHeartbeat(nc: NatsConnection, name: string, snapshot: () =>
     nc.publish(subjects.hb(name), encode(hb));
   };
   tick();
-  const timer = setInterval(tick, 2000);
+  const timer = setInterval(tick, heartbeatIntervalMs()); // lord-configured interval (default 2s)
   timer.unref?.();
 }

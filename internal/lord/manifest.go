@@ -4,6 +4,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/obs"
 )
 
 // Manifest = the contents of aether.toml (the supervision tree topology).
@@ -13,6 +14,7 @@ type Manifest struct {
 	RestartIntensity Intensity     `toml:"restart_intensity"`
 	Nats             ether.Config  `toml:"nats"`
 	Observability    Observability `toml:"observability"`
+	Liveness         Liveness      `toml:"liveness"`
 	Thralls          []ThrallSpec  `toml:"thrall"`
 }
 
@@ -20,6 +22,14 @@ type Manifest struct {
 // Prometheus endpoint off (opt-in), so plain runs stay free of an open HTTP port.
 type Observability struct {
 	MetricsAddr string `toml:"metrics_addr"` // host:port for the Prometheus /metrics endpoint (empty = disabled)
+}
+
+// Liveness tunes how fast a hung-but-alive thrall is detected. The interval is propagated to the
+// thralls (they heartbeat at it) and the lord derives its reaper threshold from the same values,
+// so the two never drift. Defaults preserve the historical 2s / 3 misses (~6s).
+type Liveness struct {
+	HeartbeatIntervalMs int `toml:"heartbeat_interval_ms"` // how often a thrall heartbeats (default 2000)
+	StaleAfterMisses    int `toml:"stale_after_misses"`    // missed intervals before "stale" (default 3)
 }
 
 // Intensity = the restart-intensity window (max restarts within a given time).
@@ -60,6 +70,12 @@ func (m *Manifest) applyDefaults() {
 	}
 	if m.Nats.Mode == "" {
 		m.Nats.Mode = "embedded"
+	}
+	// Liveness: clamp the interval (non-positive -> default, too-small -> floor) and default the
+	// miss count, so a missing or nonsensical [liveness] section keeps today's 2s / 3-miss behaviour.
+	m.Liveness.HeartbeatIntervalMs = obs.ClampHeartbeatIntervalMs(m.Liveness.HeartbeatIntervalMs)
+	if m.Liveness.StaleAfterMisses <= 0 {
+		m.Liveness.StaleAfterMisses = 3
 	}
 	for i := range m.Thralls {
 		if m.Thralls[i].Restart == "" {
