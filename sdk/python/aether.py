@@ -13,11 +13,71 @@ import asyncio
 import json
 import os
 import ssl
+import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import nats
+
+
+# --- structured logging (mirrors internal/obs and the TS SDK log.ts) ---
+_LOG_LEVELS = {"debug": 10, "info": 20, "warn": 30, "warning": 30, "error": 40}
+
+
+def _level_from_env() -> int:
+    """Resolve AETHER_LOG_LEVEL; empty or unknown falls back to info, so a typo never
+    silences the runtime."""
+    return _LOG_LEVELS.get(os.environ.get("AETHER_LOG_LEVEL", "").strip().lower(), 20)
+
+
+def _format_from_env() -> str:
+    return "json" if os.environ.get("AETHER_LOG_FORMAT", "").strip().lower() == "json" else "text"
+
+
+def _render(fmt: str, level: str, msg: str, fields: dict) -> str:
+    ts = datetime.now(timezone.utc).isoformat()
+    if fmt == "json":
+        return json.dumps({"time": ts, "level": level, "msg": msg, **fields})
+    pairs = " ".join(f"{k}={v if isinstance(v, str) else json.dumps(v)}" for k, v in fields.items())
+    return f"{ts} {level} {msg}" + (f" {pairs}" if pairs else "")
+
+
+class Logger:
+    """A minimal structured logger with level filtering and JSON/text rendering. The level
+    and format come from the AETHER_LOG_* env the lord injects; base fields (app, name) are
+    merged into every record so lord and thrall logs stay tellable apart on a shared stream."""
+
+    def __init__(self, base=None, level=None, fmt=None, write=None):
+        self._base = dict(base or {})
+        self._level = level if level is not None else _level_from_env()
+        self._fmt = fmt or _format_from_env()
+        self._write = write or (lambda line: print(line, file=sys.stderr))
+
+    def _emit(self, level_name: str, at: int, msg: str, fields: dict) -> None:
+        if at < self._level:
+            return
+        self._write(_render(self._fmt, level_name, msg, {**self._base, **fields}))
+
+    def debug(self, msg: str, **fields) -> None:
+        self._emit("DEBUG", 10, msg, fields)
+
+    def info(self, msg: str, **fields) -> None:
+        self._emit("INFO", 20, msg, fields)
+
+    def warn(self, msg: str, **fields) -> None:
+        self._emit("WARN", 30, msg, fields)
+
+    def error(self, msg: str, **fields) -> None:
+        self._emit("ERROR", 40, msg, fields)
+
+    def with_(self, **fields) -> "Logger":
+        return Logger({**self._base, **fields}, self._level, self._fmt, self._write)
+
+
+def new_logger(**base) -> Logger:
+    return Logger(base)
 
 
 def _connect_kwargs(
@@ -134,6 +194,9 @@ class Ctx:
     nats: Any
     name: str
     app: str
+    # Structured logger pre-tagged with app and name, configured from the logging env the
+    # lord injected - handlers should log through it.
+    log: Any = None
 
     async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
         # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
@@ -190,7 +253,7 @@ async def start(defn: ThrallDef) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app)
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
     state = await _maybe(defn.init(ctx))
 
     stop = asyncio.Event()
@@ -217,7 +280,7 @@ async def start(defn: ThrallDef) -> None:
                 try:
                     state = await _maybe(handler(e.get("payload"), state, ctx))
                 except Exception as ex:  # noqa: BLE001
-                    print(f"[{name}] cast {e.get('op')} failed: {ex}")
+                    ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
 
     tasks: list[asyncio.Task] = []
 
