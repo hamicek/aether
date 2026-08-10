@@ -24,13 +24,20 @@ remain before it is production-grade. They are listed here so the trade-offs are
 
 ## Observability and operations
 
+**Delivered** (see [Observability](./README.md#observability) and [DESIGN.md §13b](./DESIGN.md)):
+structured logs across the lord and all SDKs, a Prometheus `/metrics` endpoint (thrall count by
+status, restarts, gave-ups, heartbeat misses, mailbox depth/latency, processed, durable backlog),
+heartbeat miss detection (a `stale` status), and `trace` correlation propagated across call/cast
+hops for cross-process tracing.
+
+Still open:
+
 - **Liveness beyond the embedded privilege.** Liveness is currently derived from heartbeats. Using
   NATS `$SYS` connection events as a supplement would give liveness signals even outside the
   embedded-server case (external clusters).
-- **Monitoring / outage detection.** A first-class way to surface thrall and lord outages: uptime
-  and last-seen in the registry, an optional metrics exporter, and alerting on `ready -> down`
-  transitions or a supervisor giving up (`gave_up`). The building blocks already exist (heartbeats,
-  the `aether._lord.events` lifecycle stream, the KV registry with status).
+- **Alerting and an OTLP bridge.** Alerting rules on `ready -> down` / `gave_up` / `stale`, and an
+  OpenTelemetry (OTLP) exporter over the existing exporter-agnostic metric/trace model, for shops
+  that push rather than scrape.
 
 ## Testing
 

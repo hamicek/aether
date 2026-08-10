@@ -1,0 +1,110 @@
+package lord
+
+import (
+	"context"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hamicek/aether/internal/registry"
+)
+
+// metricValue extracts the value of a single exposition line by its `name{labels}` prefix.
+func metricValue(t *testing.T, exposition, seriesPrefix string) (float64, bool) {
+	t.Helper()
+	for _, line := range strings.Split(exposition, "\n") {
+		if strings.HasPrefix(line, seriesPrefix+" ") {
+			v, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimPrefix(line, seriesPrefix)), 64)
+			if err != nil {
+				t.Fatalf("bad metric line %q: %v", line, err)
+			}
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// TestHeartbeatMissMarksStaleAndRecovers drives the real reaper against an embedded NATS
+// server and a real beating thrall. A miss is forced by backdating the thrall's last-seen
+// timestamp (a hung process the OS watcher cannot observe); the reaper must mark it stale
+// and count the miss, then flip it back to ready when heartbeats resume on their own.
+func TestHeartbeatMissMarksStaleAndRecovers(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "hb", "one_for_one", spec("beater", "permanent", "local"))
+
+	l, err := New(m, eth)
+	if err != nil {
+		t.Fatalf("lord.New: %v", err)
+	}
+	// Short, deterministic reaper timing so the test does not wait real heartbeat intervals.
+	l.hbCheckEvery = 30 * time.Millisecond
+	l.hbMissAfter = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := l.Start(ctx); err != nil {
+		cancel()
+		t.Fatalf("lord.Start: %v", err)
+	}
+	t.Cleanup(func() { l.Stop(); cancel() })
+
+	waitReady(t, eth, "beater")
+
+	reg, err := registry.Open(eth.Conn())
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	// Force a miss: backdate last-seen far beyond hbMissAfter. The reaper (or a direct check)
+	// then observes no recent heartbeat.
+	l.mu.Lock()
+	l.lastSeen["beater"] = time.Now().Add(-time.Second)
+	l.mu.Unlock()
+	l.checkHeartbeats(time.Now())
+
+	waitFor(t, 2*time.Second, "beater marked stale", func() bool {
+		e, ok, err := reg.Get("beater")
+		return err == nil && ok && e.Status == "stale"
+	})
+
+	// The miss must be counted exactly once for this outage.
+	if out := scrape(t, l); !strings.Contains(out, `aether_heartbeat_misses_total{name="beater"} 1`) {
+		t.Errorf("heartbeat miss not counted once:\n%s", out)
+	}
+
+	// Recovery: the thrall keeps beating (every 2s), so within a few seconds it flips back to
+	// ready on its own.
+	waitFor(t, 4*time.Second, "beater recovers to ready", func() bool {
+		e, ok, err := reg.Get("beater")
+		return err == nil && ok && e.Status == "ready"
+	})
+}
+
+// TestHeartbeatMetricsRecorded proves the lord folds a real thrall's self-reported mailbox
+// metrics (carried on the heartbeat) into the /metrics exposition.
+func TestHeartbeatMetricsRecorded(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "hbm", "one_for_one", spec("worker", "permanent", "local"))
+	l := startLord(t, eth, m)
+
+	waitReady(t, eth, "worker")
+
+	// Drive some work so processed_total climbs.
+	for i := 0; i < 3; i++ {
+		cast(t, eth.Conn(), "hbm", "worker", "inc")
+	}
+
+	// A heartbeat carrying the metrics arrives within one interval (2s) plus slack.
+	waitFor(t, 5*time.Second, "worker processed metrics recorded", func() bool {
+		v, ok := metricValue(t, scrape(t, l), `aether_processed_total{name="worker"}`)
+		return ok && v >= 3
+	})
+
+	out := scrape(t, l)
+	if _, ok := metricValue(t, out, `aether_mailbox_depth{name="worker"}`); !ok {
+		t.Errorf("mailbox depth not reported:\n%s", out)
+	}
+	if !strings.Contains(out, `aether_mailbox_latency_ms{name="worker"}`) {
+		t.Errorf("mailbox latency not reported:\n%s", out)
+	}
+}

@@ -23,16 +23,30 @@ func goldenCases() map[string]Envelope {
 	return map[string]Envelope{
 		"call": {V: 1, ID: "c-1", Kind: KindCall, To: "counter", Op: "get",
 			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000000},
+		"call_traced": {V: 1, ID: "c-9", Trace: "t-abc", Kind: KindCall, To: "counter", Op: "get",
+			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000004},
 		"cast": {V: 1, ID: "c-2", Kind: KindCast, To: "counter", Op: "inc",
 			Payload: json.RawMessage(`{}`), TS: 1700000000001},
 		"reply_ok": {V: 1, ID: "c-1", Kind: KindReply, Status: "ok",
 			Payload: json.RawMessage(`{"value":42}`)},
 		"reply_error": {V: 1, ID: "c-1", Kind: KindReply, Status: "error",
 			Error: &WireError{Type: "unknown_op", Message: "unknown call op: nope", Retryable: false}},
-		"hb":      {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
+		"hb": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
+		"hb_metrics": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000003,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 2, MailboxLatencyMs: 1.5, ProcessedTotal: 10})},
 		"ctl":     {V: 1, Kind: KindCtl, Op: "drain"},
 		"minimal": {V: 1, Kind: KindCall},
 	}
+}
+
+// mustHeartbeatMetrics marshals HeartbeatMetrics into the canonical payload bytes. Go is the
+// source of truth, so this fixes the byte order the TS and Python SDKs must reproduce.
+func mustHeartbeatMetrics(hm HeartbeatMetrics) json.RawMessage {
+	b, err := json.Marshal(hm)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 // TestEnvelopeGolden pins the canonical wire form of each case. With -update it (re)writes
@@ -96,7 +110,7 @@ func TestOmitEmpty(t *testing.T) {
 	if got := string(data); got != `{"v":1,"kind":"call"}` {
 		t.Errorf("minimal envelope: got %s, want {\"v\":1,\"kind\":\"call\"}", got)
 	}
-	for _, field := range []string{"id", "from", "to", "op", "payload", "status", "error", "ts"} {
+	for _, field := range []string{"id", "trace", "from", "to", "op", "payload", "status", "error", "ts"} {
 		if strings.Contains(string(data), `"`+field+`"`) {
 			t.Errorf("minimal envelope unexpectedly contains %q: %s", field, data)
 		}

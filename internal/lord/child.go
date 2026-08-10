@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -40,27 +41,39 @@ type child struct {
 	starts []time.Time   // start times used to evaluate the restart-intensity window
 }
 
-// spawn starts a thrall as an OS process with an injected environment. `ctx` is
-// the process context (NOT the signal one) - children must not die on SIGINT before
-// the graceful drain completes; the final SIGKILL is driven by the lord via cancelling this ctx.
-func (c *child) spawn(ctx context.Context) (gen uint64, err error) {
-	cmd := exec.CommandContext(ctx, "sh", "-c", c.spec.Cmd)
-	cmd.Env = append(os.Environ(),
+// env builds the environment injected into a thrall process: the bus address and identity,
+// the durable flag, the (paths to) TLS/nkey material for a secured bus, and the lord's
+// logging configuration so the thrall logs in the same format and level. Secrets stay in
+// files - only their paths are passed, never the key material itself.
+func (c *child) env() []string {
+	env := append(os.Environ(),
 		"AETHER_NATS_URL="+c.natsURL,
 		"AETHER_APP="+c.app,
 		"AETHER_NAME="+c.spec.Name,
 	)
 	if c.spec.Durable {
-		cmd.Env = append(cmd.Env, "AETHER_DURABLE=1")
+		env = append(env, "AETHER_DURABLE=1")
 	}
-	// Inject the paths (not the secrets) so the thrall's SDK can connect to the same
-	// secured bus; the key material stays in files, never in the process env value.
 	if c.caPath != "" {
-		cmd.Env = append(cmd.Env, "AETHER_NATS_CA="+c.caPath)
+		env = append(env, "AETHER_NATS_CA="+c.caPath)
 	}
 	if c.nkeySeed != "" {
-		cmd.Env = append(cmd.Env, "AETHER_NATS_NKEY_SEED="+c.nkeySeed)
+		env = append(env, "AETHER_NATS_NKEY_SEED="+c.nkeySeed)
 	}
+	for _, key := range []string{obs.EnvLogLevel, obs.EnvLogFormat} {
+		if v := os.Getenv(key); v != "" {
+			env = append(env, key+"="+v)
+		}
+	}
+	return env
+}
+
+// spawn starts a thrall as an OS process with an injected environment. `ctx` is
+// the process context (NOT the signal one) - children must not die on SIGINT before
+// the graceful drain completes; the final SIGKILL is driven by the lord via cancelling this ctx.
+func (c *child) spawn(ctx context.Context) (gen uint64, err error) {
+	cmd := exec.CommandContext(ctx, "sh", "-c", c.spec.Cmd)
+	cmd.Env = c.env()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
