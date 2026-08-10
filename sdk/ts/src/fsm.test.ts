@@ -14,6 +14,7 @@ function testCtx(): Ctx {
     trace: "",
     call: (() => Promise.resolve(undefined)) as Ctx["call"],
     cast: () => {},
+    append: async () => {},
     startChild: async () => "",
     stopChild: async () => {},
   };

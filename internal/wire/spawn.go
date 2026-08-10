@@ -11,10 +11,11 @@ const (
 // manifest thrall relevant to a dynamic child. A dynamic child is always local scope
 // and single instance; Replicas and Scope are not part of the runtime API.
 type SpawnSpec struct {
-	Name    string `json:"name"`
-	Cmd     string `json:"cmd"`
-	Restart string `json:"restart,omitempty"` // permanent | transient | temporary (default permanent)
-	Durable bool   `json:"durable,omitempty"` // true -> casts go through JetStream
+	Name     string `json:"name"`
+	Cmd      string `json:"cmd"`
+	Restart  string `json:"restart,omitempty"`   // permanent | transient | temporary (default permanent)
+	Durable  bool   `json:"durable,omitempty"`   // true -> casts go through JetStream
+	EventLog bool   `json:"event_log,omitempty"` // true -> provision an event-sourcing log for Append/Rebuild
 }
 
 // StopSpec is the request payload to stop a child at runtime.

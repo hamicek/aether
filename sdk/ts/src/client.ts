@@ -75,6 +75,7 @@ export interface SpawnSpec {
   cmd: string;
   restart?: string; // permanent | transient | temporary (default permanent)
   durable?: boolean; // true -> casts go through JetStream
+  eventLog?: boolean; // true -> provision an event-sourcing log (Append/Rebuild)
 }
 
 // lordControl sends a spawn/stop request on the lord's control channel and returns the
@@ -99,7 +100,15 @@ async function lordControl(
 // manifest (a driver per connection, a worker per request). The lord supervises it
 // one_for_one, outside any group strategy. Returns the child's name.
 export async function startChild(nc: NatsConnection, spec: SpawnSpec, opts: CallOpts = {}): Promise<string> {
-  const reply = (await lordControl(nc, "spawn", spec, opts)) as { name: string };
+  // Map to the wire shape (snake_case keys the lord unmarshals); undefined fields drop out.
+  const payload = {
+    name: spec.name,
+    cmd: spec.cmd,
+    restart: spec.restart,
+    durable: spec.durable,
+    event_log: spec.eventLog,
+  };
+  const reply = (await lordControl(nc, "spawn", payload, opts)) as { name: string };
   return reply.name;
 }
 

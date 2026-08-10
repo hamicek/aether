@@ -163,10 +163,54 @@ func (l *Lord) Start(ctx context.Context) error {
 
 func (l *Lord) provisionStreams() error {
 	for _, ch := range l.children {
-		if err := l.provisionStream(ch); err != nil {
+		if err := l.provisionChildStreams(ch); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// provisionChildStreams provisions both the durable mailbox and the event log for one child
+// (each opt-in and independent). Used at startup and when a child is spawned at runtime.
+func (l *Lord) provisionChildStreams(ch *child) error {
+	if err := l.provisionStream(ch); err != nil {
+		return err
+	}
+	return l.provisionEventLog(ch)
+}
+
+// provisionEventLog idempotently creates the RETENTION stream backing a thrall's event log
+// (opt-in via EventLog). Unlike the WorkQueue mailbox, a Limits stream keeps messages so init
+// can replay them. Optional MaxMsgs/MaxAge bound the retention.
+func (l *Lord) provisionEventLog(ch *child) error {
+	if !ch.spec.EventLog {
+		return nil
+	}
+	js, err := l.ether.Conn().JetStream()
+	if err != nil {
+		return err
+	}
+	stream := wire.EventLogStream(l.manifest.App, ch.spec.Name)
+	subject := wire.EventLog(l.manifest.App, ch.spec.Name)
+	if _, err := js.StreamInfo(stream); err == nil {
+		return nil
+	}
+	cfg := &nats.StreamConfig{
+		Name:      stream,
+		Subjects:  []string{subject},
+		Retention: nats.LimitsPolicy, // retain (replayable), unlike the WorkQueue mailbox
+		Storage:   nats.FileStorage,
+	}
+	if ch.spec.EventLogMaxMsgs > 0 {
+		cfg.MaxMsgs = ch.spec.EventLogMaxMsgs
+	}
+	if ch.spec.EventLogMaxAgeMs > 0 {
+		cfg.MaxAge = time.Duration(ch.spec.EventLogMaxAgeMs) * time.Millisecond
+	}
+	if _, err := js.AddStream(cfg); err != nil {
+		return err
+	}
+	l.log.Info("event log provisioned", slog.String("stream", stream), slog.String("subject", subject))
 	return nil
 }
 

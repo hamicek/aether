@@ -14,6 +14,8 @@ func TestSubjects(t *testing.T) {
 		{Info(app, name), "aether.demo.counter.info"},
 		{Data(app, name), "aether.demo.counter.*"},
 		{Stream(app, name), "aether_demo_counter"},
+		{EventLog(app, name), "aether.demo.counter.evt"},
+		{EventLogStream(app, name), "aether_demo_counter_evt"},
 		{Ctl(name), "aether._lord.counter.ctl"},
 		{Heartbeat(name), "aether._lord.counter.hb"},
 	}
