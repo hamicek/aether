@@ -114,6 +114,9 @@ func Start[S any](def Def[S]) error {
 	if name == "" {
 		name = envName
 	}
+	if def.Init == nil {
+		return fmt.Errorf("thrall %q: Init is required", name)
+	}
 	durable := os.Getenv("AETHER_DURABLE") == "1"
 
 	opts, err := connectOptions(name)
