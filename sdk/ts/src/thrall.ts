@@ -62,6 +62,7 @@ export function defThrall<S>(def: ThrallDef<S>): ThrallDef<S> {
 export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const env: Env = readEnv();
   const name = def.name || env.name;
+  if (typeof def.init !== "function") throw new Error(`thrall ${name}: init is required`);
   const durable = process.env.AETHER_DURABLE === "1";
   const nc = await open(env);
   useConnection(nc); // so this thrall can call()/cast() other thralls

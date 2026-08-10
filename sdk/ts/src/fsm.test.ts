@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
-import { createMachine, type FSMDef, type Machine } from "./fsm";
+import { createMachine, startFSM, type FSMDef, type Machine } from "./fsm";
 import { newLogger } from "./log";
-import type { Ctx } from "./thrall";
+import { start, type Ctx, type ThrallDef } from "./thrall";
 import type { Envelope } from "./envelope";
 
 // A minimal ctx: the FSM handlers in these tests do not touch NATS.
@@ -199,4 +199,51 @@ test("Outcome.timeout re-arms while staying", async () => {
   expect(m.state()).toBe("idle");
   await waitState(m, "finished", 1000);
   expect(m.data()).toBe(1);
+});
+
+// A transition to a state that is not defined (a typo in Outcome.next) must surface as a
+// warning, so the machine does not silently freeze in an unknown state.
+test("warns on a transition to an unknown state", async () => {
+  const lines: string[] = [];
+  const ctx: Ctx = {
+    ...testCtx(),
+    log: newLogger({ component: "test" }, { level: "warn", format: "json", write: (l) => lines.push(l) }),
+  };
+  const def: FSMDef<number> = {
+    name: "ghosted",
+    initial: "here",
+    init: () => 0,
+    states: {
+      here: { on: { leave: { fn: (_e, d) => ({ next: "ghost", data: d }) } } }, // "ghost" is undefined
+    },
+  };
+  const m = createMachine(def, ctx, await Promise.resolve(def.init(ctx)), ctx.log);
+  await castOp(m, "leave");
+  expect(lines.some((l) => l.includes("fsm transition to unknown state"))).toBe(true);
+});
+
+test("startFSM rejects an initial state that is not in states", async () => {
+  process.env.AETHER_NATS_URL = "nats://127.0.0.1:1"; // never dialled: the guard fires first
+  process.env.AETHER_APP = "test";
+  const def: FSMDef<number> = {
+    name: "typo",
+    initial: "startt", // typo: real state is "start"
+    init: () => 0,
+    states: { start: { on: {} } },
+  };
+  await expect(startFSM(def)).rejects.toThrow("not in states");
+});
+
+test("startFSM rejects a missing init", async () => {
+  process.env.AETHER_NATS_URL = "nats://127.0.0.1:1";
+  process.env.AETHER_APP = "test";
+  const def = { name: "no-init", initial: "a", states: { a: { on: {} } } } as unknown as FSMDef<number>;
+  await expect(startFSM(def)).rejects.toThrow("init is required");
+});
+
+test("start rejects a missing init", async () => {
+  process.env.AETHER_NATS_URL = "nats://127.0.0.1:1";
+  process.env.AETHER_APP = "test";
+  const def = { name: "no-init" } as unknown as ThrallDef<number>;
+  await expect(start(def)).rejects.toThrow("init is required");
 });
