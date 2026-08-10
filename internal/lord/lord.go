@@ -88,9 +88,15 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	}
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
-	// Reaper timing derives from the manifest liveness config (already clamped in applyDefaults),
-	// the same interval that is injected into thralls, so the reaper and thralls never drift.
-	hbInterval := time.Duration(m.Liveness.HeartbeatIntervalMs) * time.Millisecond
+	// Reaper timing derives from the manifest liveness config, the same interval injected into
+	// thralls, so the reaper and thralls never drift. Clamp here too (not only in applyDefaults)
+	// so New is robust to a manifest built directly, without LoadManifest.
+	intervalMs := obs.ClampHeartbeatIntervalMs(m.Liveness.HeartbeatIntervalMs)
+	misses := m.Liveness.StaleAfterMisses
+	if misses <= 0 {
+		misses = 3
+	}
+	hbInterval := time.Duration(intervalMs) * time.Millisecond
 	l := &Lord{
 		manifest:         m,
 		ether:            eth,
@@ -105,7 +111,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		ready:            map[string]bool{},
 		stale:            map[string]bool{},
 		lastSeen:         map[string]time.Time{},
-		hbMissAfter:      hbInterval * time.Duration(m.Liveness.StaleAfterMisses),
+		hbMissAfter:      hbInterval * time.Duration(misses),
 		hbCheckEvery:     hbInterval,
 		backlogPollEvery: backlogPollInterval,
 	}
@@ -116,7 +122,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 			app:          m.App,
 			caPath:       m.Nats.TLS.CA,
 			nkeySeed:     m.Nats.Auth.NkeySeed,
-			hbIntervalMs: m.Liveness.HeartbeatIntervalMs,
+			hbIntervalMs: intervalMs,
 		})
 	}
 	return l, nil

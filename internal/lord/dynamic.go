@@ -75,7 +75,7 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 		app:          l.manifest.App,
 		caPath:       l.manifest.Nats.TLS.CA,
 		nkeySeed:     l.manifest.Nats.Auth.NkeySeed,
-		hbIntervalMs: l.manifest.Liveness.HeartbeatIntervalMs,
+		hbIntervalMs: int(l.hbCheckEvery.Milliseconds()), // clamped interval the reaper uses
 		dynamic:      true,
 	}
 
