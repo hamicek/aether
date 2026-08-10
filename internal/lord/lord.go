@@ -28,6 +28,11 @@ import (
 const (
 	singletonRetry = 500 * time.Millisecond
 	singletonRenew = 1 * time.Second
+
+	// heartbeatInterval must match the SDK heartbeat ticker (thrall publishes every 2s).
+	heartbeatInterval = 2 * time.Second
+	// heartbeatMisses is how many intervals a thrall may skip before the lord marks it stale.
+	heartbeatMisses = 3
 )
 
 // exit reports the end of one process generation (sent by the watcher).
@@ -61,8 +66,14 @@ type Lord struct {
 	// callback goroutine, so every reader/writer of the slice takes this lock.
 	childrenMu sync.RWMutex
 
-	mu    sync.Mutex
-	ready map[string]bool
+	mu       sync.Mutex
+	ready    map[string]bool
+	stale    map[string]bool      // thralls currently flagged as heartbeat-missed
+	lastSeen map[string]time.Time // last heartbeat per thrall (for miss detection)
+
+	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
+	hbMissAfter  time.Duration // no heartbeat for this long -> stale
+	hbCheckEvery time.Duration // how often the reaper checks
 }
 
 // New creates the root lord from a manifest.
@@ -78,17 +89,21 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
 	l := &Lord{
-		manifest:   m,
-		ether:      eth,
-		reg:        reg,
-		locks:      locks,
-		id:         fmt.Sprintf("%s-%d", host, os.Getpid()),
-		log:        obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
-		metrics:    newLordMetrics(),
-		exits:      make(chan exit, len(m.Thralls)+8),
-		procCtx:    procCtx,
-		procCancel: procCancel,
-		ready:      map[string]bool{},
+		manifest:     m,
+		ether:        eth,
+		reg:          reg,
+		locks:        locks,
+		id:           fmt.Sprintf("%s-%d", host, os.Getpid()),
+		log:          obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
+		metrics:      newLordMetrics(),
+		exits:        make(chan exit, len(m.Thralls)+8),
+		procCtx:      procCtx,
+		procCancel:   procCancel,
+		ready:        map[string]bool{},
+		stale:        map[string]bool{},
+		lastSeen:     map[string]time.Time{},
+		hbMissAfter:  heartbeatMisses * heartbeatInterval,
+		hbCheckEvery: heartbeatInterval,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
@@ -128,6 +143,7 @@ func (l *Lord) Start(ctx context.Context) error {
 	}
 
 	go l.supervisorLoop()
+	go l.reapHeartbeats()
 
 	for _, ch := range l.children {
 		if ch.spec.Scope == "singleton" {
@@ -440,12 +456,60 @@ func (l *Lord) onHeartbeat(name string) {
 	}
 	l.setStatus(name, pid, "ready")
 	l.mu.Lock()
-	first := !l.ready[name]
+	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
+	announce := !l.ready[name] || l.stale[name]
 	l.ready[name] = true
+	delete(l.stale, name)
+	l.lastSeen[name] = time.Now()
 	l.mu.Unlock()
-	if first {
+	if announce {
 		l.log.Info("thrall ready (on the bus)", slog.String("name", name), slog.Int("pid", pid))
 		l.emit("ready", name, pid)
+	}
+}
+
+// reapHeartbeats periodically looks for ready thralls that stopped heart-beating (a hung
+// process the OS watcher cannot see) and marks them stale.
+func (l *Lord) reapHeartbeats() {
+	if l.hbMissAfter <= 0 || l.hbCheckEvery <= 0 {
+		return
+	}
+	t := time.NewTicker(l.hbCheckEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.appCtx.Done():
+			return
+		case now := <-t.C:
+			l.checkHeartbeats(now)
+		}
+	}
+}
+
+// checkHeartbeats marks every ready thrall whose last heartbeat is older than hbMissAfter as
+// stale (once per outage), emitting an event and counting the miss. Recovery back to ready is
+// handled by onHeartbeat when a heartbeat resumes.
+func (l *Lord) checkHeartbeats(now time.Time) {
+	l.mu.Lock()
+	var newlyStale []string
+	for name, seen := range l.lastSeen {
+		if l.ready[name] && !l.stale[name] && now.Sub(seen) > l.hbMissAfter {
+			l.stale[name] = true
+			l.ready[name] = false
+			newlyStale = append(newlyStale, name)
+		}
+	}
+	l.mu.Unlock()
+
+	for _, name := range newlyStale {
+		pid := 0
+		if ch := l.childByName(name); ch != nil {
+			pid = ch.pid()
+		}
+		l.setStatus(name, pid, "stale")
+		l.metrics.incHeartbeatMiss(name)
+		l.emit("stale", name, pid)
+		l.log.Warn("thrall heartbeat missed - marking stale", slog.String("name", name))
 	}
 }
 
