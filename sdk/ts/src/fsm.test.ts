@@ -128,6 +128,21 @@ test("cast transitions without a reply", async () => {
   expect(m.state()).toBe("unlocked");
 });
 
+test("send resolves only after the event is processed (durable ack-after-process contract)", async () => {
+  // The durable consumer awaits onCast (= machine.send) before acking; that promise must not
+  // resolve until the event has actually been handled, or a crash after ack loses the message.
+  const m = await machineFor(turnstile());
+  await m.send({ op: "coin", payload: {}, kind: "cast" }, { v: 1, kind: "cast", op: "coin" });
+  expect(m.state()).toBe("unlocked");
+});
+
+test("drain resolves after in-flight events complete", async () => {
+  const m = await machineFor(turnstile());
+  void m.send({ op: "coin", payload: {}, kind: "cast" }, { v: 1, kind: "cast", op: "coin" });
+  await m.drain();
+  expect(m.state()).toBe("unlocked");
+});
+
 // timeoutMachine: "waiting" auto-transitions to "expired" after a state timeout, unless "ping"
 // moves it to "active" (no timeout) first.
 function timeoutMachine(afterMs: number): FSMDef<number> {

@@ -69,6 +69,7 @@ export interface Machine<D> {
   state(): string;
   data(): D;
   snapshot(): { mailbox_depth: number; mailbox_latency_ms: number; processed_total: number };
+  drain(): Promise<void>; // resolves when the currently-enqueued mailbox jobs have completed
   stop(): void;
 }
 
@@ -195,6 +196,7 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     state: () => current,
     data: () => data,
     snapshot: () => ({ mailbox_depth: stats.depth, mailbox_latency_ms: stats.lastMs, processed_total: stats.processed }),
+    drain: () => tail,
     stop: () => {
       timeoutGen++;
       if (timer) {
@@ -232,17 +234,17 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
 
   const machine = createMachine(def, ctx, await def.init(ctx), log);
 
-  const onCall = (e: Envelope, respond: (d: Uint8Array) => void): void => {
-    void machine.send({ op: e.op ?? "", payload: e.payload, kind: "call" }, e, (reply) => respond(encode(reply)));
-  };
-  const onCast = (e: Envelope): void => {
-    void machine.send({ op: e.op ?? "", payload: e.payload, kind: "cast" }, e);
-  };
+  // onCall/onCast return the send promise so the durable consumer can await processing before
+  // it acks (process-then-ack, at-least-once) - matching the Go/Python SDKs and the GenServer.
+  const onCall = (e: Envelope, respond: (d: Uint8Array) => void): Promise<void> =>
+    machine.send({ op: e.op ?? "", payload: e.payload, kind: "call" }, e, (reply) => respond(encode(reply)));
+  const onCast = (e: Envelope): Promise<void> =>
+    machine.send({ op: e.op ?? "", payload: e.payload, kind: "cast" }, e);
 
   if (durable) {
-    subscribeVerb(nc, subjects.call(env.app, name), (e, msg) => onCall(e, (d) => msg.respond(d)));
+    subscribeVerb(nc, subjects.call(env.app, name), (e, msg) => void onCall(e, (d) => msg.respond(d)));
     subscribeVerb(nc, subjects.info(env.app, name), () => {}); // info is out-of-band; not an FSM event yet
-    void consumeDurableCast(nc, env.app, name, async (e) => onCast(e));
+    void consumeDurableCast(nc, env.app, name, onCast); // awaits onCast -> processes before ack
   } else {
     subscribeData(nc, env.app, name, onCall, onCast);
   }
@@ -252,6 +254,7 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
     for await (const msg of ctlSub) {
       const e = decode(msg.data);
       if (e.op === "drain" || e.op === "shutdown") {
+        await machine.drain(); // finish the in-flight mailbox before terminating
         machine.stop();
         await def.terminate?.(e.op, machine.state(), machine.data());
         await nc.drain();
