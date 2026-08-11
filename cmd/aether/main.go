@@ -30,6 +30,11 @@ const endpointFile = ".aether-endpoint"
 type endpoint struct {
 	URL string `json:"url"`
 	App string `json:"app"`
+	// CA and NkeySeed are the paths to the client credentials for a secured external bus.
+	// Written by `up` (from the manifest) and reused by ps/events/cast/call; omitted (and so
+	// absent from the file) for an unsecured/embedded bus.
+	CA       string `json:"ca,omitempty"`
+	NkeySeed string `json:"nkey_seed,omitempty"`
 }
 
 func main() {
@@ -76,7 +81,7 @@ func up(argv []string) {
 	defer eth.Stop()
 	logger.Info("ether running", slog.String("url", eth.URL()), slog.String("mode", m.Nats.Mode))
 
-	writeEndpoint(endpoint{URL: eth.URL(), App: m.App})
+	writeEndpoint(endpoint{URL: eth.URL(), App: m.App, CA: m.Nats.TLS.CA, NkeySeed: m.Nats.Auth.NkeySeed})
 	defer os.Remove(endpointFile)
 
 	root, err := lord.New(m, eth)
@@ -96,10 +101,11 @@ func up(argv []string) {
 func psCmd(argv []string) {
 	fs := flag.NewFlagSet("ps", flag.ExitOnError)
 	url := fs.String("url", "", "bus address (default: ."+endpointFile+")")
+	ca, nkey := credFlags(fs)
 	_ = fs.Parse(argv)
 
-	ep := resolveEndpoint(*url, "")
-	nc := connect(ep.URL)
+	ep := resolveEndpoint(*url, "", *ca, *nkey)
+	nc := connect(ep)
 	defer nc.Close()
 
 	reg, err := registry.Open(nc)
@@ -131,10 +137,11 @@ func psCmd(argv []string) {
 func eventsCmd(argv []string) {
 	fs := flag.NewFlagSet("events", flag.ExitOnError)
 	url := fs.String("url", "", "bus address")
+	ca, nkey := credFlags(fs)
 	_ = fs.Parse(argv)
 
-	ep := resolveEndpoint(*url, "")
-	nc := connect(ep.URL)
+	ep := resolveEndpoint(*url, "", *ca, *nkey)
+	nc := connect(ep)
 	defer nc.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -165,6 +172,7 @@ func castCmd(argv []string) {
 	fs := flag.NewFlagSet("cast", flag.ExitOnError)
 	url := fs.String("url", "", "bus address")
 	app := fs.String("app", "", "app namespace (default from endpoint)")
+	ca, nkey := credFlags(fs)
 	_ = fs.Parse(argv)
 	rest := fs.Args()
 	if len(rest) < 2 {
@@ -176,8 +184,8 @@ func castCmd(argv []string) {
 		payload = json.RawMessage(rest[2])
 	}
 
-	ep := resolveEndpoint(*url, *app)
-	nc := connect(ep.URL)
+	ep := resolveEndpoint(*url, *app, *ca, *nkey)
+	nc := connect(ep)
 	defer nc.Close()
 
 	env := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
@@ -195,6 +203,7 @@ func callCmd(argv []string) {
 	url := fs.String("url", "", "bus address")
 	app := fs.String("app", "", "app namespace (default from endpoint)")
 	timeout := fs.Duration("timeout", 2*time.Second, "timeout")
+	ca, nkey := credFlags(fs)
 	_ = fs.Parse(argv)
 	rest := fs.Args()
 	if len(rest) < 2 {
@@ -206,8 +215,8 @@ func callCmd(argv []string) {
 		payload = json.RawMessage(rest[2])
 	}
 
-	ep := resolveEndpoint(*url, *app)
-	nc := connect(ep.URL)
+	ep := resolveEndpoint(*url, *app, *ca, *nkey)
+	nc := connect(ep)
 	defer nc.Close()
 
 	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
@@ -228,17 +237,35 @@ func callCmd(argv []string) {
 	fmt.Println(string(reply.Payload))
 }
 
-func connect(url string) *nats.Conn {
-	nc, err := nats.Connect(url)
+// credFlags registers the shared --ca/--nkey credential flags on a subcommand's flag set.
+func credFlags(fs *flag.FlagSet) (ca, nkey *string) {
+	return fs.String("ca", "", "CA file for a secured bus (default: "+endpointFile+"/env)"),
+		fs.String("nkey", "", "nkey seed file for a secured bus (default: "+endpointFile+"/env)")
+}
+
+// dial connects to the bus, applying the endpoint's credentials (CA/nkey) for a secured
+// external cluster. It returns the error (no os.Exit) so it can be tested; connect wraps it.
+func dial(ep endpoint) (*nats.Conn, error) {
+	opts, err := ether.ClientOptions(ep.CA, ep.NkeySeed)
 	if err != nil {
-		log.Fatalf("connection to %s failed: %v", url, err)
+		return nil, err
+	}
+	return nats.Connect(ep.URL, opts...)
+}
+
+func connect(ep endpoint) *nats.Conn {
+	nc, err := dial(ep)
+	if err != nil {
+		log.Fatalf("connection to %s failed: %v", ep.URL, err)
 	}
 	return nc
 }
 
-// resolveEndpoint: --url/--app > .aether-endpoint > AETHER_NATS_URL/AETHER_APP.
-func resolveEndpoint(flagURL, flagApp string) endpoint {
-	ep := endpoint{URL: flagURL, App: flagApp}
+// resolveEndpoint layers each field flag > .aether-endpoint > env (AETHER_NATS_URL / AETHER_APP
+// / AETHER_NATS_CA / AETHER_NATS_NKEY_SEED), the last two being the same names the lord injects
+// into thralls, so operating a secured cluster needs no extra wiring.
+func resolveEndpoint(flagURL, flagApp, flagCA, flagNkey string) endpoint {
+	ep := endpoint{URL: flagURL, App: flagApp, CA: flagCA, NkeySeed: flagNkey}
 	if data, err := os.ReadFile(endpointFile); err == nil {
 		var fromFile endpoint
 		if json.Unmarshal(data, &fromFile) == nil {
@@ -248,6 +275,12 @@ func resolveEndpoint(flagURL, flagApp string) endpoint {
 			if ep.App == "" {
 				ep.App = fromFile.App
 			}
+			if ep.CA == "" {
+				ep.CA = fromFile.CA
+			}
+			if ep.NkeySeed == "" {
+				ep.NkeySeed = fromFile.NkeySeed
+			}
 		}
 	}
 	if ep.URL == "" {
@@ -255,6 +288,12 @@ func resolveEndpoint(flagURL, flagApp string) endpoint {
 	}
 	if ep.App == "" {
 		ep.App = os.Getenv("AETHER_APP")
+	}
+	if ep.CA == "" {
+		ep.CA = os.Getenv("AETHER_NATS_CA")
+	}
+	if ep.NkeySeed == "" {
+		ep.NkeySeed = os.Getenv("AETHER_NATS_NKEY_SEED")
 	}
 	if ep.URL == "" {
 		log.Fatalf("unknown bus address - run from a directory with `aether up`, or pass --url")
