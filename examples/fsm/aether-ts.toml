@@ -1,0 +1,17 @@
+app = "fsm"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+[observability]
+metrics_addr = "127.0.0.1:7391"
+
+# The turnstile FSM in TypeScript. Same machine as the Go (aether.toml) and Python
+# (aether-py.toml) variants - behaviour on the wire is identical.
+[[thrall]]
+name = "turnstile"
+cmd  = "bun run ./turnstile.ts"
+restart = "permanent"
+scope   = "local"

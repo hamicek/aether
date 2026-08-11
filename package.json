@@ -4,6 +4,7 @@
   "workspaces": [
     "sdk/ts",
     "examples/counter",
+    "examples/fsm",
     "examples/scada-spike"
   ]
 }
