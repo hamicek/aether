@@ -302,7 +302,7 @@ bun install
 # 3) Python thrall dependency
 cd examples/counter
 python -m venv .venv
-.venv/bin/pip install nats-py
+.venv/bin/pip install -r requirements.txt
 cd ../..
 
 # 4) run it
@@ -313,10 +313,20 @@ cd examples/counter
 
 If `go` tries to download a different toolchain, prefix the build with `GOTOOLCHAIN=local`.
 
-Sample manifests in `examples/counter/`: `aether.toml` (polyglot TS/Py/Go),
-`aether-durable.toml`, `aether-durable-persistent.toml`, `aether-external.toml`,
-`aether-singleton.toml`, `aether-one-for-all.toml`, `aether-rest-for-one.toml`,
-`aether-secure-external.toml`.
+Sample manifests in `examples/counter/` (each runs with any of the three languages - the
+thrall name comes from the manifest):
+
+- `aether.toml` - the default polyglot demo (TS + Python + Go + gateway)
+- `aether-durable.toml` - durable mailbox (embedded), survives a thrall restart
+- `aether-durable-persistent.toml` - durable mailbox with a persistent embedded JetStream (`store_dir`)
+- `aether-durable-poly.toml` - durable mailbox in both Python and Go
+- `aether-external.toml` - against a standalone NATS cluster (7390)
+- `aether-external-durable.toml` - durable mailbox on the external cluster (stream + KV off-runtime)
+- `aether-observability.toml` - polyglot demo with the `/metrics` endpoint enabled
+- `aether-singleton.toml` - singleton scope with distributed-lock failover (external cluster)
+- `aether-one-for-all.toml` - the one_for_all supervision strategy
+- `aether-rest-for-one.toml` - the rest_for_one supervision strategy
+- `aether-secure-external.toml` - external cluster over TLS with nkey auth
 
 ## Security
 
