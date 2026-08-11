@@ -11,6 +11,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/eventsourced": {
+      "name": "eventsourced-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/fsm": {
       "name": "fsm-example",
       "dependencies": {
@@ -38,6 +44,8 @@
     "@hamicek/aether": ["@hamicek/aether@workspace:sdk/ts"],
 
     "counter-example": ["counter-example@workspace:examples/counter"],
+
+    "eventsourced-example": ["eventsourced-example@workspace:examples/eventsourced"],
 
     "fsm-example": ["fsm-example@workspace:examples/fsm"],
 

@@ -1,0 +1,18 @@
+app = "es"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+# Persist the embedded JetStream across restarts, so the event log (and thus the rebuilt
+# state) survives stopping and starting `aether up`. Without this, embedded storage is wiped.
+store_dir = "./.aether-store"
+
+# The event-sourced account in TypeScript. Same behaviour as the Go (aether.toml) and Python
+# (aether-py.toml) variants - the balance is rebuilt from the event log on restart.
+[[thrall]]
+name = "account"
+cmd  = "bun run ./account.ts"
+restart = "permanent"
+scope   = "local"
+event_log = true
