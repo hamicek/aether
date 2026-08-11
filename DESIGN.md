@@ -549,8 +549,8 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
 - **Monitoring / observability and long-running soak testing** - for high-reliability use.
 - **Stronger and server-side security** - the client side authenticates to an *external* bus with
   nkeys over server TLS (manifest `[nats.tls]` / `[nats.auth]`; the lord injects the credential
-  paths into thralls). Still open: securing the embedded server itself for a networked bind, mutual
-  TLS, JWT/account isolation, token auth, the operator CLI against a secured cluster, and key rotation.
+  paths into thralls, and the operator CLI takes `--ca`/`--nkey`). Still open: securing the embedded
+  server itself for a networked bind, mutual TLS, JWT/account isolation, token auth, and key rotation.
 
 Note: JetStream durable mailboxes, cluster-wide singletons, and client-side nkey auth over server TLS,
 listed as future work in earlier drafts, are now implemented (see §6, §12 and the manifest `durable` /

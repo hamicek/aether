@@ -86,7 +86,11 @@ aether call <name> <op> [json]   # send a call and print the reply
 ```
 
 In embedded mode `ps`/`events`/`cast`/`call` connect via `.aether-endpoint`
-(written by `aether up`); against an external cluster via `--url`.
+(written by `aether up`); against an external cluster via `--url`. For a secured
+external bus (server TLS + nkeys) pass `--ca <file>` / `--nkey <seed>` (or the
+`AETHER_NATS_CA` / `AETHER_NATS_NKEY_SEED` env); each layers flag > `.aether-endpoint`
+> env. Against a secured cluster `aether up` writes the credential paths into
+`.aether-endpoint`, so the other tools pick them up automatically.
 
 ## A thrall in TS (example)
 
@@ -353,9 +357,9 @@ the process environment. A full example is `examples/counter/aether-secure-exter
 Python thralls using nkey auth need the optional `nkeys` package (plain `nats-py` omits it):
 `pip install 'nats-py[nkeys]'`.
 
-Scope: this secures the client side against an already-secured external NATS (server TLS + nkeys).
-Securing the embedded server itself (for a networked `0.0.0.0` bind), mutual TLS, JWT/account
-isolation, token auth and the operator CLI against a secured cluster are follow-ups tracked in
+Scope: this secures the client side against an already-secured external NATS (server TLS + nkeys),
+including the operator CLI (`--ca`/`--nkey`). Securing the embedded server itself (for a networked
+`0.0.0.0` bind), mutual TLS, JWT/account isolation and token auth are follow-ups tracked in
 [ROADMAP.md](./ROADMAP.md).
 
 ## Reliability testing (soak)
