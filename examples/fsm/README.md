@@ -1,7 +1,7 @@
 # FSM behaviour demo - turnstile
 
-A domain-neutral demonstration of the **FSM thrall behaviour** (`StartFSM`), aether's second
-behaviour alongside the GenServer thrall. A classic turnstile:
+A domain-neutral demonstration of the **FSM thrall behaviour** (`StartFSM` / `startFSM` /
+`start_fsm`), aether's second behaviour alongside the GenServer thrall. A classic turnstile:
 
 - **locked** - a `coin` unlocks it
 - **unlocked** - a `push` locks it again (counting pushes), or a 5s idle **state timeout**
@@ -9,18 +9,45 @@ behaviour alongside the GenServer thrall. A classic turnstile:
 
 Events are ordinary casts/calls - the wire is unchanged, so any GenServer caller reaches it.
 
+The same machine is written in all three languages - `main.go`, `turnstile.ts`, `turnstile.py`
+- with identical behaviour on the wire. Pick one manifest below; the interaction afterwards is
+the same regardless of language.
+
 ## Run
+
+Build the runtime once, then run **one** of the three variants.
 
 ```bash
 export GOTOOLCHAIN=local
 mise exec go@latest -- go build -o bin/aether ./cmd/aether
-mise exec go@latest -- go build -o bin/turnstile ./examples/fsm
+```
 
+**Go** (`aether.toml`):
+
+```bash
+mise exec go@latest -- go build -o bin/turnstile ./examples/fsm
 cd examples/fsm
 AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether.toml
 ```
 
-In another shell:
+**TypeScript** (`aether-ts.toml`):
+
+```bash
+bun install
+cd examples/fsm
+AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether-ts.toml
+```
+
+**Python** (`aether-py.toml`):
+
+```bash
+cd examples/fsm
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether-py.toml
+```
+
+In another shell (identical for every variant):
 
 ```bash
 cd examples/fsm
