@@ -118,6 +118,9 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
 
   const enter = (next: string, override?: StateTimeout): void => {
     const from = current;
+    if (!def.states[next]) {
+      log.warn("fsm transition to unknown state", { from, to: next });
+    }
     current = next;
     log.info("fsm transition", { from, to: next });
     armTimeout(override ?? def.states[next]?.timeout);
@@ -217,6 +220,8 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
   const env = readEnv();
   const name = def.name || env.name;
   if (!def.initial) throw new Error(`fsm ${name}: initial state is required`);
+  if (typeof def.init !== "function") throw new Error(`fsm ${name}: init is required`);
+  if (!def.states[def.initial]) throw new Error(`fsm ${name}: initial state ${def.initial} is not in states`);
   const durable = process.env.AETHER_DURABLE === "1";
   const nc: NatsConnection = await open(env);
   useConnection(nc);

@@ -69,6 +69,15 @@ type Lord struct {
 	stale    map[string]bool      // thralls currently flagged as heartbeat-missed
 	lastSeen map[string]time.Time // last heartbeat per thrall (for miss detection)
 
+	// Liveness status writes (ready/stale) are ordered by a version stamped under mu at the
+	// moment the decision is made, then applied to the registry outside mu (registry I/O must
+	// not run under mu). statusApplied records the last version written per thrall, so a write
+	// carrying an older version - reordered by goroutine scheduling - is dropped and the
+	// registry converges to the last decision instead of getting stuck on a stale status.
+	statusSeq     uint64 // monotonic, incremented under mu
+	statusMu      sync.Mutex
+	statusApplied map[string]uint64
+
 	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
 	hbMissAfter  time.Duration // no heartbeat for this long -> stale
 	hbCheckEvery time.Duration // how often the reaper checks
@@ -111,6 +120,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		ready:            map[string]bool{},
 		stale:            map[string]bool{},
 		lastSeen:         map[string]time.Time{},
+		statusApplied:    map[string]uint64{},
 		hbMissAfter:      hbInterval * time.Duration(misses),
 		hbCheckEvery:     hbInterval,
 		backlogPollEvery: backlogPollInterval,
@@ -511,14 +521,16 @@ func (l *Lord) onHeartbeat(name string, data []byte) {
 		return
 	}
 	l.recordHeartbeatMetrics(name, data)
-	l.setStatus(name, pid, "ready")
 	l.mu.Lock()
 	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
 	announce := !l.ready[name] || l.stale[name]
 	l.ready[name] = true
 	delete(l.stale, name)
 	l.lastSeen[name] = time.Now()
+	l.statusSeq++
+	seq := l.statusSeq
 	l.mu.Unlock()
+	l.applyStatus(name, pid, "ready", seq)
 	if announce {
 		l.log.Info("thrall ready (on the bus)", slog.String("name", name), slog.Int("pid", pid))
 		l.emit("ready", name, pid)
@@ -565,26 +577,31 @@ func (l *Lord) reapHeartbeats() {
 // stale (once per outage), emitting an event and counting the miss. Recovery back to ready is
 // handled by onHeartbeat when a heartbeat resumes.
 func (l *Lord) checkHeartbeats(now time.Time) {
+	type staleMark struct {
+		name string
+		seq  uint64
+	}
 	l.mu.Lock()
-	var newlyStale []string
+	var newlyStale []staleMark
 	for name, seen := range l.lastSeen {
 		if l.ready[name] && !l.stale[name] && now.Sub(seen) > l.hbMissAfter {
 			l.stale[name] = true
 			l.ready[name] = false
-			newlyStale = append(newlyStale, name)
+			l.statusSeq++
+			newlyStale = append(newlyStale, staleMark{name: name, seq: l.statusSeq})
 		}
 	}
 	l.mu.Unlock()
 
-	for _, name := range newlyStale {
+	for _, m := range newlyStale {
 		pid := 0
-		if ch := l.childByName(name); ch != nil {
+		if ch := l.childByName(m.name); ch != nil {
 			pid = ch.pid()
 		}
-		l.setStatus(name, pid, "stale")
-		l.metrics.incHeartbeatMiss(name)
-		l.emit("stale", name, pid)
-		l.log.Warn("thrall heartbeat missed - marking stale", slog.String("name", name))
+		l.applyStatus(m.name, pid, "stale", m.seq)
+		l.metrics.incHeartbeatMiss(m.name)
+		l.emit("stale", m.name, pid)
+		l.log.Warn("thrall heartbeat missed - marking stale", slog.String("name", m.name))
 	}
 }
 
@@ -638,6 +655,21 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 	l.metrics.setStatus(name, status)
 }
 
+// applyStatus writes a liveness status (ready/stale) to the registry in decision order. The
+// seq is stamped under l.mu when the ready/stale decision is made; a write whose seq is not
+// newer than the last one applied for this thrall is dropped, so two concurrent decisions
+// (a resuming heartbeat vs. the reaper) converge on the later one instead of leaving the
+// registry stuck on the earlier. Registry I/O runs under statusMu, never under l.mu.
+func (l *Lord) applyStatus(name string, pid int, status string, seq uint64) {
+	l.statusMu.Lock()
+	defer l.statusMu.Unlock()
+	if seq <= l.statusApplied[name] {
+		return
+	}
+	l.statusApplied[name] = seq
+	l.setStatus(name, pid, status)
+}
+
 // logExit records a thrall's process exit at a level reflecting its nature: an abnormal
 // exit (non-zero / signalled) is a warning, a clean exit is informational.
 func (l *Lord) logExit(name string, abnormal bool) {
@@ -667,6 +699,9 @@ func (l *Lord) forgetThrall(name string) {
 	delete(l.stale, name)
 	delete(l.lastSeen, name)
 	l.mu.Unlock()
+	l.statusMu.Lock()
+	delete(l.statusApplied, name)
+	l.statusMu.Unlock()
 	l.metrics.forget(name)
 }
 
