@@ -71,3 +71,34 @@ func TestExternalSecuredConnect(t *testing.T) {
 		}
 	})
 }
+
+// TestClientOptions covers the shared options builder directly: an empty pair adds no
+// option, an invalid nkey seed path is an error, and valid paths yield options.
+func TestClientOptions(t *testing.T) {
+	t.Run("empty pair adds no option", func(t *testing.T) {
+		opts, err := ether.ClientOptions("", "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(opts) != 0 {
+			t.Fatalf("expected no options for an empty pair, got %d", len(opts))
+		}
+	})
+
+	t.Run("invalid nkey seed is an error", func(t *testing.T) {
+		if _, err := ether.ClientOptions("", "/does/not/exist.nk"); err == nil {
+			t.Fatal("expected an error for an unreadable nkey seed, got nil")
+		}
+	})
+
+	t.Run("valid credentials yield options", func(t *testing.T) {
+		sec := natstest.SecuredServer(t)
+		opts, err := ether.ClientOptions(sec.CAFile, sec.SeedFile)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(opts) != 2 {
+			t.Fatalf("expected CA + nkey options, got %d", len(opts))
+		}
+	})
+}
