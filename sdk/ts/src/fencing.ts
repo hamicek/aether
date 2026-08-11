@@ -36,6 +36,22 @@ export interface FenceOptions {
   intervalMs?: number;
 }
 
+// startFencingIfSingleton starts the fencing loop when the thrall is a singleton (the lord
+// injected AETHER_SINGLETON_*); a no-op otherwise. Shared by start and startFSM. On a lock
+// loss it terminates the process (os.Exit parity with the Go/Python SDKs).
+export async function startFencingIfSingleton(
+  nc: NatsConnection,
+  name: string,
+  log: Logger,
+): Promise<void> {
+  const cfg = fenceConfigFromEnv();
+  if (!cfg) return;
+  await startFencing(nc, cfg, log, (reason) => {
+    log.error("singleton fencing: self-terminating", { name, reason });
+    process.exit(1);
+  });
+}
+
 const decoder = new TextDecoder();
 
 // startFencing runs the verification loop. It returns a stop handle; onLost is called at most

@@ -240,15 +240,8 @@ func Start[S any](def Def[S]) error {
 
 	go heartbeat(nc, name, stats, stop)
 
-	if cfg, ok := fenceConfigFromEnv(); ok {
-		mgr, err := singleton.Open(nc)
-		if err != nil {
-			return fmt.Errorf("singleton fencing: open lock bucket: %w", err)
-		}
-		go fencing(mgr, cfg, log, stop, func(reason string) {
-			log.Error("singleton fencing: self-terminating", slog.String("name", name), slog.String("reason", reason))
-			os.Exit(1)
-		})
+	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
+		return err
 	}
 
 	<-stop
@@ -465,6 +458,24 @@ const (
 	fenceLease    = singleton.TTL
 	fenceInterval = singleton.TTL / 3
 )
+
+// startFencingIfSingleton starts the fencing loop when the thrall is a singleton (the lord
+// injected AETHER_SINGLETON_*); it is a no-op otherwise. Shared by Start and StartFSM.
+func startFencingIfSingleton(nc *nats.Conn, name string, log *slog.Logger, stop <-chan struct{}) error {
+	cfg, ok := fenceConfigFromEnv()
+	if !ok {
+		return nil
+	}
+	mgr, err := singleton.Open(nc)
+	if err != nil {
+		return fmt.Errorf("singleton fencing: open lock bucket: %w", err)
+	}
+	go fencing(mgr, cfg, log, stop, func(reason string) {
+		log.Error("singleton fencing: self-terminating", slog.String("name", name), slog.String("reason", reason))
+		os.Exit(1)
+	})
+	return nil
+}
 
 // fencing verifies, independently of the lord, that this singleton thrall still holds its KV
 // lock. On a confirmed loss (epoch superseded or key gone) it calls onLost immediately. When
