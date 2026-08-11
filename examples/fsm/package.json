@@ -1,0 +1,7 @@
+{
+  "name": "fsm-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}
