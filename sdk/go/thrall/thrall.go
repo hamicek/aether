@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -238,6 +240,10 @@ func Start[S any](def Def[S]) error {
 
 	go heartbeat(nc, name, stats, stop)
 
+	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
+		return err
+	}
+
 	<-stop
 	if def.Terminate != nil {
 		mu.Lock()
@@ -421,6 +427,85 @@ func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan stru
 			return
 		case <-t.C:
 			tick()
+		}
+	}
+}
+
+// fenceConfig is the singleton fencing token, injected by the lord (AETHER_SINGLETON_*).
+type fenceConfig struct {
+	key   string
+	epoch uint64
+}
+
+// fenceConfigFromEnv reads the fencing token; ok=false for a non-singleton thrall (no env).
+func fenceConfigFromEnv() (fenceConfig, bool) {
+	epoch, err := strconv.ParseUint(os.Getenv("AETHER_SINGLETON_EPOCH"), 10, 64)
+	if err != nil || epoch == 0 {
+		return fenceConfig{}, false
+	}
+	key := os.Getenv("AETHER_SINGLETON_KEY")
+	if key == "" {
+		return fenceConfig{}, false
+	}
+	return fenceConfig{key: key, epoch: epoch}, true
+}
+
+// fenceInterval / fenceLease bound fencing detection. The lease is the lock's TTL: after it
+// elapses with no confirmation, the lock is presumed lost (a competing lord could have taken
+// it), so the thrall self-terminates. The interval (a third of the TTL) is the verification
+// cadence, so a superseded epoch is caught well within the lease.
+const (
+	fenceLease    = singleton.TTL
+	fenceInterval = singleton.TTL / 3
+)
+
+// startFencingIfSingleton starts the fencing loop when the thrall is a singleton (the lord
+// injected AETHER_SINGLETON_*); it is a no-op otherwise. Shared by Start and StartFSM.
+func startFencingIfSingleton(nc *nats.Conn, name string, log *slog.Logger, stop <-chan struct{}) error {
+	cfg, ok := fenceConfigFromEnv()
+	if !ok {
+		return nil
+	}
+	mgr, err := singleton.Open(nc)
+	if err != nil {
+		return fmt.Errorf("singleton fencing: open lock bucket: %w", err)
+	}
+	go fencing(mgr, cfg, log, stop, func(reason string) {
+		log.Error("singleton fencing: self-terminating", slog.String("name", name), slog.String("reason", reason))
+		os.Exit(1)
+	})
+	return nil
+}
+
+// fencing verifies, independently of the lord, that this singleton thrall still holds its KV
+// lock. On a confirmed loss (epoch superseded or key gone) it calls onLost immediately. When
+// the lock cannot be verified at all (KV unreachable, e.g. a partition) it calls onLost once
+// the lease elapses without any confirmation - bounding the window in which two instances
+// could run to the lease. onLost is expected to terminate the process (os.Exit).
+func fencing(mgr *singleton.Manager, cfg fenceConfig, log *slog.Logger, stop <-chan struct{}, onLost func(reason string)) {
+	lastConfirmed := time.Now()
+	t := time.NewTicker(fenceInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			ok, err := mgr.Verify(cfg.key, cfg.epoch)
+			switch {
+			case err != nil:
+				// Cannot reach the KV: fail safe only once the lease has fully elapsed.
+				if time.Since(lastConfirmed) > fenceLease {
+					onLost(fmt.Sprintf("lock unverifiable for over %s: %v", fenceLease, err))
+					return
+				}
+				log.Warn("singleton fencing: verify failed, within lease", slog.Any("err", err))
+			case !ok:
+				onLost("singleton lock lost (epoch superseded or key gone)")
+				return
+			default:
+				lastConfirmed = time.Now()
+			}
 		}
 	}
 }

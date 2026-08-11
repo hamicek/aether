@@ -451,6 +451,11 @@ func (l *Lord) manageSingleton(ch *child) {
 		l.log.Info("singleton lock acquired - starting", slog.String("name", name), slog.String("lord", l.id))
 		l.emit("lock_acquired", name, 0)
 
+		// Hand the fencing token to this generation before spawning, so the thrall can verify
+		// its ownership of the lock independently of the lord (env AETHER_SINGLETON_*).
+		ch.singletonKey = name
+		ch.singletonEpoch = lock.Epoch()
+
 		renewStop := make(chan struct{})
 		go l.renewLoop(ch, lock, renewStop)
 

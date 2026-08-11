@@ -6,10 +6,6 @@ remain before it is production-grade. They are listed here so the trade-offs are
 
 ## Supervision semantics
 
-- **Thrall-level fencing for singletons.** A cluster-wide singleton is guarded by a distributed
-  KV lock with a TTL, so a crashed lock holder fails over. What is not yet handled is the window
-  where a lord itself dies but its thrall process is briefly orphaned before the lock expires.
-  Full thrall-level fencing (the orphaned process refusing to act once its lord is gone) is open.
 - **`temporary` restart policy inside group strategies.** `temporary` is honoured under
   `one_for_one`, but its interaction with `one_for_all` / `rest_for_one` group restarts is not
   yet fully specified.

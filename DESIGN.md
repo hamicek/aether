@@ -532,8 +532,16 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
 
 - **Liveness beyond heartbeats** - `$SYS` connection events as a supplement, so liveness works even
   outside the embedded-server case.
-- **Full thrall-level fencing for singletons** - the window where a lord dies and its thrall is
-  briefly orphaned before the KV lock expires.
+- ~~**Full thrall-level fencing for singletons**~~ - *implemented.* A singleton thrall now
+  verifies its lock ownership itself, not only through its lord. The lord stamps a fencing epoch
+  into the KV lock record at acquisition (the create revision, preserved across renewals) and
+  injects it into the thrall (`AETHER_SINGLETON_*`). The thrall reads the lock key every TTL/3 and
+  self-terminates the moment its epoch is superseded or the key is gone; if it cannot reach the KV
+  at all (a partition), it self-terminates once the lock TTL (the lease) elapses without a
+  confirmation. This bounds the window in which two instances could run to the lock TTL, even when
+  the lord is dead or partitioned and cannot kill the orphan itself. Wired into both the GenServer
+  and FSM start paths in all three SDKs. Proven by `TestSoakSingletonOrphanFencing` (kills only the
+  lord process, leaving the probe orphaned, and asserts it reaps itself).
 - **`temporary` semantics inside group strategies** - its interaction with `one_for_all` /
   `rest_for_one` is not fully specified.
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via
