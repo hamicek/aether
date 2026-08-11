@@ -5,6 +5,7 @@
     "sdk/ts",
     "examples/counter",
     "examples/fsm",
-    "examples/scada-spike"
+    "examples/scada-spike",
+    "examples/tracing"
   ]
 }
