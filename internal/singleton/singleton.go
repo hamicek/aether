@@ -16,7 +16,9 @@ import (
 
 const (
 	Bucket = "aether_singletons"
-	ttl    = 3 * time.Second // the key expires when the holder does not renew it -> failover
+	// TTL is the lock's time-to-live: the key expires when the holder stops renewing it,
+	// which triggers failover. The thrall derives its fencing lease window from the same value.
+	TTL = 3 * time.Second
 )
 
 // Manager opens the KV bucket of locks.
@@ -52,7 +54,7 @@ func Open(nc *nats.Conn) (*Manager, error) {
 	}
 	kv, err := js.KeyValue(Bucket)
 	if err != nil {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, TTL: ttl, History: 1})
+		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, TTL: TTL, History: 1})
 		if err != nil {
 			return nil, err
 		}
