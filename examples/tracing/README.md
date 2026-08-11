@@ -4,15 +4,41 @@ Follows one logical operation across two OS-process thralls. An `api` thrall rec
 request and relays it to a `db` thrall with `ctx.Cast`, which **propagates the correlation
 trace**. Both thralls log the same `trace`, so the path can be reconstructed from the logs.
 
+The same api/db pair is written in all three languages - `main.go`, `trace.ts`, `trace.py` -
+with identical behaviour. Pick one manifest below; the interaction afterwards is the same.
+
 ## Run
+
+Build the runtime once, then run **one** of the three variants.
 
 ```bash
 export GOTOOLCHAIN=local
 mise exec go@latest -- go build -o bin/aether ./cmd/aether
-mise exec go@latest -- go build -o bin/trace-demo ./examples/tracing
+```
 
+**Go** (`aether.toml`):
+
+```bash
+mise exec go@latest -- go build -o bin/trace-demo ./examples/tracing
 cd examples/tracing
 AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether.toml
+```
+
+**TypeScript** (`aether-ts.toml`):
+
+```bash
+bun install
+cd examples/tracing
+AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether-ts.toml
+```
+
+**Python** (`aether-py.toml`):
+
+```bash
+cd examples/tracing
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+AETHER_LOG_FORMAT=json AETHER_LOG_LEVEL=debug ../../bin/aether up -f aether-py.toml
 ```
 
 In another shell, send a request to the edge (the CLI mints a fresh trace):

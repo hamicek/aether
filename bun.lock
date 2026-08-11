@@ -29,6 +29,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/tracing": {
+      "name": "tracing-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "sdk/ts": {
       "name": "@hamicek/aether",
       "version": "0.0.0",
@@ -54,6 +60,8 @@
     "nkeys.js": ["nkeys.js@1.1.0", "", { "dependencies": { "tweetnacl": "1.0.3" } }, "sha512-tB/a0shZL5UZWSwsoeyqfTszONTt4k2YS0tuQioMOD180+MbombYVgzDUYHlx+gejYK6rgf08n/2Df99WY0Sxg=="],
 
     "scada-spike-example": ["scada-spike-example@workspace:examples/scada-spike"],
+
+    "tracing-example": ["tracing-example@workspace:examples/tracing"],
 
     "tweetnacl": ["tweetnacl@1.0.3", "", {}, "sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw=="],
 
