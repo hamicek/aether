@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/internal/singleton"
 )
 
 func envValue(env []string, key string) (string, bool) {
@@ -50,5 +51,34 @@ func TestChildEnvInheritsLogConfig(t *testing.T) {
 	}
 	if got, ok := envValue(env, obs.EnvLogFormat); !ok || got != "json" {
 		t.Errorf("thrall did not inherit %s: got %q (present=%v)", obs.EnvLogFormat, got, ok)
+	}
+}
+
+func TestChildEnvSingletonFencing(t *testing.T) {
+	c := &child{
+		spec:           ThrallSpec{Name: "single", Cmd: "run"},
+		app:            "a",
+		singletonKey:   "single",
+		singletonEpoch: 42,
+	}
+	env := c.env()
+	for k, want := range map[string]string{
+		"AETHER_SINGLETON_BUCKET": singleton.Bucket,
+		"AETHER_SINGLETON_KEY":    "single",
+		"AETHER_SINGLETON_EPOCH":  "42",
+	} {
+		if got, ok := envValue(env, k); !ok || got != want {
+			t.Errorf("env[%q] = %q (present=%v), want %q", k, got, ok, want)
+		}
+	}
+}
+
+func TestChildEnvNonSingletonHasNoFencing(t *testing.T) {
+	c := &child{spec: ThrallSpec{Name: "worker", Cmd: "run"}, app: "a"}
+	env := c.env()
+	for _, k := range []string{"AETHER_SINGLETON_BUCKET", "AETHER_SINGLETON_KEY", "AETHER_SINGLETON_EPOCH"} {
+		if _, ok := envValue(env, k); ok {
+			t.Errorf("a non-singleton child must not carry %s", k)
+		}
 	}
 }

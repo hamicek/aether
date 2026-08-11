@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -31,6 +32,11 @@ type child struct {
 	caPath       string // TLS CA path injected to the thrall (empty = none)
 	nkeySeed     string // nkey seed path injected to the thrall (empty = none)
 	hbIntervalMs int    // heartbeat interval (ms) injected so the thrall beats at the configured rate
+
+	// Singleton fencing: set per acquisition before spawn (0 epoch = not a singleton).
+	// The thrall verifies this epoch against the KV lock and self-terminates if it loses it.
+	singletonKey   string
+	singletonEpoch uint64
 
 	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
 	live    atomic.Bool // the process is currently running
@@ -61,6 +67,15 @@ func (c *child) env() []string {
 	}
 	if c.nkeySeed != "" {
 		env = append(env, "AETHER_NATS_NKEY_SEED="+c.nkeySeed)
+	}
+	// Singleton fencing token: only present for a scope="singleton" thrall holding a lock,
+	// so the thrall can verify ownership against the KV bucket independently of the lord.
+	if c.singletonEpoch > 0 {
+		env = append(env,
+			"AETHER_SINGLETON_BUCKET="+singleton.Bucket,
+			"AETHER_SINGLETON_KEY="+c.singletonKey,
+			"AETHER_SINGLETON_EPOCH="+strconv.FormatUint(c.singletonEpoch, 10),
+		)
 	}
 	for _, key := range []string{obs.EnvLogLevel, obs.EnvLogFormat} {
 		if v := os.Getenv(key); v != "" {
