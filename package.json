@@ -6,6 +6,7 @@
     "examples/counter",
     "examples/eventsourced",
     "examples/fsm",
-    "examples/scada-spike"
+    "examples/scada-spike",
+    "examples/tracing"
   ]
 }

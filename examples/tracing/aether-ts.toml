@@ -1,0 +1,24 @@
+app = "trace"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# Prometheus /metrics endpoint (see the observability docs). Optional - remove to disable.
+[observability]
+metrics_addr = "127.0.0.1:7391"
+
+# The tracing api/db demo in TypeScript. Same behaviour as the Go (aether.toml) and Python
+# (aether-py.toml) variants - one file plays both roles, selected by AETHER_NAME.
+[[thrall]]
+name = "api"
+cmd  = "bun run ./trace.ts"
+restart = "permanent"
+scope   = "local"
+
+[[thrall]]
+name = "db"
+cmd  = "bun run ./trace.ts"
+restart = "permanent"
+scope   = "local"
