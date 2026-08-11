@@ -10,3 +10,5 @@ export { defFSM, startFSM } from "./fsm";
 export type { FSMDef, State, Reaction, Outcome, Event, StateTimeout } from "./fsm";
 export { rebuild, appendEvent } from "./rebuild";
 export { heartbeatIntervalMs } from "./heartbeat";
+export { startFencing, fenceConfigFromEnv } from "./fencing";
+export type { FenceConfig, FenceOptions } from "./fencing";
