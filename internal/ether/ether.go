@@ -40,14 +40,22 @@ type Auth struct {
 // clientOptions turns the TLS/auth config into nats options. An empty field adds no
 // option, so a config without a security block connects exactly as before.
 func (c Config) clientOptions() ([]nats.Option, error) {
+	return ClientOptions(c.TLS.CA, c.Auth.NkeySeed)
+}
+
+// ClientOptions builds the nats options for a secured bus from credential paths: a CA the
+// client verifies the server against and an nkey seed it authenticates with. An empty path
+// adds no option, so an empty pair connects unsecured. Shared by the lord (via Config) and the
+// operator CLI, so every client constructs the same options in one place.
+func ClientOptions(caPath, nkeySeed string) ([]nats.Option, error) {
 	var opts []nats.Option
-	if c.TLS.CA != "" {
-		opts = append(opts, nats.RootCAs(c.TLS.CA))
+	if caPath != "" {
+		opts = append(opts, nats.RootCAs(caPath))
 	}
-	if c.Auth.NkeySeed != "" {
-		opt, err := nats.NkeyOptionFromSeed(c.Auth.NkeySeed)
+	if nkeySeed != "" {
+		opt, err := nats.NkeyOptionFromSeed(nkeySeed)
 		if err != nil {
-			return nil, fmt.Errorf("nkey seed %q: %w", c.Auth.NkeySeed, err)
+			return nil, fmt.Errorf("nkey seed %q: %w", nkeySeed, err)
 		}
 		opts = append(opts, opt)
 	}
