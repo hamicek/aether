@@ -26,3 +26,5 @@ __pycache__/
 
 # graphify structural analysis output (local, do not commit)
 graphify-out/
+
+resources/
