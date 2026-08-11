@@ -5,9 +5,41 @@ Run: uv run --with nats-py -m unittest fsm_test   (from sdk/python)
 """
 
 import asyncio
+import contextlib
+import os
 import unittest
 
-from aether import Ctx, Event, FSM, Logger, Outcome, Reaction, State, StateTimeout, _Machine
+from aether import (
+    Ctx,
+    Event,
+    FSM,
+    Logger,
+    Outcome,
+    Reaction,
+    State,
+    StateTimeout,
+    ThrallDef,
+    _Machine,
+    start,
+    start_fsm,
+)
+
+
+@contextlib.contextmanager
+def _fake_env():
+    """Set the env a thrall needs so the startup guards run, then restore. The URL is never
+    dialled: every guard exercised here fires before nats.connect."""
+    saved = {k: os.environ.get(k) for k in ("AETHER_NATS_URL", "AETHER_APP")}
+    os.environ["AETHER_NATS_URL"] = "nats://127.0.0.1:1"
+    os.environ["AETHER_APP"] = "test"
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _boom(ev, d, ctx):
@@ -169,6 +201,42 @@ class FSMTimeoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.state(), "idle")
         await wait_state(m, "finished", 1.0)
         self.assertEqual(m.data, 1)
+
+
+class FSMHardeningTest(unittest.IsolatedAsyncioTestCase):
+    async def test_enter_unknown_state_warns(self):
+        lines: list = []
+        log = Logger({"component": "test"}, level=30, fmt="json", write=lambda line: lines.append(line))
+        ctx = Ctx(nats=None, name="t", app="test", log=log)
+        defn = FSM(
+            name="ghosted",
+            initial="here",
+            init=lambda ctx: 0,
+            # "ghost" is not a defined state
+            states={"here": State(on={"leave": Reaction(fn=lambda ev, d, ctx: Outcome(next="ghost", data=d))})},
+        )
+        m = _Machine(defn, ctx, defn.init(ctx), ctx.log)
+        m.arm_initial()
+        await cast_op(m, "leave")
+        self.assertTrue(any("fsm transition to unknown state" in line for line in lines), lines)
+
+    async def test_start_fsm_rejects_unknown_initial(self):
+        defn = FSM(name="typo", initial="startt", init=lambda ctx: 0, states={"start": State(on={})})
+        with _fake_env(), self.assertRaises(RuntimeError) as cm:
+            await start_fsm(defn)
+        self.assertIn("not in states", str(cm.exception))
+
+    async def test_start_fsm_rejects_missing_init(self):
+        defn = FSM(name="no-init", initial="a", init=None, states={"a": State(on={})})
+        with _fake_env(), self.assertRaises(RuntimeError) as cm:
+            await start_fsm(defn)
+        self.assertIn("init is required", str(cm.exception))
+
+    async def test_start_rejects_missing_init(self):
+        defn = ThrallDef(name="no-init", init=None)
+        with _fake_env(), self.assertRaises(RuntimeError) as cm:
+            await start(defn)
+        self.assertIn("init is required", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 package thrall
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,5 +241,54 @@ func TestFSMOutcomeReArmsTimeoutWhileStaying(t *testing.T) {
 	waitState(t, r, "finished", time.Second)
 	if _, d := r.snapshot(); d != 1 {
 		t.Errorf("data after re-armed timeout = %d, want 1", d)
+	}
+}
+
+// StartFSM must reject a definition whose Initial state is not among States - a typo that
+// would otherwise start the machine in a silent dead-end (no reactions, no timeout).
+func TestStartFSMRejectsUnknownInitial(t *testing.T) {
+	t.Setenv("AETHER_NATS_URL", "nats://127.0.0.1:1") // never dialled: the guard fires first
+	t.Setenv("AETHER_APP", "test")
+
+	def := FSM[int]{
+		Name:    "typo",
+		Initial: "startt", // typo: real state is "start"
+		Init:    func(*Ctx) (int, error) { return 0, nil },
+		States:  map[string]State[int]{"start": {On: map[string]Reaction[int]{}}},
+	}
+	err := StartFSM(def)
+	if err == nil {
+		t.Fatal("expected an error for an initial state not in States, got nil")
+	}
+	if !strings.Contains(err.Error(), "not in states") {
+		t.Fatalf("expected a %q error, got: %v", "not in states", err)
+	}
+}
+
+// A transition whose target state does not exist (a typo in Outcome.Next) must surface as a
+// warning, so the machine does not silently freeze in an unknown state.
+func TestEnterUnknownStateWarns(t *testing.T) {
+	def := FSM[int]{
+		Name:    "ghosted",
+		Initial: "here",
+		Init:    func(*Ctx) (int, error) { return 0, nil },
+		States: map[string]State[int]{
+			"here": {On: map[string]Reaction[int]{
+				"leave": {Fn: func(_ Event, d int, _ *Ctx) (Outcome[int], error) {
+					return Outcome[int]{Next: "ghost", Data: d}, nil // "ghost" is not a defined state
+				}},
+			}},
+		},
+	}
+
+	var buf bytes.Buffer
+	log := obs.NewWithWriter(&buf)
+	ctx := &Ctx{Log: log, Name: def.Name, App: "test"}
+	data, _ := def.Init(ctx)
+	r := &fsmRunner[int]{def: def, ctx: ctx, log: log, stats: &mailboxStats{}, cur: def.Initial, data: data}
+
+	cast(r, "leave")
+	if !strings.Contains(buf.String(), "transition to unknown state") {
+		t.Fatalf("expected an unknown-state warning, got logs: %q", buf.String())
 	}
 }

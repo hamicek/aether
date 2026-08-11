@@ -108,6 +108,41 @@ func TestHeartbeatMissMarksStaleAndRecovers(t *testing.T) {
 	})
 }
 
+// TestLivenessStatusWritesAreOrderedBySeq proves the fix for the reaper/heartbeat race: a
+// resuming heartbeat and the reaper can decide "ready" and "stale" concurrently, and their
+// registry writes happen outside l.mu. Each decision carries a version stamped under l.mu, so
+// a write that arrives out of order (an older "stale" landing after a newer "ready") is
+// dropped rather than leaving the registry stuck on stale until the next heartbeat.
+func TestLivenessStatusWritesAreOrderedBySeq(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "hbord", "one_for_one", spec("x", "permanent", "local"))
+	l, err := New(m, eth)
+	if err != nil {
+		t.Fatalf("lord.New: %v", err)
+	}
+
+	reg, err := registry.Open(eth.Conn())
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	// A newer "ready" decision (seq 5) followed by an older, reordered "stale" decision (seq 4):
+	// the stale write must be dropped, so the registry stays on ready.
+	l.applyStatus("x", 100, "ready", 5)
+	l.applyStatus("x", 100, "stale", 4)
+	if e, ok, err := reg.Get("x"); err != nil || !ok {
+		t.Fatalf("registry.Get: ok=%v err=%v", ok, err)
+	} else if e.Status != "ready" {
+		t.Fatalf("status = %q, want ready (an older stale write must not clobber a newer ready)", e.Status)
+	}
+
+	// A genuinely newer "stale" decision (seq 6) does take effect.
+	l.applyStatus("x", 100, "stale", 6)
+	if e, _, _ := reg.Get("x"); e.Status != "stale" {
+		t.Fatalf("status = %q, want stale (a newer decision must win)", e.Status)
+	}
+}
+
 // TestHeartbeatMetricsRecorded proves the lord folds a real thrall's self-reported mailbox
 // metrics (carried on the heartbeat) into the /metrics exposition.
 func TestHeartbeatMetricsRecorded(t *testing.T) {

@@ -103,6 +103,9 @@ func StartFSM[D any](def FSM[D]) error {
 	if def.Init == nil {
 		return fmt.Errorf("fsm %q: Init is required", name)
 	}
+	if _, ok := def.States[def.Initial]; !ok {
+		return fmt.Errorf("fsm %q: initial state %q is not in states", name, def.Initial)
+	}
 	durable := os.Getenv("AETHER_DURABLE") == "1"
 
 	opts, err := connectOptions(name)
@@ -294,6 +297,9 @@ func (m *fsmRunner[D]) unhandled(ev Event, respond func(wire.Envelope), req wire
 // holds mu.
 func (m *fsmRunner[D]) enter(next string, override *StateTimeout[D]) {
 	from := m.cur
+	if _, ok := m.def.States[next]; !ok {
+		m.log.Warn("fsm transition to unknown state", slog.String("from", from), slog.String("to", next))
+	}
 	m.cur = next
 	m.log.Info("fsm transition", slog.String("from", from), slog.String("to", next))
 	to := override
