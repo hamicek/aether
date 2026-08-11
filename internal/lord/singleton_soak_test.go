@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/soak"
 )
 
@@ -193,4 +194,141 @@ func TestSoakSingletonFailover(t *testing.T) {
 	report.FailoverMax = failoverMax
 	report.MaxLiveInstances = maxLive
 	finishSoak(t, report, cfg.reportPath)
+}
+
+// ppidOf returns the parent pid of pid (0 on error).
+func ppidOf(pid int) int {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// lordHostAncestor walks up the process tree from pid until it hits one of the known lord-host
+// pids, and returns it (0 if none). It is robust to whether `sh -c` execs into or forks the
+// probe, so it does not depend on a fixed number of hops between the probe and its lord host.
+func lordHostAncestor(pid int, hosts []int) int {
+	for hop := 0; hop < 8 && pid > 1; hop++ {
+		for _, h := range hosts {
+			if pid == h {
+				return h
+			}
+		}
+		pid = ppidOf(pid)
+	}
+	return 0
+}
+
+// TestSoakSingletonOrphanFencing kills ONLY the lord process holding the singleton (not its
+// whole group), so the probe is left orphaned - the case the lord-side lock cannot cover. It
+// proves the thrall's own fencing: the orphan self-terminates once it loses the lock, so two
+// live instances never persist. Without fencing the orphan would run forever and this test
+// would fail (the standby lord starts a second instance after the lock expires).
+func TestSoakSingletonOrphanFencing(t *testing.T) {
+	const app = "orphan"
+	eth := startEmbedded(t)
+	nc := eth.Conn()
+	started := subscribeLifecycle(t, nc, probeStartedSubject)
+	url := eth.URL()
+
+	// Two lord nodes race for the singleton; one holds it, the other stands by to take over.
+	hosts := []*exec.Cmd{startLordHost(t, url, app), startLordHost(t, url, app)}
+	t.Cleanup(func() {
+		for _, h := range hosts {
+			killNode(h)
+		}
+	})
+
+	// The orphan must self-terminate within the lock TTL (until the key expires) plus the
+	// fencing lease, with margin. The two-instance overlap is bounded by this same window.
+	const reapBound = 2*singleton.TTL + 4*time.Second
+
+	first := nextLifecycle(t, started, 10*time.Second, "first singleton instance")
+	curPID := first.PID
+	var maxReap, maxOverlap time.Duration
+
+	const rounds = 3
+	for round := 0; round < rounds; round++ {
+		hostPIDs := make([]int, len(hosts))
+		for i, h := range hosts {
+			if h.Process != nil {
+				hostPIDs[i] = h.Process.Pid
+			}
+		}
+		holder := lordHostAncestor(curPID, hostPIDs)
+		killedIdx := -1
+		for i, h := range hosts {
+			if h.Process != nil && h.Process.Pid == holder {
+				killedIdx = i
+				break
+			}
+		}
+		if killedIdx < 0 {
+			t.Fatalf("round %d: could not map live probe pid=%d to a lord host", round, curPID)
+		}
+
+		orphanPID := curPID
+		killAt := time.Now()
+		// Kill ONLY the lord process (positive pid), NOT its group: the probe is left orphaned,
+		// exactly the window the lord-side lock cannot close.
+		if err := syscall.Kill(hosts[killedIdx].Process.Pid, syscall.SIGKILL); err != nil {
+			t.Fatalf("round %d: kill lord process: %v", round, err)
+		}
+		killed := hosts[killedIdx]
+		go killed.Wait()
+		hosts[killedIdx] = startLordHost(t, url, app) // replacement standby for the next round
+
+		// Failover: the standby brings up a new instance (different PID) after the lock expires.
+		var next lifecycleEvent
+		deadline := time.Now().Add(reapBound)
+		for {
+			e := nextLifecycle(t, started, time.Until(deadline), "failover instance after orphan")
+			if e.PID != orphanPID {
+				next = e
+				break
+			}
+		}
+		newUpAt := time.Now()
+
+		// Fencing: the orphaned instance must self-terminate on its own within the bound.
+		var deathAt time.Time
+		reapDeadline := killAt.Add(reapBound)
+		for {
+			if !alive(orphanPID) {
+				deathAt = time.Now()
+				break
+			}
+			if time.Now().After(reapDeadline) {
+				t.Fatalf("round %d fencing: orphaned instance pid=%d still alive %s after its lord was killed (bar %s)",
+					round, orphanPID, time.Since(killAt), reapBound)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		reap := deathAt.Sub(killAt)
+		overlap := deathAt.Sub(newUpAt) // time both old and new were live at once
+		if overlap < 0 {
+			overlap = 0
+		}
+		if reap > maxReap {
+			maxReap = reap
+		}
+		if overlap > maxOverlap {
+			maxOverlap = overlap
+		}
+		t.Logf("round %d: orphan pid=%d reaped in %s, new pid=%d, overlap=%s", round, orphanPID, reap, next.PID, overlap)
+
+		curPID = next.PID
+	}
+
+	// Steady state: exactly one live instance remains.
+	if !alive(curPID) {
+		t.Errorf("final: expected the current instance pid=%d to be live", curPID)
+	}
+	t.Logf("orphan fencing: %d rounds, max reap=%s, max overlap=%s (lease=%s)", rounds, maxReap, maxOverlap, singleton.TTL)
 }
