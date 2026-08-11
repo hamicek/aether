@@ -11,6 +11,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/fsm": {
+      "name": "fsm-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/scada-spike": {
       "name": "scada-spike-example",
       "dependencies": {
@@ -32,6 +38,8 @@
     "@hamicek/aether": ["@hamicek/aether@workspace:sdk/ts"],
 
     "counter-example": ["counter-example@workspace:examples/counter"],
+
+    "fsm-example": ["fsm-example@workspace:examples/fsm"],
 
     "nats": ["nats@2.29.3", "", { "dependencies": { "nkeys.js": "1.1.0" } }, "sha512-tOQCRCwC74DgBTk4pWZ9V45sk4d7peoE2njVprMRCBXrhJ5q5cYM7i6W+Uvw2qUrcfOSnuisrX7bEx3b3Wx4QA=="],
 
