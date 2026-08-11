@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import nats
+from nats.js.errors import KeyNotFoundError
 
 
 # --- structured logging (mirrors internal/obs and the TS SDK log.ts) ---
@@ -120,6 +121,85 @@ def _heartbeat_interval() -> float:
     elif ms < 100:
         ms = 100
     return ms / 1000.0
+
+
+# --- singleton fencing (mirrors the Go/TS SDKs) ---
+# Lease/interval mirror internal/singleton.TTL (3s): the interval is the verification cadence,
+# the lease the grace after which an unverifiable lock is presumed lost.
+_FENCE_LEASE_MS = 3000
+_FENCE_INTERVAL_MS = 1000
+
+
+def _fence_config_from_env() -> Optional[dict]:
+    """Read the fencing token the lord injects (AETHER_SINGLETON_*); None for a non-singleton."""
+    bucket = os.environ.get("AETHER_SINGLETON_BUCKET")
+    key = os.environ.get("AETHER_SINGLETON_KEY")
+    epoch_raw = os.environ.get("AETHER_SINGLETON_EPOCH")
+    if not bucket or not key or not epoch_raw:
+        return None
+    try:
+        epoch = int(epoch_raw)
+    except ValueError:
+        return None
+    if epoch <= 0:
+        return None
+    return {"bucket": bucket, "key": key, "epoch": epoch}
+
+
+async def _fencing(
+    kv: Any,
+    cfg: dict,
+    log: Any,
+    stop: asyncio.Event,
+    on_lost: Callable[[str], None],
+    lease_ms: int = _FENCE_LEASE_MS,
+    interval_ms: int = _FENCE_INTERVAL_MS,
+) -> None:
+    """Verify, independently of the lord, that this singleton thrall still holds its KV lock.
+    On a confirmed loss (epoch superseded or key gone) it calls on_lost at once; when the KV
+    cannot be reached it calls on_lost once the lease elapses without a confirmation, bounding
+    any two-instance overlap to the lock TTL. on_lost is expected to terminate the process."""
+    interval = interval_ms / 1000.0
+    lease = lease_ms / 1000.0
+    last_confirmed = time.monotonic()
+    while not stop.is_set():
+        try:
+            entry = await kv.get(cfg["key"])
+            rec = json.loads(bytes(entry.value))
+            if rec.get("epoch") != cfg["epoch"]:
+                on_lost("singleton lock lost (epoch superseded)")
+                return
+            last_confirmed = time.monotonic()
+        except KeyNotFoundError:
+            on_lost("singleton lock lost (key gone)")
+            return
+        except Exception as ex:  # noqa: BLE001  - cannot reach the KV: fail safe after the lease
+            if time.monotonic() - last_confirmed > lease:
+                on_lost(f"lock unverifiable for over {lease_ms}ms: {ex}")
+                return
+            log.warn("singleton fencing: verify failed, within lease", err=str(ex))
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _start_fencing_if_singleton(
+    nc: Any, name: str, log: Any, stop: asyncio.Event
+) -> Optional[asyncio.Task]:
+    """Start the fencing loop when the thrall is a singleton; None otherwise. Shared by start
+    and start_fsm. Opens the lock bucket up front (a failure propagates, mirroring the Go SDK);
+    on a lock loss it hard-exits the process (os._exit), matching the Go/TS SDKs."""
+    cfg = _fence_config_from_env()
+    if cfg is None:
+        return None
+    kv = await nc.jetstream().key_value(cfg["bucket"])
+
+    def on_lost(reason: str) -> None:
+        log.error("singleton fencing: self-terminating", name=name, reason=reason)
+        os._exit(1)
+
+    return asyncio.create_task(_fencing(kv, cfg, log, stop, on_lost))
 
 
 def _connect_kwargs(
@@ -469,6 +549,10 @@ async def start(defn: ThrallDef) -> None:
 
     tasks += [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
 
+    fence_task = await _start_fencing_if_singleton(nc, name, ctx.log, stop)
+    if fence_task is not None:
+        tasks.append(fence_task)
+
     await stop.wait()
     for t in tasks:
         t.cancel()
@@ -744,6 +828,10 @@ async def start_fsm(defn: FSM) -> None:
                 pass
 
     tasks += [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
+
+    fence_task = await _start_fencing_if_singleton(nc, name, ctx.log, stop)
+    if fence_task is not None:
+        tasks.append(fence_task)
 
     await stop.wait()
     for t in tasks:

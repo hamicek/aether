@@ -178,6 +178,10 @@ func StartFSM[D any](def FSM[D]) error {
 
 	go heartbeat(nc, name, m.stats, stop)
 
+	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
+		return err
+	}
+
 	<-stop
 	m.mu.Lock()
 	m.stopTimer()

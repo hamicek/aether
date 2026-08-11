@@ -53,6 +53,5 @@ Standalone server na přiděleném portu **7390** (blok 7390-7394). Binárka:
 ## Zbývá (vědomé TODO, neblokující)
 
 - `$SYS` connection eventy jako doplněk heartbeatu (liveness i mimo embedded výsadu)
-- plný thrall-level fencing u singletonů (osiřelý thrall po pádu lorda)
 - `temporary` sémantika uvnitř skupinových strategií
 - perzistence stavu thralla (durable = mailbox, ne stav; restart = čistý `init`)
