@@ -90,14 +90,32 @@ func startLordHost(t *testing.T, url, app string) *exec.Cmd {
 	return cmd
 }
 
-// killNode SIGKILLs a lord host's whole process group (lord + its singleton probe) and
-// reaps it.
+// killNode SIGKILLs a lord host's process group and reaps it. Since AE-013 a thrall runs in
+// its OWN process group (child.spawn sets Setpgid so the lord can kill a child's subtree
+// without suicide), so this reaps the lord host but NOT its singleton probe - a node is a
+// process tree spanning two groups. Use crashNode to bring the whole node down.
 func killNode(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	go cmd.Wait()
+}
+
+// killProbeGroup SIGKILLs the process group of a singleton probe (its own group leader since
+// AE-013). A dead pid yields pgid 0 and is skipped, so it is safe to call on a stale pid.
+func killProbeGroup(probePID int) {
+	if pg := pgidOf(probePID); pg > 0 {
+		_ = syscall.Kill(-pg, syscall.SIGKILL)
+	}
+}
+
+// crashNode simulates a full node crash: it kills both the lord host's group and its singleton
+// probe's group, so the probe dies WITH the node rather than being orphaned (which the lord-side
+// lock cannot cover). Read the probe pid before calling - the probe must still be live.
+func crashNode(cmd *exec.Cmd, probePID int) {
+	killNode(cmd)
+	killProbeGroup(probePID)
 }
 
 func failoverRounds(d time.Duration) int {
@@ -125,9 +143,15 @@ func TestSoakSingletonFailover(t *testing.T) {
 
 	// Two lord nodes race for the singleton; one holds it, the other stands by.
 	hosts := []*exec.Cmd{startLordHost(t, url, app), startLordHost(t, url, app)}
+	seen := []int{}
 	t.Cleanup(func() {
 		for _, h := range hosts {
 			killNode(h)
+		}
+		// Probes live in their own groups, so killing the host groups leaves them orphaned;
+		// reap any still-live probe explicitly (a stale pid yields pgid 0 and is skipped).
+		for _, p := range seen {
+			killProbeGroup(p)
 		}
 	})
 
@@ -135,26 +159,38 @@ func TestSoakSingletonFailover(t *testing.T) {
 
 	first := nextLifecycle(t, started, 10*time.Second, "first singleton instance")
 	curPID := first.PID
-	seen := []int{curPID}
+	seen = append(seen, curPID)
 	maxLive := 1
 	var failoverMax time.Duration
 
 	for round := 0; round < failoverRounds(cfg.duration); round++ {
-		// Identify and kill the node whose group owns the live probe.
-		holderPgid := pgidOf(curPID)
-		var killed *exec.Cmd
+		// Identify the node that holds the live probe by walking the probe's process tree up to
+		// its lord host (robust to the probe living in its own group since AE-013), not by pgid.
+		hostPIDs := make([]int, len(hosts))
 		for i, h := range hosts {
-			if h.Process != nil && h.Process.Pid == holderPgid {
-				killed = h
-				hosts[i] = startLordHost(t, url, app) // spin up a replacement standby
+			if h.Process != nil {
+				hostPIDs[i] = h.Process.Pid
+			}
+		}
+		holder := lordHostAncestor(curPID, hostPIDs)
+		killedIdx := -1
+		for i, h := range hosts {
+			if h.Process != nil && h.Process.Pid == holder {
+				killedIdx = i
 				break
 			}
 		}
-		if killed == nil {
-			t.Fatalf("round %d: could not map live probe pid=%d (pgid=%d) to a lord host", round, curPID, holderPgid)
+		if killedIdx < 0 {
+			t.Fatalf("round %d: could not map live probe pid=%d to a lord host", round, curPID)
 		}
+		killed := hosts[killedIdx]
+		hosts[killedIdx] = startLordHost(t, url, app) // spin up a replacement standby
+
+		// Crash the whole node - lord host AND its probe's group - so the probe dies with the
+		// node (a process tree) rather than being orphaned. Read the probe pid while it is live.
+		crashPID := curPID
 		killAt := time.Now()
-		killNode(killed)
+		crashNode(killed, crashPID)
 
 		// Wait for a new instance (a different PID) to come up = failover.
 		var next lifecycleEvent
@@ -171,9 +207,9 @@ func TestSoakSingletonFailover(t *testing.T) {
 			failoverMax = failover
 		}
 
-		// Fencing: the killed instance must be dead by the time the new one is up.
+		// One live instance: the crashed node's probe must be dead by the time the new one is up.
 		if alive(curPID) {
-			t.Errorf("round %d fencing: old instance pid=%d still alive when new pid=%d started",
+			t.Errorf("round %d: old instance pid=%d still alive when new pid=%d started",
 				round, curPID, next.PID)
 		}
 		seen = append(seen, next.PID)
