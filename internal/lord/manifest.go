@@ -22,6 +22,9 @@ type Manifest struct {
 // Prometheus endpoint off (opt-in), so plain runs stay free of an open HTTP port.
 type Observability struct {
 	MetricsAddr string `toml:"metrics_addr"` // host:port for the Prometheus /metrics endpoint (empty = disabled)
+	// Dashboard serves the read-only observer dashboard (live supervision tree + event stream)
+	// on the same HTTP server as /metrics; it therefore requires MetricsAddr. Off by default.
+	Dashboard bool `toml:"dashboard"`
 }
 
 // Liveness tunes how fast a hung-but-alive thrall is detected. The interval is propagated to the
