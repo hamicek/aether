@@ -123,6 +123,8 @@ func (l *Lord) eventsHandler(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-l.appCtx.Done(): // lord shutting down: end the stream promptly, don't wait out Shutdown's grace
+			return
 		case msg, ok := <-ch:
 			if !ok {
 				return
