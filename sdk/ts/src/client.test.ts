@@ -63,10 +63,24 @@ test("startChild throws on the lord's error reply", async () => {
     id: r.id,
     kind: "reply",
     status: "error",
-    error: { type: "spawn_failed", message: "a child named \"dup\" already exists", retryable: false },
+    error: { type: "spawn_failed", message: "lord is draining", retryable: false },
   }));
 
-  await expect(startChild(nc, { name: "dup", cmd: "./w" })).rejects.toThrow(/already exists/);
+  await expect(startChild(nc, { name: "worker-1", cmd: "./w" })).rejects.toThrow(/draining/);
+});
+
+test("startChild resolves when the lord answers ok for an already-running child (idempotent)", async () => {
+  // The lord makes a repeat spawn of a live name a no-op and replies ok, so calling
+  // startChild blindly from init to re-establish topology does not throw.
+  const nc = fakeLord((r) => ({
+    v: 1,
+    id: r.id,
+    kind: "reply",
+    status: "ok",
+    payload: { name: (r.payload as { name: string }).name },
+  }));
+
+  await expect(startChild(nc, { name: "worker-1", cmd: "./w" })).resolves.toBe("worker-1");
 });
 
 test("startChild propagates a request timeout", async () => {
