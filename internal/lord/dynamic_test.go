@@ -140,22 +140,91 @@ func TestDynamicOutsideGroupStrategy(t *testing.T) {
 	}
 }
 
-// TestDynamicDuplicateNameRejected and the others cover the spawn/stop lifecycle.
+// TestDynamicSpawnIdempotent: a repeat spawn of a name already under supervision is an
+// idempotent no-op, not an error, and does not start a second process. This is what lets
+// an owner call StartChild blindly from its init to re-establish topology after a lord
+// restart.
+func TestDynamicSpawnIdempotent(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
 
-// TestDynamicDuplicateNameRejected: a spawn with an existing name (static or dynamic) fails.
-func TestDynamicDuplicateNameRejected(t *testing.T) {
+	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("first spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+	pid := callInt(t, nc, "demo", "dyn", "pid")
+
+	r := spawnDynamic(t, nc, sp)
+	if r.Status != "ok" {
+		t.Fatalf("second spawn should be an idempotent ok, got status %q (err=%+v)", r.Status, r.Error)
+	}
+	var reply wire.SpawnReply
+	if err := json.Unmarshal(r.Payload, &reply); err != nil {
+		t.Fatalf("decode reply: %v", err)
+	}
+	if reply.Name != "dyn" {
+		t.Fatalf("reply name = %q, want dyn", reply.Name)
+	}
+	// Same pid => no second process was spawned. Allow a moment for an (erroneous) restart.
+	time.Sleep(300 * time.Millisecond)
+	pid2, ok := tryCallInt(nc, "demo", "dyn", "pid")
+	if !ok {
+		t.Fatal("dynamic thrall stopped answering after the idempotent spawn")
+	}
+	if pid2 != pid {
+		t.Fatalf("pid changed after the idempotent spawn (%d -> %d) - a second process was started", pid, pid2)
+	}
+}
+
+// TestDynamicSpawnRevivesDeadChild: a dead dynamic child of the same name (one that was not
+// restarted) lingers in the lord's slice. Re-spawning must bring a fresh process back, not
+// silently no-op on the corpse - otherwise reconcile-as-recovery would never revive it.
+func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	// A temporary child is not restarted when it exits, so after a crash it lingers dead -
+	// exactly the state a re-spawn must revive.
+	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("first spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+	pid1 := callInt(t, nc, "demo", "dyn", "pid")
+
+	cast(t, nc, "demo", "dyn", "crash")
+	waitFor(t, 5*time.Second, "dead temporary child stops answering", func() bool {
+		_, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return !ok
+	})
+
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("re-spawn of a dead child: %+v", r.Error)
+	}
+	waitFor(t, 5*time.Second, "dead child revived with a new process", func() bool {
+		pid2, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return ok && pid2 != pid1
+	})
+}
+
+// TestDynamicSpawnNameConflictsStatic: a dynamic spawn must not shadow a manifest name -
+// that is a genuine misconfiguration the author must see, not an idempotent no-op.
+func TestDynamicSpawnNameConflictsStatic(t *testing.T) {
 	eth := startEmbedded(t)
 	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
 	nc := eth.Conn()
 	waitReady(t, eth, "static")
 
 	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "static", Cmd: probeCmd(t)}); r.Status != "error" {
-		t.Fatalf("duplicate of a static name should be refused, got %q", r.Status)
+		t.Fatalf("spawning over a manifest name should be refused, got %q", r.Status)
 	}
-	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t)}); r.Status != "ok" {
-		t.Fatalf("first dyn spawn: %+v", r.Error)
-	}
-	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t)}); r.Status != "error" {
-		t.Fatalf("duplicate of a dynamic name should be refused, got %q", r.Status)
+	// The refused spawn must not have disturbed the existing static child.
+	if _, ok := tryCallInt(nc, "demo", "static", "pid"); !ok {
+		t.Fatal("static child stopped answering after a refused dynamic spawn over its name")
 	}
 }

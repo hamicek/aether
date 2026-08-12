@@ -78,13 +78,23 @@ class DynamicSupervisor(unittest.IsolatedAsyncioTestCase):
     async def test_error_reply_raises(self):
         lord = _FakeLord(lambda req: {
             "v": 1, "id": req.get("id"), "kind": "reply", "status": "error",
-            "error": {"type": "spawn_failed", "message": 'a child named "dup" already exists',
+            "error": {"type": "spawn_failed", "message": "lord is draining",
                       "retryable": False},
         })
         ctx = aether.Ctx(nats=lord, name="mgr", app="demo")
 
         with self.assertRaises(RuntimeError):
-            await ctx.start_child(aether.SpawnSpec(name="dup", cmd="./w"))
+            await ctx.start_child(aether.SpawnSpec(name="worker-1", cmd="./w"))
+
+    async def test_idempotent_ok_reply_resolves(self):
+        # Client-side contract: when the lord answers ok (its idempotent no-op reply), the
+        # client returns the name rather than raising - so an owner can call start_child
+        # blindly from init. The lord's no-op logic itself is covered by the Go integration test.
+        lord = _FakeLord(lambda req: _ok(req, {"name": req["payload"]["name"]}))
+        ctx = aether.Ctx(nats=lord, name="mgr", app="demo")
+
+        name = await ctx.start_child(aether.SpawnSpec(name="worker-1", cmd="./w"))
+        self.assertEqual(name, "worker-1")
 
     async def test_timeout_propagates(self):
         class _Timeout:

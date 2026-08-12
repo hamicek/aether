@@ -63,10 +63,25 @@ test("startChild throws on the lord's error reply", async () => {
     id: r.id,
     kind: "reply",
     status: "error",
-    error: { type: "spawn_failed", message: "a child named \"dup\" already exists", retryable: false },
+    error: { type: "spawn_failed", message: "lord is draining", retryable: false },
   }));
 
-  await expect(startChild(nc, { name: "dup", cmd: "./w" })).rejects.toThrow(/already exists/);
+  await expect(startChild(nc, { name: "worker-1", cmd: "./w" })).rejects.toThrow(/draining/);
+});
+
+test("startChild resolves when the lord answers ok for an already-running child (idempotent)", async () => {
+  // Client-side contract: when the lord answers ok (its idempotent no-op reply), the
+  // client resolves the name rather than throwing - so an owner can call startChild
+  // blindly from init. The lord's no-op logic itself is covered by the Go integration test.
+  const nc = fakeLord((r) => ({
+    v: 1,
+    id: r.id,
+    kind: "reply",
+    status: "ok",
+    payload: { name: (r.payload as { name: string }).name },
+  }));
+
+  await expect(startChild(nc, { name: "worker-1", cmd: "./w" })).resolves.toBe("worker-1");
 });
 
 test("startChild propagates a request timeout", async () => {

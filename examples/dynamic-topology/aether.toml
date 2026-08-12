@@ -1,0 +1,14 @@
+app = "dyntopo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# Only the manager is static. It spawns its workers dynamically from its own init, so the
+# topology re-establishes itself when the lord (and thus the manager's init) restarts.
+[[thrall]]
+name = "manager"
+cmd  = "../../bin/dyntopo-demo"
+restart = "permanent"
+scope   = "local"
