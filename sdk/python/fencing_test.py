@@ -40,6 +40,19 @@ class EnvConfigTest(unittest.TestCase):
         del os.environ["AETHER_SINGLETON_BUCKET"]
         del os.environ["AETHER_SINGLETON_KEY"]
 
+    def test_reads_lord_liveness_token(self):
+        self.assertIsNone(aether._lord_fence_config_from_env())  # no env -> no fencing
+        os.environ["AETHER_LORD_BUCKET"] = "aether_lords"
+        os.environ["AETHER_LORD_KEY"] = "demo"
+        os.environ["AETHER_LORD_EPOCH"] = "12"
+        self.assertEqual(
+            aether._lord_fence_config_from_env(),
+            {"bucket": "aether_lords", "key": "demo", "epoch": 12},
+        )
+        del os.environ["AETHER_LORD_BUCKET"]
+        del os.environ["AETHER_LORD_KEY"]
+        del os.environ["AETHER_LORD_EPOCH"]
+
 
 @unittest.skipUnless(NATS_SERVER, "nats-server not on PATH")
 class FencingTest(unittest.IsolatedAsyncioTestCase):
@@ -77,7 +90,8 @@ class FencingTest(unittest.IsolatedAsyncioTestCase):
         cfg = {"bucket": BUCKET, "key": key, "epoch": epoch}
         kv = await conn.jetstream().key_value(BUCKET)
         task = asyncio.create_task(
-            aether._fencing(kv, cfg, aether.new_logger(), asyncio.Event(), on_lost, LEASE_MS, INTERVAL_MS)
+            aether._fencing("singleton fencing", kv, cfg, aether.new_logger(), asyncio.Event(),
+                            on_lost, LEASE_MS, INTERVAL_MS)
         )
         self._tasks.append(task)  # keep a reference so the task is not GC'd mid-run
         return task

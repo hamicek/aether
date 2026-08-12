@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
@@ -37,6 +38,12 @@ type child struct {
 	// The thrall verifies this epoch against the KV lock and self-terminates if it loses it.
 	singletonKey   string
 	singletonEpoch uint64
+
+	// Lord-liveness fencing: set before spawn for EVERY thrall (0 epoch = no lord, e.g. a
+	// unit test without a lord). The thrall verifies this epoch against the lord's KV lease
+	// and self-terminates if its lord is gone or was replaced.
+	lordKey   string
+	lordEpoch uint64
 
 	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
 	live    atomic.Bool // the process is currently running
@@ -75,6 +82,15 @@ func (c *child) env() []string {
 			"AETHER_SINGLETON_BUCKET="+singleton.Bucket,
 			"AETHER_SINGLETON_KEY="+c.singletonKey,
 			"AETHER_SINGLETON_EPOCH="+strconv.FormatUint(c.singletonEpoch, 10),
+		)
+	}
+	// Lord-liveness fencing token: present for EVERY thrall the lord spawns, so the thrall can
+	// verify its lord is still alive against the KV lease and self-terminate if it is gone.
+	if c.lordEpoch > 0 {
+		env = append(env,
+			"AETHER_LORD_BUCKET="+lordlease.Bucket,
+			"AETHER_LORD_KEY="+c.lordKey,
+			"AETHER_LORD_EPOCH="+strconv.FormatUint(c.lordEpoch, 10),
 		)
 	}
 	for _, key := range []string{obs.EnvLogLevel, obs.EnvLogFormat} {

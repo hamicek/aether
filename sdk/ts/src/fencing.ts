@@ -22,9 +22,19 @@ export interface FenceConfig {
 
 // fenceConfigFromEnv reads the fencing token; null for a non-singleton thrall (no env).
 export function fenceConfigFromEnv(): FenceConfig | null {
-  const bucket = process.env.AETHER_SINGLETON_BUCKET;
-  const key = process.env.AETHER_SINGLETON_KEY;
-  const epochRaw = process.env.AETHER_SINGLETON_EPOCH;
+  return fenceConfigFrom("AETHER_SINGLETON_BUCKET", "AETHER_SINGLETON_KEY", "AETHER_SINGLETON_EPOCH");
+}
+
+// lordFenceConfigFromEnv reads the lord-liveness token (AETHER_LORD_*), injected into every
+// thrall the lord spawns; null for a thrall started outside a lord.
+export function lordFenceConfigFromEnv(): FenceConfig | null {
+  return fenceConfigFrom("AETHER_LORD_BUCKET", "AETHER_LORD_KEY", "AETHER_LORD_EPOCH");
+}
+
+function fenceConfigFrom(bucketEnv: string, keyEnv: string, epochEnv: string): FenceConfig | null {
+  const bucket = process.env[bucketEnv];
+  const key = process.env[keyEnv];
+  const epochRaw = process.env[epochEnv];
   if (!bucket || !key || !epochRaw) return null;
   const epoch = parseInt(epochRaw, 10);
   if (!Number.isFinite(epoch) || epoch <= 0) return null;
@@ -46,8 +56,25 @@ export async function startFencingIfSingleton(
 ): Promise<void> {
   const cfg = fenceConfigFromEnv();
   if (!cfg) return;
-  await startFencing(nc, cfg, log, (reason) => {
+  await startFencing(nc, cfg, "singleton fencing", log, (reason) => {
     log.error("singleton fencing: self-terminating", { name, reason });
+    process.exit(1);
+  });
+}
+
+// startLordLivenessFencing starts the lord-liveness fencing loop for EVERY thrall the lord
+// spawned (the lord injected AETHER_LORD_*); a no-op for a thrall started outside a lord. Unlike
+// singleton fencing it is not conditional on scope: any thrall self-terminates when its lord is
+// gone or was replaced, closing the "no thrall survives its lord" invariant for a lord crash.
+export async function startLordLivenessFencing(
+  nc: NatsConnection,
+  name: string,
+  log: Logger,
+): Promise<void> {
+  const cfg = lordFenceConfigFromEnv();
+  if (!cfg) return;
+  await startFencing(nc, cfg, "lord-liveness fencing", log, (reason) => {
+    log.error("lord-liveness fencing: self-terminating", { name, reason });
     process.exit(1);
   });
 }
@@ -60,6 +87,7 @@ const decoder = new TextDecoder();
 export async function startFencing(
   nc: NatsConnection,
   cfg: FenceConfig,
+  label: string,
   log: Logger,
   onLost: (reason: string) => void,
   opts: FenceOptions = {},
@@ -86,22 +114,22 @@ export async function startFencing(
     try {
       const entry = await kv.get(cfg.key);
       if (entry === null) {
-        fireLost("singleton lock lost (key gone)");
+        fireLost(`${label} lost (key gone)`);
         return;
       }
       const rec = JSON.parse(decoder.decode(entry.value)) as { epoch?: number };
       if (rec.epoch !== cfg.epoch) {
-        fireLost("singleton lock lost (epoch superseded)");
+        fireLost(`${label} lost (epoch superseded)`);
         return;
       }
       lastConfirmed = Date.now();
     } catch (err) {
       // Cannot reach the KV: fail safe only once the lease has fully elapsed.
       if (Date.now() - lastConfirmed > leaseMs) {
-        fireLost(`lock unverifiable for over ${leaseMs}ms: ${String(err)}`);
+        fireLost(`${label} unverifiable for over ${leaseMs}ms: ${String(err)}`);
         return;
       }
-      log.warn("singleton fencing: verify failed, within lease", { err: String(err) });
+      log.warn(`${label}: verify failed, within lease`, { err: String(err) });
     }
   };
 

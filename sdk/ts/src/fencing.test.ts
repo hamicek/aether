@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { connect, type NatsConnection } from "nats";
-import { startFencing, fenceConfigFromEnv, type FenceConfig } from "./fencing";
+import { startFencing, fenceConfigFromEnv, lordFenceConfigFromEnv, type FenceConfig } from "./fencing";
 import { type Logger } from "./log";
 
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -87,12 +87,25 @@ test("fenceConfigFromEnv reads the injected token", () => {
   delete process.env.AETHER_SINGLETON_KEY;
 });
 
+test("lordFenceConfigFromEnv reads the injected lord-liveness token", () => {
+  expect(lordFenceConfigFromEnv()).toBeNull(); // no env -> a thrall outside a lord, no fencing
+
+  process.env.AETHER_LORD_BUCKET = "aether_lords";
+  process.env.AETHER_LORD_KEY = "demo";
+  process.env.AETHER_LORD_EPOCH = "12";
+  expect(lordFenceConfigFromEnv()).toEqual({ bucket: "aether_lords", key: "demo", epoch: 12 });
+
+  delete process.env.AETHER_LORD_BUCKET;
+  delete process.env.AETHER_LORD_KEY;
+  delete process.env.AETHER_LORD_EPOCH;
+});
+
 test.skipIf(!hasServer)("fencing stays while the epoch holds", async () => {
   const key = "hold";
   await putRecord(nc!, key, 1);
   const cfg: FenceConfig = { bucket, key, epoch: 1 };
   let fired = "";
-  const { stop } = await startFencing(nc!, cfg, silentLog, (r) => (fired = r), opts);
+  const { stop } = await startFencing(nc!, cfg, "singleton fencing", silentLog, (r) => (fired = r), opts);
   await Bun.sleep(opts.leaseMs + 3 * opts.intervalMs);
   stop();
   expect(fired).toBe("");
@@ -103,7 +116,7 @@ test.skipIf(!hasServer)("fencing fires on an epoch takeover", async () => {
   await putRecord(nc!, key, 1);
   const cfg: FenceConfig = { bucket, key, epoch: 1 };
   const { promise, onLost } = waitLost();
-  await startFencing(nc!, cfg, silentLog, onLost, opts);
+  await startFencing(nc!, cfg, "singleton fencing", silentLog, onLost, opts);
   await putRecord(nc!, key, 2); // a successor stamps a new epoch
   const reason = await Promise.race([promise, Bun.sleep(2000).then(() => "TIMEOUT")]);
   expect(reason).not.toBe("TIMEOUT");
@@ -114,7 +127,7 @@ test.skipIf(!hasServer)("fencing fires when the key is gone", async () => {
   await putRecord(nc!, key, 1);
   const cfg: FenceConfig = { bucket, key, epoch: 1 };
   const { promise, onLost } = waitLost();
-  await startFencing(nc!, cfg, silentLog, onLost, opts);
+  await startFencing(nc!, cfg, "singleton fencing", silentLog, onLost, opts);
   const kv = await nc!.jetstream().views.kv(bucket, { history: 1 });
   await kv.purge(key);
   const reason = await Promise.race([promise, Bun.sleep(2000).then(() => "TIMEOUT")]);
@@ -129,7 +142,7 @@ test.skipIf(!hasServer)("fencing fires only after the lease when the bus is unre
   const cfg: FenceConfig = { bucket, key, epoch: 1 };
   let firedAt = 0;
   const start = Date.now();
-  await startFencing(own, cfg, silentLog, () => (firedAt = Date.now() - start), opts);
+  await startFencing(own, cfg, "singleton fencing", silentLog, () => (firedAt = Date.now() - start), opts);
 
   await own.close(); // KV can no longer be verified
 

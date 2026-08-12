@@ -37,11 +37,17 @@ func runLordHost() {
 	if err != nil {
 		os.Exit(5)
 	}
+	// Scope is singleton by default (the failover/orphan tests), or "local" for the
+	// lord-liveness orphan test, which needs a plain non-singleton thrall.
+	scope := os.Getenv("AETHER_LORD_SCOPE")
+	if scope == "" {
+		scope = "singleton"
+	}
 	m := &Manifest{
 		App:      app,
 		Strategy: "one_for_one",
 		Thralls: []ThrallSpec{{
-			Name: "single", Restart: "permanent", Scope: "singleton",
+			Name: "single", Restart: "permanent", Scope: scope,
 			Cmd: "AETHER_SOAK_PROBE=1 " + exe,
 		}},
 	}
@@ -73,15 +79,22 @@ func pgidOf(pid int) int {
 	return v
 }
 
-// startLordHost re-execs the test binary as a lord node in its own process group.
+// startLordHost re-execs the test binary as a lord node (a singleton probe) in its own group.
 func startLordHost(t *testing.T, url, app string) *exec.Cmd {
+	return startLordHostScope(t, url, app, "singleton")
+}
+
+// startLordHostScope re-execs the test binary as a lord node running a probe of the given scope
+// (singleton or local), in its own process group.
+func startLordHostScope(t *testing.T, url, app, scope string) *exec.Cmd {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), "AETHER_LORD_HOST=1", "AETHER_LORD_BUS="+url, "AETHER_LORD_APP="+app)
+	cmd.Env = append(os.Environ(),
+		"AETHER_LORD_HOST=1", "AETHER_LORD_BUS="+url, "AETHER_LORD_APP="+app, "AETHER_LORD_SCOPE="+scope)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Start(); err != nil {

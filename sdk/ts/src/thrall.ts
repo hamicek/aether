@@ -6,7 +6,7 @@ import { useConnection, startChild, stopChild, call, cast, orNewTrace, type Spaw
 import { newLogger, type Logger } from "./log";
 import { appendEvent } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
-import { startFencingIfSingleton } from "./fencing";
+import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -181,6 +181,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
 
   startHeartbeat(nc, name, snapshot);
   await startFencingIfSingleton(nc, name, log);
+  await startLordLivenessFencing(nc, name, log);
 }
 
 // subscribeData: a single wildcard subscription (call/cast/info) for a non-durable thrall.
