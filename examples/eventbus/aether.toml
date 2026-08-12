@@ -1,0 +1,17 @@
+app = "eventbus"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+[observability]
+metrics_addr = "127.0.0.1:7391"
+
+# An event manager (gen_event) in TypeScript. One cast to `alarms` is dispatched to every
+# handler (audit + pager) in registration order on one serialized mailbox.
+[[thrall]]
+name = "alarms"
+cmd  = "bun run ./alarms.ts"
+restart = "permanent"
+scope   = "local"
