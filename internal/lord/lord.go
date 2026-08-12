@@ -58,6 +58,7 @@ type Lord struct {
 	log       *slog.Logger
 	metrics   *lordMetrics
 	httpSrv   *http.Server
+	sse       *sseHub // fans lifecycle events out to dashboard clients (nil = dashboard disabled)
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 

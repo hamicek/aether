@@ -11,7 +11,83 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 )
+
+// sseHub fans lifecycle events out to the connected dashboard clients. Each client is a buffered
+// channel; a client too slow to keep up has the message dropped rather than stalling the
+// broadcast (a monitoring view tolerates a missed event, not a stalled lord).
+type sseHub struct {
+	mu      sync.Mutex
+	clients map[chan []byte]struct{}
+}
+
+func newSSEHub() *sseHub {
+	return &sseHub{clients: map[chan []byte]struct{}{}}
+}
+
+// register adds a client and returns its channel. unregister must be called to release it.
+func (h *sseHub) register() chan []byte {
+	ch := make(chan []byte, 16)
+	h.mu.Lock()
+	h.clients[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *sseHub) unregister(ch chan []byte) {
+	h.mu.Lock()
+	if _, ok := h.clients[ch]; ok {
+		delete(h.clients, ch)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+
+// broadcast delivers a message to every client, non-blocking. register/unregister and broadcast
+// share the lock, so a client is never sent to after it is closed.
+func (h *sseHub) broadcast(msg []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for ch := range h.clients {
+		select {
+		case ch <- msg:
+		default: // slow client - drop this event for it, keep the others flowing
+		}
+	}
+}
+
+// eventsHandler streams lifecycle events to one dashboard client over Server-Sent Events. It
+// registers with the hub and forwards each event until the client disconnects.
+func (l *Lord) eventsHandler(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := l.sse.register()
+	defer l.sse.unregister(ch)
+	flusher.Flush() // flush the headers so the client's EventSource opens at once
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			_, _ = w.Write([]byte("data: "))
+			_, _ = w.Write(msg)
+			_, _ = w.Write([]byte("\n\n"))
+			flusher.Flush()
+		}
+	}
+}
 
 // dashboardTree is the read-only snapshot the dashboard renders: the app, its supervision
 // strategy and the thralls the lord currently supervises.

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/hamicek/aether/internal/ether"
 	"github.com/hamicek/aether/internal/wire"
@@ -81,5 +82,48 @@ func TestTreeHandlerServesJSON(t *testing.T) {
 	}
 	if len(tree.Thralls) != 2 {
 		t.Errorf("thralls in JSON = %d, want 2", len(tree.Thralls))
+	}
+}
+
+func TestSSEHubFanOut(t *testing.T) {
+	h := newSSEHub()
+	a, b := h.register(), h.register()
+
+	h.broadcast([]byte("hello"))
+	if got := <-a; string(got) != "hello" {
+		t.Errorf("client a got %q, want hello", got)
+	}
+	if got := <-b; string(got) != "hello" {
+		t.Errorf("client b got %q, want hello", got)
+	}
+
+	h.unregister(a)
+	h.broadcast([]byte("second"))
+	if _, ok := <-a; ok {
+		t.Error("an unregistered client still received a message")
+	}
+	if got := <-b; string(got) != "second" {
+		t.Errorf("client b got %q after a's unregister, want second", got)
+	}
+}
+
+// TestSSEHubDropsSlowClient covers the non-blocking guarantee: a client that never drains must
+// not stall the broadcast for everyone else.
+func TestSSEHubDropsSlowClient(t *testing.T) {
+	h := newSSEHub()
+	_ = h.register() // registered but never drained
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ { // far past the 16-slot buffer
+			h.broadcast([]byte("x"))
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast blocked on a slow client")
 	}
 }
