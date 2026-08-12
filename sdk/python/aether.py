@@ -883,6 +883,187 @@ def run_fsm(defn: FSM) -> None:
     asyncio.run(start_fsm(defn))
 
 
+# --- event manager behaviour (gen_event; mirrors the Go StartEvent and TS startEvent) ---
+# An event manager holds an ordered set of handlers. One async event (a cast to the manager's
+# name) is dispatched to EVERY handler in registration order on the same serialized mailbox, and
+# each handler keeps its own state - what raw NATS fan-out (N independent subscribers) does NOT
+# give. A handler that raises is logged and skipped; the others still run. v1: handlers are
+# static, events are async (a call is answered with an error). Events reuse the FSM Event shape.
+
+
+@dataclass
+class Handler:
+    handle_event: Callable  # (Event, state, ctx) -> state (sync or async)
+    init: Optional[Callable] = None  # (ctx) -> state; absent = None initial state
+
+
+@dataclass
+class EventManager:
+    name: str
+    handlers: dict  # name -> Handler (insertion order = registration/dispatch order)
+    terminate: Optional[Callable] = None  # (reason)
+
+
+def def_event(name, handlers, terminate=None) -> EventManager:
+    return EventManager(name, handlers, terminate)
+
+
+class _EventBus:
+    """Serialized fan-out core, independent of NATS (so it is unit-testable). All handler state
+    mutation happens under one asyncio lock, so events never interleave and each handler keeps its
+    state to itself."""
+
+    def __init__(self, defn: EventManager, ctx: "Ctx", states: dict, log: Any):
+        self.defn = defn
+        self.ctx = ctx
+        self.log = log
+        self.states = states  # name -> state
+        self._lock = asyncio.Lock()
+        self._stats = _MailboxStats()
+
+    def snapshot(self) -> dict:
+        return self._stats.snapshot()
+
+    async def send(self, ev: Event, trace: str = "") -> None:
+        start = self._stats.begin()
+        try:
+            async with self._lock:
+                await self._dispatch(ev, trace)
+        finally:
+            self._stats.end(start)
+
+    async def _dispatch(self, ev: Event, trace: str) -> None:
+        self.ctx.trace = _or_new_trace(trace or "")
+        self.log.debug("event", op=ev.op, handlers=len(self.defn.handlers), trace=self.ctx.trace)
+        for hname, h in self.defn.handlers.items():
+            try:
+                # On success the handler's state advances; a raise leaves it unchanged and is
+                # isolated so the remaining handlers still process the event.
+                self.states[hname] = await _maybe(h.handle_event(ev, self.states.get(hname), self.ctx))
+            except Exception as ex:  # noqa: BLE001
+                self.log.error("event handler failed", handler=hname, op=ev.op, err=str(ex))
+
+
+async def start_event(defn: EventManager) -> None:
+    """Connect an event-manager thrall to the ether and run its lifecycle."""
+    url = os.environ.get("AETHER_NATS_URL")
+    app = os.environ.get("AETHER_APP")
+    env_name = os.environ.get("AETHER_NAME", "")
+    if not url or not app:
+        raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
+    name = defn.name or env_name
+    if not defn.handlers:
+        raise RuntimeError(f"event manager {name}: at least one handler is required")
+    for hname, h in defn.handlers.items():
+        if not callable(getattr(h, "handle_event", None)):
+            raise RuntimeError(f"event manager {name}: handler {hname} has no handle_event")
+    durable = os.environ.get("AETHER_DURABLE") == "1"
+    ca = os.environ.get("AETHER_NATS_CA")
+    nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
+
+    nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    states: dict = {}
+    for hname, h in defn.handlers.items():
+        states[hname] = await _maybe(h.init(ctx)) if h.init is not None else None
+    bus = _EventBus(defn, ctx, states, ctx.log)
+
+    stop = asyncio.Event()
+
+    async def on_cast(e: dict) -> None:
+        await bus.send(Event(op=e.get("op"), payload=e.get("payload"), kind="cast"), (e or {}).get("trace") or "")
+
+    async def on_call(e: dict, msg) -> None:
+        # v1 events are async: answer a call with an error rather than a silent timeout.
+        await msg.respond(_encode(_err_reply(e, "events_async", "event manager is async: use cast, not call")))
+
+    tasks: list[asyncio.Task] = []
+
+    if durable:
+        call_sub = await nc.subscribe(_sub_call(app, name))
+        info_sub = await nc.subscribe(_sub_info(app, name))
+
+        async def call_loop() -> None:
+            async for msg in call_sub.messages:
+                await on_call(_decode(msg.data), msg)
+
+        async def info_loop() -> None:
+            async for _msg in info_sub.messages:
+                pass  # info is out-of-band; not an event yet
+
+        async def cast_pull_loop() -> None:
+            js = nc.jetstream()
+            psub = await js.pull_subscribe(
+                _sub_cast(app, name),
+                durable=name,
+                stream=_stream(app, name),
+                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
+            )
+            while not stop.is_set():
+                try:
+                    msgs = await psub.fetch(1, timeout=1)
+                except Exception:  # noqa: BLE001
+                    continue
+                for msg in msgs:
+                    await on_cast(_decode(msg.data))
+                    await msg.ack()
+
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+    else:
+        data_sub = await nc.subscribe(_sub_data(app, name))
+
+        async def data_loop() -> None:
+            async for msg in data_sub.messages:
+                verb = msg.subject.rsplit(".", 1)[1]
+                e = _decode(msg.data)
+                if verb == "call":
+                    await on_call(e, msg)
+                elif verb == "cast":
+                    await on_cast(e)
+
+        tasks.append(asyncio.create_task(data_loop()))
+
+    ctl_sub = await nc.subscribe(_sub_ctl(name))
+
+    async def ctl_loop() -> None:
+        async for msg in ctl_sub.messages:
+            e = _decode(msg.data)
+            if e.get("op") in ("drain", "shutdown"):
+                if defn.terminate:
+                    defn.terminate(e.get("op"))
+                stop.set()
+                return
+
+    async def heartbeat() -> None:
+        interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
+        while not stop.is_set():
+            hb = {"v": 1, "kind": "hb", "to": name, "payload": bus.snapshot(), "ts": int(time.time() * 1000)}
+            await nc.publish(_sub_hb(name), _encode(hb))
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    tasks += [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
+
+    fence_task = await _start_fencing_if_singleton(nc, name, ctx.log, stop)
+    if fence_task is not None:
+        tasks.append(fence_task)
+    lord_fence_task = await _start_lord_liveness_fencing(nc, name, ctx.log, stop)
+    if lord_fence_task is not None:
+        tasks.append(lord_fence_task)
+
+    await stop.wait()
+    for t in tasks:
+        t.cancel()
+    await nc.drain()
+
+
+def run_event(defn: EventManager) -> None:
+    """Convenient entry point: asyncio.run(start_event(defn))."""
+    asyncio.run(start_event(defn))
+
+
 # --- event-sourced rebuild (mirrors the Go/TS SDKs) ---
 async def rebuild(ctx: "Ctx", initial: Any, fold: Callable) -> Any:
     """Reconstruct state by replaying the event log in order from the beginning. Call it from
