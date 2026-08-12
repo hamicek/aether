@@ -394,10 +394,27 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
   control channel (`aether._lord.ctl`); the lord spawns the OS process and supervises it exactly like
   a manifest child - restart per policy, registry status, lifecycle events. **Model:** a dynamic child
   is **local scope, supervised one_for_one, and outside any manifest group strategy** - its crash does
-  not pull a `one_for_all` group and vice versa. **Boundary:** a dynamic child's topology lives only in
-  the lord's memory - the manifest is the source of truth on lord restart, so dynamic children do not
-  survive a lord restart (persisting the dynamic topology is deliberately out of scope). `Stop` drains
-  dynamic children alongside static ones.
+  not pull a `one_for_all` group and vice versa. `Stop` drains dynamic children alongside static ones.
+
+  **Boundary (deliberate):** a dynamic child's topology lives only in the lord's memory, and the
+  manifest is the source of truth on a lord restart, so dynamic children do **not** survive a lord
+  restart. This is a decision, not a missing feature. The lord is an OS process supervisor: when it
+  dies, the whole process group dies with it - including the thrall that spawned the child. Re-establishing
+  the topology is the **owner's** responsibility, not the lord's:
+  - The supervising thrall re-spawns its children from its own `init` (or `Rebuild`, §13c) when it comes
+    back. `StartChild` is **idempotent on name** - a repeat spawn of a name already under supervision is
+    a no-op, not an error - so the owner may call it blindly from `init` without risking a duplicate. (A
+    name that collides with a manifest child is still refused: that is a genuine misconfiguration.)
+  - A child with no such owner is not really parentless: if it must be permanent, it belongs in the
+    manifest; if it is genuinely ephemeral (a driver per connection re-establishes itself anyway), losing
+    it on restart is correct; if an external control plane owns it, that plane re-issues the spawn when it
+    notices the child gone (via the registry / heartbeats).
+
+  Making the lord a *second* source of truth (persisting spawn specs to KV and rehydrating them on start)
+  was considered and rejected: it creates two owners of the same child - duplicates and stale records
+  after a crash - the same inconsistency for which the in-memory state snapshot was rejected in favour of
+  event-sourcing (§13c, "the log is truth, state is a projection"). KV topology persistence and lord
+  rehydration are therefore out of scope.
 
 **Own blocks, planned (not yet implemented), in priority order:**
 1. **Task / work queue** -> cast + a **JetStream work-queue stream** + a queue group. A durable task
