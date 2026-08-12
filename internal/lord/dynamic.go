@@ -76,6 +76,8 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 		caPath:       l.manifest.Nats.TLS.CA,
 		nkeySeed:     l.manifest.Nats.Auth.NkeySeed,
 		hbIntervalMs: int(l.hbCheckEvery.Milliseconds()), // clamped interval the reaper uses
+		lordKey:      l.manifest.App,
+		lordEpoch:    l.lordEpoch, // same lord-liveness fencing as static children
 		dynamic:      true,
 	}
 
