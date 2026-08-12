@@ -155,8 +155,22 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 func (l *Lord) Start(ctx context.Context) error {
 	l.appCtx = ctx
 
+	// The observer dashboard shares the /metrics HTTP server, so it requires a metrics address.
+	// Fail fast on a misconfiguration rather than silently serving nothing.
+	if l.manifest.Observability.Dashboard {
+		if l.manifest.Observability.MetricsAddr == "" {
+			return fmt.Errorf("observability: dashboard = true requires metrics_addr (it shares the lord's HTTP server)")
+		}
+		l.sse = newSSEHub()
+	}
+
 	if err := l.startMetricsServer(l.manifest.Observability.MetricsAddr); err != nil {
 		return err
+	}
+	if l.sse != nil {
+		if err := l.startEventForwarder(); err != nil {
+			return err
+		}
 	}
 
 	if err := l.provisionStreams(); err != nil {

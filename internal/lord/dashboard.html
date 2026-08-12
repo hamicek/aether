@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aether observer</title>
+<style>
+  :root{
+    --bg:#0e141a; --panel:#161f27; --panel2:#1c2731; --ink:#e4eaf0; --ink2:#9dabb7;
+    --ink3:#6e7e8b; --rule:#2c3a46; --accent:#6fb4d8;
+    --ready:#5dbd93; --starting:#d6a94a; --down:#e4867b; --stale:#c98adf;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace; --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.5}
+  header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:16px 22px;border-bottom:1px solid var(--rule)}
+  header h1{font-size:17px;margin:0;letter-spacing:.02em}
+  header h1 .dim{color:var(--ink3);font-weight:400}
+  header .meta{font-family:var(--mono);font-size:11px;color:var(--ink2);display:flex;gap:14px;flex-wrap:wrap}
+  header .meta b{color:var(--ink);font-weight:600}
+  .live{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--ink3)}
+  .live .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--down);margin-right:6px;vertical-align:middle}
+  .live.on .dot{background:var(--ready)}
+  main{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:0;min-height:calc(100vh - 58px)}
+  @media(max-width:820px){main{grid-template-columns:1fr}}
+  .tree{padding:18px 22px}
+  .feed{border-left:1px solid var(--rule);padding:18px 20px;background:var(--panel)}
+  .feed h2,.tree h2{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--ink3);margin:0 0 14px;font-family:var(--mono)}
+  .lord{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-bottom:14px}
+  .thralls{display:flex;flex-direction:column;gap:10px}
+  .thrall{background:var(--panel);border:1px solid var(--rule);border-left:4px solid var(--ink3);border-radius:5px;padding:12px 14px}
+  .thrall.ready{border-left-color:var(--ready)}
+  .thrall.starting{border-left-color:var(--starting)}
+  .thrall.down{border-left-color:var(--down)}
+  .thrall.stale{border-left-color:var(--stale)}
+  .thrall .row{display:flex;align-items:baseline;gap:10px}
+  .thrall .name{font-weight:600;font-size:15px}
+  .thrall .status{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;padding:2px 7px;border-radius:3px;background:var(--panel2);color:var(--ink2)}
+  .thrall.ready .status{color:var(--ready)} .thrall.starting .status{color:var(--starting)}
+  .thrall.down .status{color:var(--down)} .thrall.stale .status{color:var(--stale)}
+  .tags{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+  .tag{font-family:var(--mono);font-size:10px;color:var(--ink3);border:1px solid var(--rule);border-radius:3px;padding:1px 6px}
+  .tag.on{color:var(--accent);border-color:var(--accent)}
+  .metrics{margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:8px 14px;font-family:var(--mono);font-size:11px}
+  .metrics .m{display:flex;flex-direction:column}
+  .metrics .m .k{color:var(--ink3);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase}
+  .metrics .m .v{color:var(--ink);font-size:13px}
+  .events{display:flex;flex-direction:column;gap:1px;font-family:var(--mono);font-size:11.5px;max-height:calc(100vh - 130px);overflow-y:auto}
+  .ev{display:flex;gap:8px;padding:5px 0;border-bottom:1px solid var(--rule)}
+  .ev .t{color:var(--ink3)}
+  .ev .e{font-weight:600;min-width:74px}
+  .ev .e.spawned,.ev .e.ready{color:var(--ready)} .ev .e.down,.ev .e.crashed{color:var(--down)}
+  .ev .e.restarting{color:var(--starting)} .ev .e.stale{color:var(--stale)}
+  .ev .n{color:var(--ink2)}
+  .empty{color:var(--ink3);font-family:var(--mono);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>aether <span class="dim">observer</span></h1>
+  <div class="meta">
+    <span>app <b id="app">-</b></span>
+    <span>strategy <b id="strategy">-</b></span>
+    <span>bus <b id="mode">-</b></span>
+    <span>lord <b id="lord">-</b></span>
+  </div>
+  <div class="live" id="live"><span class="dot"></span><span id="livetxt">connecting</span></div>
+</header>
+<main>
+  <section class="tree">
+    <h2>Supervision tree</h2>
+    <div class="thralls" id="thralls"><div class="empty">loading…</div></div>
+  </section>
+  <aside class="feed">
+    <h2>Events</h2>
+    <div class="events" id="events"><div class="empty">waiting for events…</div></div>
+  </aside>
+</main>
+<script>
+  var STATUSES = {ready:"ready", starting:"starting", down:"down", stale:"stale"};
+  function esc(s){ return String(s==null?"":s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c];}); }
+  function fmt(n){ return (n==null)?"-":n; }
+
+  function renderTree(t){
+    document.getElementById("app").textContent = t.app || "-";
+    document.getElementById("strategy").textContent = t.strategy || "-";
+    document.getElementById("mode").textContent = t.nats_mode || "-";
+    document.getElementById("lord").textContent = t.lord_id || "-";
+    var box = document.getElementById("thralls");
+    if(!t.thralls || !t.thralls.length){ box.innerHTML = '<div class="empty">no thralls</div>'; return; }
+    box.innerHTML = t.thralls.map(function(th){
+      var st = STATUSES[th.status] ? th.status : "";
+      var m = th.metrics || {};
+      var tags = [];
+      tags.push('<span class="tag'+(th.durable?' on':'')+'">durable</span>');
+      tags.push('<span class="tag'+(th.event_log?' on':'')+'">event_log</span>');
+      if(th.scope==="singleton") tags.push('<span class="tag on">singleton</span>');
+      if(th.dynamic) tags.push('<span class="tag on">dynamic</span>');
+      if(th.replicas>1) tags.push('<span class="tag">×'+th.replicas+'</span>');
+      return '<div class="thrall '+st+'">'
+        + '<div class="row"><span class="name">'+esc(th.name)+'</span>'
+        + '<span class="status">'+esc(th.status||"unknown")+'</span>'
+        + '<span class="tags">'+tags.join("")+'</span></div>'
+        + '<div class="metrics">'
+        +   metric("mailbox", m.mailbox_depth)
+        +   metric("latency ms", (m.mailbox_latency_ms!=null?m.mailbox_latency_ms.toFixed(2):null))
+        +   metric("processed", m.processed)
+        +   metric("backlog", m.durable_backlog)
+        +   metric("restarts", m.restarts)
+        +   metric("restart", th.restart)
+        + '</div></div>';
+    }).join("");
+  }
+  function metric(k,v){ return '<div class="m"><span class="k">'+esc(k)+'</span><span class="v">'+esc(fmt(v))+'</span></div>'; }
+
+  function loadTree(){
+    fetch("api/tree").then(function(r){return r.json();}).then(renderTree).catch(function(){});
+  }
+
+  var evBox = document.getElementById("events"), first = true;
+  function addEvent(ev){
+    if(first){ evBox.innerHTML=""; first=false; }
+    var d = new Date(ev.ts||Date.now());
+    var hh = String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")+":"+String(d.getSeconds()).padStart(2,"0");
+    var row = document.createElement("div");
+    row.className = "ev";
+    row.innerHTML = '<span class="t">'+hh+'</span><span class="e '+esc(ev.event)+'">'+esc(ev.event)+'</span><span class="n">'+esc(ev.name)+'</span>';
+    evBox.insertBefore(row, evBox.firstChild);
+    while(evBox.childNodes.length>200) evBox.removeChild(evBox.lastChild);
+  }
+
+  function setLive(on,txt){
+    var el = document.getElementById("live");
+    el.classList.toggle("on", !!on);
+    document.getElementById("livetxt").textContent = txt;
+  }
+
+  function connect(){
+    var es = new EventSource("events");
+    es.onopen = function(){ setLive(true,"live"); };
+    es.onmessage = function(m){
+      try{ var ev = JSON.parse(m.data); addEvent(ev); }catch(e){}
+      loadTree(); // an event changed the tree - refresh the snapshot
+    };
+    es.onerror = function(){ setLive(false,"reconnecting"); }; // EventSource auto-reconnects
+  }
+
+  loadTree();
+  connect();
+</script>
+</body>
+</html>

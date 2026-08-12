@@ -8,11 +8,53 @@ package lord
 // live tree, current values and the event stream. There are no control actions - it is a viewer.
 
 import (
+	_ "embed"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
+
+	"github.com/nats-io/nats.go"
+
+	"github.com/hamicek/aether/internal/wire"
 )
+
+// dashboardHTML is the self-contained observer page (inline CSS/JS, no external assets), embedded
+// into the binary so the lord can serve it in a closed/offline environment.
+//
+//go:embed dashboard.html
+var dashboardHTML []byte
+
+// dashboardPageHandler serves the embedded observer page at "/" and 404s any other path (the
+// dashboard is a single page; /metrics, /api/tree and /events are the only other routes).
+func (l *Lord) dashboardPageHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(dashboardHTML)
+	}
+}
+
+// startEventForwarder subscribes to the lifecycle event stream and fans each event out to the
+// dashboard clients over the SSE hub. The subscription is dropped when the lord's context ends.
+// It runs only when the dashboard is enabled (l.sse != nil).
+func (l *Lord) startEventForwarder() error {
+	sub, err := l.ether.Conn().Subscribe(wire.Events, func(m *nats.Msg) {
+		l.sse.broadcast(m.Data)
+	})
+	if err != nil {
+		return fmt.Errorf("dashboard event stream: %w", err)
+	}
+	go func() {
+		<-l.appCtx.Done()
+		_ = sub.Unsubscribe()
+	}()
+	return nil
+}
 
 // sseHub fans lifecycle events out to the connected dashboard clients. Each client is a buffered
 // channel; a client too slow to keep up has the message dropped rather than stalling the
@@ -60,6 +102,10 @@ func (h *sseHub) broadcast(msg []byte) {
 // eventsHandler streams lifecycle events to one dashboard client over Server-Sent Events. It
 // registers with the hub and forwards each event until the client disconnects.
 func (l *Lord) eventsHandler(w http.ResponseWriter, r *http.Request) {
+	if l.sse == nil {
+		http.Error(w, "dashboard disabled", http.StatusServiceUnavailable)
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)

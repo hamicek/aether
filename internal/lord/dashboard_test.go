@@ -1,9 +1,11 @@
 package lord
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,5 +127,62 @@ func TestSSEHubDropsSlowClient(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("broadcast blocked on a slow client")
+	}
+}
+
+func TestDashboardRoutesServedWhenEnabled(t *testing.T) {
+	l := newDashboardLord()
+	l.manifest.Observability.Dashboard = true
+	l.sse = newSSEHub()
+	h := l.metricsHandler()
+
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+
+	if rec := get("/"); rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("/ = %d %q, want 200 text/html", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if rec := get("/api/tree"); rec.Code != http.StatusOK {
+		t.Errorf("/api/tree = %d, want 200", rec.Code)
+	}
+	if rec := get("/metrics"); rec.Code != http.StatusOK {
+		t.Errorf("/metrics = %d, want 200 (must stay served)", rec.Code)
+	}
+	if rec := get("/nope"); rec.Code != http.StatusNotFound {
+		t.Errorf("/nope = %d, want 404", rec.Code)
+	}
+}
+
+func TestDashboardRoutesAbsentWhenDisabled(t *testing.T) {
+	l := newDashboardLord() // Observability.Dashboard defaults to false
+	h := l.metricsHandler()
+
+	for _, p := range []string{"/", "/api/tree", "/events"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s with dashboard off = %d, want 404", p, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("/metrics = %d, want 200", rec.Code)
+	}
+}
+
+// TestDashboardRequiresMetricsAddr covers the fail-fast: dashboard=true without metrics_addr is a
+// misconfiguration (they share one server), surfaced from Start before any bus work.
+func TestDashboardRequiresMetricsAddr(t *testing.T) {
+	l := newDashboardLord()
+	l.manifest.Observability.Dashboard = true
+	l.manifest.Observability.MetricsAddr = ""
+
+	err := l.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "requires metrics_addr") {
+		t.Fatalf("want a 'requires metrics_addr' error, got %v", err)
 	}
 }

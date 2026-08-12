@@ -261,8 +261,9 @@ func (l *Lord) durableChildren() []*child {
 	return out
 }
 
-// metricsHandler builds the HTTP handler serving the Prometheus /metrics endpoint from the
-// current registry. Extracted so it can be tested without binding a real port.
+// metricsHandler builds the HTTP handler for the lord's observability server: always /metrics,
+// plus the read-only dashboard routes (/, /api/tree, /events) when it is enabled. Extracted so
+// it can be tested without binding a real port.
 func (l *Lord) metricsHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
@@ -271,6 +272,11 @@ func (l *Lord) metricsHandler() http.Handler {
 			l.log.Error("metrics render failed", slog.Any("err", err))
 		}
 	})
+	if l.manifest != nil && l.manifest.Observability.Dashboard {
+		mux.HandleFunc("/api/tree", l.treeHandler)
+		mux.HandleFunc("/events", l.eventsHandler)
+		mux.Handle("/", l.dashboardPageHandler())
+	}
 	return mux
 }
 
@@ -291,6 +297,9 @@ func (l *Lord) startMetricsServer(addr string) error {
 	l.httpSrv = srv
 	go func() {
 		l.log.Info("metrics endpoint listening", slog.String("addr", addr), slog.String("path", "/metrics"))
+		if l.manifest != nil && l.manifest.Observability.Dashboard {
+			l.log.Info("observer dashboard listening", slog.String("addr", addr), slog.String("path", "/"))
+		}
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			l.log.Error("metrics endpoint failed", slog.Any("err", err))
 		}
