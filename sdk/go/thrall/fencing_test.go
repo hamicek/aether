@@ -8,6 +8,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
 )
@@ -58,10 +59,19 @@ func runFencing(t *testing.T, nc *nats.Conn) (mgr *singleton.Manager, lock *sing
 	lost = make(chan string, 1)
 	stop = make(chan struct{})
 	cfg := fenceConfig{key: "single", epoch: lock.Epoch()}
-	go fencing(mgr, cfg, obs.NewLogger(), stop, func(reason string) { lost <- reason })
+	verify := func() (bool, error) { return mgr.Verify(cfg.key, cfg.epoch) }
+	go fencing("singleton fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
+		func(reason string) { lost <- reason })
 	t.Cleanup(func() { close(stop) })
 	return mgr, lock, lost, stop
 }
+
+// fenceInterval / fenceLease mirror the production cadence (singleton and lord-liveness share
+// the same TTL) so the tests exercise the shared fencing loop at its real timing.
+const (
+	fenceLease    = singleton.TTL
+	fenceInterval = singleton.TTL / 3
+)
 
 func TestFencingStaysWhileHeld(t *testing.T) {
 	nc, _ := embeddedNATS(t)
@@ -82,6 +92,40 @@ func TestFencingStaysWhileHeld(t *testing.T) {
 		case <-deadline:
 			return // survived the lease window without a false positive
 		}
+	}
+}
+
+// TestLordLivenessFencingFiresWhenLordReplaced: the same shared fencing loop, driven by the
+// lord-liveness lease, self-terminates a thrall when a replacement lord stamps a new epoch - the
+// crash/fast-restart case for a non-singleton thrall.
+func TestLordLivenessFencingFiresWhenLordReplaced(t *testing.T) {
+	nc, _ := embeddedNATS(t)
+	mgr, err := lordlease.Open(nc)
+	if err != nil {
+		t.Fatalf("open lease manager: %v", err)
+	}
+	lease, err := mgr.Establish("demo", "lord-a")
+	if err != nil {
+		t.Fatalf("establish: %v", err)
+	}
+
+	lost := make(chan string, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	epoch := lease.Epoch()
+	verify := func() (bool, error) { return mgr.Verify("demo", epoch) }
+	go fencing("lord-liveness fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
+		func(reason string) { lost <- reason })
+
+	// A replacement lord (a restart) stamps a new epoch; the running thrall still holds the old.
+	if _, err := mgr.Establish("demo", "lord-b"); err != nil {
+		t.Fatalf("re-establish: %v", err)
+	}
+
+	select {
+	case <-lost:
+	case <-time.After(fenceLease + 2*fenceInterval):
+		t.Fatal("lord-liveness fencing did not fire after the lord was replaced")
 	}
 }
 

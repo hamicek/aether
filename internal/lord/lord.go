@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/singleton"
@@ -28,6 +29,10 @@ import (
 const (
 	singletonRetry = 500 * time.Millisecond
 	singletonRenew = 1 * time.Second
+	// lordLeaseRenew is how often the lord republishes its liveness lease. It is independent
+	// of the (configurable, possibly disabled) heartbeat reaper: the lease must be renewed
+	// unconditionally, or every thrall would falsely fence itself when heartbeats are off.
+	lordLeaseRenew = 1 * time.Second
 
 	// backlogPollInterval is how often the lord samples durable consumer backlogs.
 	backlogPollInterval = 2 * time.Second
@@ -42,15 +47,17 @@ type exit struct {
 
 // Lord supervises a set of thralls under a single strategy (a supervision node).
 type Lord struct {
-	manifest *Manifest
-	ether    *ether.Ether
-	reg      *registry.Registry
-	locks    *singleton.Manager
-	children []*child
-	id       string
-	log      *slog.Logger
-	metrics  *lordMetrics
-	httpSrv  *http.Server
+	manifest  *Manifest
+	ether     *ether.Ether
+	reg       *registry.Registry
+	locks     *singleton.Manager
+	lordLease *lordlease.Manager
+	lordEpoch uint64 // this lord's liveness epoch, injected into every thrall it spawns
+	children  []*child
+	id        string
+	log       *slog.Logger
+	metrics   *lordMetrics
+	httpSrv   *http.Server
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
@@ -95,6 +102,10 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	if err != nil {
 		return nil, err
 	}
+	leases, err := lordlease.Open(eth.Conn())
+	if err != nil {
+		return nil, err
+	}
 	procCtx, procCancel := context.WithCancel(context.Background())
 	host, _ := os.Hostname()
 	// Reaper timing derives from the manifest liveness config, the same interval injected into
@@ -111,6 +122,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		ether:            eth,
 		reg:              reg,
 		locks:            locks,
+		lordLease:        leases,
 		id:               fmt.Sprintf("%s-%d", host, os.Getpid()),
 		log:              obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
 		metrics:          newLordMetrics(),
@@ -150,6 +162,17 @@ func (l *Lord) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Establish this lord's liveness lease before any thrall starts, so a thrall's first
+	// verify already finds the lease with the epoch it was handed. The lease lets every thrall
+	// tell whether its lord is alive and self-terminate if not - the crash-case complement to
+	// the process-group kill.
+	lease, err := l.lordLease.Establish(l.manifest.App, l.id)
+	if err != nil {
+		return fmt.Errorf("establish lord-liveness lease: %w", err)
+	}
+	l.lordEpoch = lease.Epoch()
+	go l.renewLordLease(lease)
+
 	if _, err := l.ether.Conn().Subscribe(wire.HeartbeatAll(), func(m *nats.Msg) {
 		l.onHeartbeat(nameFromHB(m.Subject), m.Data)
 	}); err != nil {
@@ -168,6 +191,8 @@ func (l *Lord) Start(ctx context.Context) error {
 	go l.pollDurableBacklog()
 
 	for _, ch := range l.children {
+		ch.lordKey = l.manifest.App
+		ch.lordEpoch = l.lordEpoch
 		if ch.spec.Scope == "singleton" {
 			go l.manageSingleton(ch) // its own lifecycle (distributed lock)
 		} else if err := l.startChild(ch); err != nil {
@@ -175,6 +200,24 @@ func (l *Lord) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// renewLordLease republishes the lord's liveness lease on a fixed interval, independent of the
+// heartbeat reaper (which may be disabled). A renewal error is transient (a KV hiccup) and only
+// logged - the lord stays up; the lease's own TTL is what expires it if the lord truly dies.
+func (l *Lord) renewLordLease(lease *lordlease.Lease) {
+	t := time.NewTicker(lordLeaseRenew)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.appCtx.Done():
+			return
+		case <-t.C:
+			if err := lease.Renew(); err != nil {
+				l.log.Warn("lord-liveness lease renewal failed", slog.String("err", err.Error()))
+			}
+		}
+	}
 }
 
 func (l *Lord) provisionStreams() error {
