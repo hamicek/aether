@@ -1,0 +1,15 @@
+app = "dyntopo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# The dynamic-topology manager in Python. Same behaviour as the Go (aether.toml) and
+# TypeScript (aether-ts.toml) variants: only the manager is static; it spawns worker-1..3
+# dynamically from its own init. The workers run this same file, selected by AETHER_NAME.
+[[thrall]]
+name = "manager"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python manager.py"
+restart = "permanent"
+scope   = "local"

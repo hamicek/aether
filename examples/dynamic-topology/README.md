@@ -42,6 +42,15 @@ cd examples/dynamic-topology
 ../../bin/aether up -f aether-ts.toml
 ```
 
+**Python** (`aether-py.toml`):
+
+```bash
+cd examples/dynamic-topology
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt
+../../bin/aether up -f aether-py.toml
+```
+
 ## What to look for
 
 In another shell, list the supervised thralls - the manager plus the three workers it
