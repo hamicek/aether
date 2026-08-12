@@ -79,12 +79,21 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 		dynamic:      true,
 	}
 
-	// Reserve the name and append atomically, so a second spawn with the same name loses.
+	// Reserve the name and append atomically. A repeat spawn of a name already under
+	// supervision is idempotent: an existing dynamic child of that name makes the spawn a
+	// no-op, so an owner may call StartChild blindly from its init to re-establish its
+	// topology after a lord restart without risking a duplicate. A name that belongs to a
+	// manifest (static) child is a genuine conflict the author must see, not a no-op.
 	l.childrenMu.Lock()
 	for _, c := range l.children {
 		if c.spec.Name == spec.Name {
+			existingDynamic := c.dynamic
 			l.childrenMu.Unlock()
-			return "", fmt.Errorf("a child named %q already exists", spec.Name)
+			if existingDynamic {
+				l.log.Info("dynamic spawn is a no-op, child already running", slog.String("name", spec.Name))
+				return spec.Name, nil
+			}
+			return "", fmt.Errorf("a child named %q is defined in the manifest", spec.Name)
 		}
 	}
 	l.children = append(l.children, ch)
