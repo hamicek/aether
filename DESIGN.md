@@ -416,12 +416,19 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
   event-sourcing (§13c, "the log is truth, state is a projection"). KV topology persistence and lord
   rehydration are therefore out of scope.
 
+**Own blocks, implemented as SDK behaviours (alongside the GenServer thrall):**
+- **gen_statem (state machine)** - a thrall variant with explicit states and transitions
+  (`new -> paid -> shipped`): `FSM`/`StartFSM` (see §8's counterpart and the manifest FSM demo).
+- **gen_event (event manager)** - a thrall holding an ordered set of handlers; one async event is
+  dispatched to every handler, in registration order, on the same serialized mailbox, each keeping
+  its own state (`EventManager`/`StartEvent`). A failing handler is logged and skipped. v1 is
+  async-only (a call is answered with an error); runtime add/remove of handlers and synchronous
+  events are deferred. Demo: `examples/eventbus/`.
+
 **Own blocks, planned (not yet implemented), in priority order:**
 1. **Task / work queue** -> cast + a **JetStream work-queue stream** + a queue group. A durable task
    queue, at-least-once, a worker pool, retry.
-2. **gen_statem (state machine)** - a thrall variant with explicit states and transitions
-   (`new -> paid -> shipped`).
-3. **RateLimiter / Circuit breaker** - shared state in KV.
+2. **RateLimiter / Circuit breaker** - shared state in KV.
 
 ---
 
@@ -615,7 +622,7 @@ listed as future work in earlier drafts, are now implemented (see §6, §12 and 
 | Runtime | a Go binary, embedded NATS (default) or an external cluster (config switch) |
 | Wire format | a JSON envelope, `kind` + `op` dispatch |
 | SDK home base | TS/Bun (`@hamicek/aether`); plus Python and Go |
-| SDK behaviours | GenServer thrall (`Def`/`Start`) and a state-machine thrall (`FSM`/`StartFSM`, a `gen_statem` analogue: states, guards, state timeouts) - both on the same serialized mailbox; the FSM stays domain-neutral, application automata build on top |
+| SDK behaviours | GenServer thrall (`Def`/`Start`), a state-machine thrall (`FSM`/`StartFSM`, a `gen_statem` analogue: states, guards, state timeouts) and an event manager (`EventManager`/`StartEvent`, a `gen_event` analogue: an ordered set of handlers, one event fanned out to all) - all on the same serialized mailbox; each behaviour stays domain-neutral, applications build on top |
 | Topology | a declarative `aether.toml`; behavior in code |
 | Lord | variant A (dumb) + a heartbeat/drain contract ready for B |
 | Mailbox | core NATS ephemeral, with an optional JetStream durable mailbox (`durable = true`) |
