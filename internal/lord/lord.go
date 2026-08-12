@@ -47,17 +47,17 @@ type exit struct {
 
 // Lord supervises a set of thralls under a single strategy (a supervision node).
 type Lord struct {
-	manifest *Manifest
-	ether    *ether.Ether
+	manifest  *Manifest
+	ether     *ether.Ether
 	reg       *registry.Registry
 	locks     *singleton.Manager
 	lordLease *lordlease.Manager
 	lordEpoch uint64 // this lord's liveness epoch, injected into every thrall it spawns
 	children  []*child
 	id        string
-	log      *slog.Logger
-	metrics  *lordMetrics
-	httpSrv  *http.Server
+	log       *slog.Logger
+	metrics   *lordMetrics
+	httpSrv   *http.Server
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
