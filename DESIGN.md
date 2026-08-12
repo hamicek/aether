@@ -568,14 +568,30 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   **liveness lease** in KV (bucket `aether_lords`, carrying a monotonic epoch = the write revision)
   and renews it on a fixed interval, independent of the (configurable, possibly disabled) heartbeat
   reaper. **Every** thrall - not just singletons - is injected with the epoch (`AETHER_LORD_*`) and
-  verifies it every TTL/3, self-terminating the moment the epoch is superseded (a replacement lord
-  stamped a higher one) or the lease is gone/unreachable past the lease window (a dead lord; in
-  embedded mode the bus dies with the lord, so the lease is simply unreachable). This closes the
-  invariant for a lord crash, uniformly across embedded and external mode, in all three SDKs and
-  both the GenServer and FSM paths. The trade-off is a wider blast radius: a KV/bus partition
-  self-terminates every thrall (already accepted for singletons), bounded by the lease TTL. Assumes
-  one lord per app (the lease key is the app). Proven by `TestSoakLordDeathReapsOrphanThrall` (kills
-  only the lord process and asserts the orphaned `local` thrall reaps itself, leaving one instance).
+  verifies it every TTL/3. Two triggers end an orphan: (a) the **epoch is superseded** - a
+  replacement lord stamped a higher one - which fires at once; (b) the lease is **gone or
+  unreachable** - a `NotFound` (the key TTL-expired: the lord stopped renewing) also fires at once,
+  while a *read error* (the KV cannot be reached at all) is tolerated until the lease window elapses,
+  so a brief hiccup does not reap a thrall whose lord is fine. This covers both deployment modes: in
+  **external** mode a dead lord stops renewing, the key expires, and a replacement (if any) supersedes
+  the epoch; in **embedded** mode the bus lives *inside* the lord, so a lord crash takes the KV with
+  it and the thrall reaps via the unreachable-past-lease path. Wired into all three SDKs and both the
+  GenServer and FSM paths. Proven by `TestSoakLordDeathReapsOrphanThrall` (kills only the lord
+  process and asserts the orphaned `local` thrall reaps itself, leaving one instance - the
+  external-bus/epoch-superseded path) and, for the unreachable-bus path, by the SDK fencing unit
+  tests (e.g. Go `TestFencingFiresAfterLeaseWhenUnreachable`).
+
+  **Trade-offs, spelled out.** (1) *Wider blast radius:* generalizing from singletons to every thrall
+  means a KV/bus outage self-terminates the *whole* app, not just singletons. The TTL bounds the
+  *detection* latency, not the recovery: while the outage lasts, `permanent` thralls reap, restart,
+  re-fence and reap again - a crash-loop for the duration - so the KV must be as available as the app
+  needs to be. The grace is deliberately asymmetric: a genuinely-expired key (lord truly gone) reaps
+  immediately, an unreachable KV is tolerated for the lease. (2) *One lord per app* is assumed, not
+  enforced: the lease key is the app. Running two lords for one app is a misconfiguration, and under
+  AE-031 it is a *worse* one than before - both write the same key with different epochs, so each
+  lord's thralls see the other's epoch and mutually reap into a crash-loop, where previously they
+  would merely have coexisted as harmless duplicates. A single writer must be ensured operationally
+  (distinct apps per lord, or singletons for cross-node single-instance).
 - **`temporary` semantics inside group strategies** - its interaction with `one_for_all` /
   `rest_for_one` is not fully specified.
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via
