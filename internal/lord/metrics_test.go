@@ -122,3 +122,45 @@ func TestStartMetricsServerReportsBindFailure(t *testing.T) {
 		t.Errorf("empty metrics_addr should be a no-op, got %v", err)
 	}
 }
+
+// TestMetricsSnapshotReflectsRecordedValues covers the dashboard read-back layer: the raw
+// snapshot must mirror what the metric mutators recorded, without parsing the Prometheus text.
+func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
+	lm := newLordMetrics()
+	lm.setStatus("worker", "ready")
+	lm.incRestart("worker")
+	lm.incRestart("worker")
+	lm.incGaveUp("worker")
+	lm.incHeartbeatMiss("worker")
+	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100})
+	lm.recordBacklog("worker", 7)
+
+	w, ok := lm.snapshot()["worker"]
+	if !ok {
+		t.Fatal("worker missing from snapshot")
+	}
+	if w.Status != "ready" {
+		t.Errorf("status = %q, want ready", w.Status)
+	}
+	if w.Restarts != 2 || w.GaveUp != 1 || w.HeartbeatMiss != 1 {
+		t.Errorf("counters = restarts %d/gaveUp %d/hbMiss %d, want 2/1/1", w.Restarts, w.GaveUp, w.HeartbeatMiss)
+	}
+	if w.MailboxDepth != 3 || w.MailboxLatMs != 1.5 || w.Processed != 100 {
+		t.Errorf("heartbeat metrics = %+v, want depth 3 / lat 1.5 / processed 100", w)
+	}
+	if w.DurableBacklog != 7 {
+		t.Errorf("durable backlog = %v, want 7", w.DurableBacklog)
+	}
+}
+
+// TestMetricsSnapshotForgetsThrall covers churn cleanup: a forgotten thrall must leave no raw
+// snapshot entry (mirroring the per-name series deletion in the exposition).
+func TestMetricsSnapshotForgetsThrall(t *testing.T) {
+	lm := newLordMetrics()
+	lm.setStatus("gone", "ready")
+	lm.incRestart("gone")
+	lm.forget("gone")
+	if _, ok := lm.snapshot()["gone"]; ok {
+		t.Error("forgotten thrall still present in snapshot")
+	}
+}

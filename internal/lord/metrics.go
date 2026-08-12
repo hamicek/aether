@@ -40,13 +40,39 @@ var perThrallMetrics = []string{
 	metricMailboxDepth, metricMailboxLat, metricProcessed, metricDurableBacklog,
 }
 
-// lordMetrics owns the runtime metric registry and the derived per-status gauge. It tracks
-// each thrall's last status so the gauge can be recomputed on every change.
+// thrallRaw holds the latest raw metric values per thrall, kept alongside the Prometheus
+// registry so the dashboard can read them back as structured data without parsing the text
+// exposition. Guarded by lordMetrics.mu.
+type thrallRaw struct {
+	mailboxDepth   int
+	mailboxLatMs   float64
+	processed      uint64
+	durableBacklog float64
+	restarts       uint64
+	gaveUp         uint64
+	heartbeatMiss  uint64
+}
+
+// thrallMetricSnapshot is the read-only per-thrall view the observer dashboard consumes.
+type thrallMetricSnapshot struct {
+	Status         string  `json:"status"`
+	MailboxDepth   int     `json:"mailbox_depth"`
+	MailboxLatMs   float64 `json:"mailbox_latency_ms"`
+	Processed      uint64  `json:"processed"`
+	DurableBacklog float64 `json:"durable_backlog"`
+	Restarts       uint64  `json:"restarts"`
+	GaveUp         uint64  `json:"gave_up"`
+	HeartbeatMiss  uint64  `json:"heartbeat_misses"`
+}
+
+// lordMetrics owns the runtime metric registry and the derived per-status gauge. It tracks each
+// thrall's last status (for the gauge) and its raw values (for the dashboard snapshot).
 type lordMetrics struct {
 	reg *obs.Metrics
 
 	mu     sync.Mutex
-	status map[string]string // thrall name -> last status
+	status map[string]string     // thrall name -> last status
+	raw    map[string]*thrallRaw // thrall name -> latest raw values
 }
 
 func newLordMetrics() *lordMetrics {
@@ -62,9 +88,47 @@ func newLordMetrics() *lordMetrics {
 	reg.Gauge(metricDurableBacklog, "pending casts in a thrall's durable stream")
 
 	reg.Set(metricUp, nil, 1)
-	lm := &lordMetrics{reg: reg, status: map[string]string{}}
+	lm := &lordMetrics{reg: reg, status: map[string]string{}, raw: map[string]*thrallRaw{}}
 	lm.recompute()
 	return lm
+}
+
+// rawFor returns the raw record for a thrall, creating it on first use. Caller holds mu.
+func (lm *lordMetrics) rawFor(name string) *thrallRaw {
+	r := lm.raw[name]
+	if r == nil {
+		r = &thrallRaw{}
+		lm.raw[name] = r
+	}
+	return r
+}
+
+// snapshot returns the read-only per-thrall metric view for the dashboard, keyed by name.
+func (lm *lordMetrics) snapshot() map[string]thrallMetricSnapshot {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	names := make(map[string]struct{}, len(lm.status)+len(lm.raw))
+	for n := range lm.status {
+		names[n] = struct{}{}
+	}
+	for n := range lm.raw {
+		names[n] = struct{}{}
+	}
+	out := make(map[string]thrallMetricSnapshot, len(names))
+	for n := range names {
+		s := thrallMetricSnapshot{Status: lm.status[n]}
+		if r := lm.raw[n]; r != nil {
+			s.MailboxDepth = r.mailboxDepth
+			s.MailboxLatMs = r.mailboxLatMs
+			s.Processed = r.processed
+			s.DurableBacklog = r.durableBacklog
+			s.Restarts = r.restarts
+			s.GaveUp = r.gaveUp
+			s.HeartbeatMiss = r.heartbeatMiss
+		}
+		out[n] = s
+	}
+	return out
 }
 
 // setStatus records a thrall's new status and refreshes the per-status gauge.
@@ -76,10 +140,11 @@ func (lm *lordMetrics) setStatus(name, status string) {
 }
 
 // forget drops a stopped thrall from the status tracking and deletes its per-name series, so
-// nothing lingers in the exposition after the thrall is gone.
+// nothing lingers in the exposition (or the dashboard snapshot) after the thrall is gone.
 func (lm *lordMetrics) forget(name string) {
 	lm.mu.Lock()
 	delete(lm.status, name)
+	delete(lm.raw, name)
 	lm.recompute()
 	lm.mu.Unlock()
 
@@ -101,21 +166,37 @@ func (lm *lordMetrics) recompute() {
 }
 
 func (lm *lordMetrics) incRestart(name string) {
+	lm.mu.Lock()
+	lm.rawFor(name).restarts++
+	lm.mu.Unlock()
 	lm.reg.Inc(metricRestarts, map[string]string{"name": name})
 }
 
 func (lm *lordMetrics) incGaveUp(name string) {
+	lm.mu.Lock()
+	lm.rawFor(name).gaveUp++
+	lm.mu.Unlock()
 	lm.reg.Inc(metricGaveUp, map[string]string{"name": name})
 }
 
 func (lm *lordMetrics) incHeartbeatMiss(name string) {
+	lm.mu.Lock()
+	lm.rawFor(name).heartbeatMiss++
+	lm.mu.Unlock()
 	lm.reg.Inc(metricHeartbeatMiss, map[string]string{"name": name})
 }
 
-// recordHeartbeat folds a thrall's self-reported mailbox metrics into the registry. The
-// processed total is cumulative and reported as an absolute value (it resets when the thrall
-// restarts, like any process-local counter).
+// recordHeartbeat folds a thrall's self-reported mailbox metrics into the registry and the raw
+// snapshot. The processed total is cumulative and reported as an absolute value (it resets when
+// the thrall restarts, like any process-local counter).
 func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
+	lm.mu.Lock()
+	r := lm.rawFor(name)
+	r.mailboxDepth = hm.MailboxDepth
+	r.mailboxLatMs = hm.MailboxLatencyMs
+	r.processed = hm.ProcessedTotal
+	lm.mu.Unlock()
+
 	labels := map[string]string{"name": name}
 	lm.reg.Set(metricMailboxDepth, labels, float64(hm.MailboxDepth))
 	lm.reg.Set(metricMailboxLat, labels, hm.MailboxLatencyMs)
@@ -154,8 +235,17 @@ func (l *Lord) pollDurableBacklogOnce() {
 		if err != nil {
 			continue // consumer not created yet, or stream gone - nothing to report
 		}
-		l.metrics.reg.Set(metricDurableBacklog, map[string]string{"name": ch.spec.Name}, float64(ci.NumPending))
+		l.metrics.recordBacklog(ch.spec.Name, float64(ci.NumPending))
 	}
+}
+
+// recordBacklog stores a durable thrall's pending-message count in both the registry and the raw
+// snapshot.
+func (lm *lordMetrics) recordBacklog(name string, pending float64) {
+	lm.mu.Lock()
+	lm.rawFor(name).durableBacklog = pending
+	lm.mu.Unlock()
+	lm.reg.Set(metricDurableBacklog, map[string]string{"name": name}, pending)
 }
 
 // durableChildren returns the current children with a durable mailbox.
