@@ -559,6 +559,23 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   the lord is dead or partitioned and cannot kill the orphan itself. Wired into both the GenServer
   and FSM start paths in all three SDKs. Proven by `TestSoakSingletonOrphanFencing` (kills only the
   lord process, leaving the probe orphaned, and asserts it reaps itself).
+- ~~**Lord-liveness fencing for all thralls**~~ - *implemented (AE-031).* AE-013's "no thrall
+  survives its lord" invariant held only for a graceful shutdown, where the lord actively kills its
+  children's process groups (`cmd.Cancel` -> group SIGKILL). An external SIGKILL/crash of the lord
+  skips that path, and because each thrall runs in its own process group it survives as an orphan -
+  covered for singletons by the fencing above, but not for plain `local` thralls, which after a
+  lord restart collide with the freshly spawned ones. So the lord now also establishes a per-app
+  **liveness lease** in KV (bucket `aether_lords`, carrying a monotonic epoch = the write revision)
+  and renews it on a fixed interval, independent of the (configurable, possibly disabled) heartbeat
+  reaper. **Every** thrall - not just singletons - is injected with the epoch (`AETHER_LORD_*`) and
+  verifies it every TTL/3, self-terminating the moment the epoch is superseded (a replacement lord
+  stamped a higher one) or the lease is gone/unreachable past the lease window (a dead lord; in
+  embedded mode the bus dies with the lord, so the lease is simply unreachable). This closes the
+  invariant for a lord crash, uniformly across embedded and external mode, in all three SDKs and
+  both the GenServer and FSM paths. The trade-off is a wider blast radius: a KV/bus partition
+  self-terminates every thrall (already accepted for singletons), bounded by the lease TTL. Assumes
+  one lord per app (the lease key is the app). Proven by `TestSoakLordDeathReapsOrphanThrall` (kills
+  only the lord process and asserts the orphaned `local` thrall reaps itself, leaving one instance).
 - **`temporary` semantics inside group strategies** - its interaction with `one_for_all` /
   `rest_for_one` is not fully specified.
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via
