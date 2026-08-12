@@ -27,7 +27,14 @@
   .feed{border-left:1px solid var(--rule);padding:18px 20px;background:var(--panel)}
   .feed h2,.tree h2{font-size:11px;text-transform:uppercase;letter-spacing:.14em;color:var(--ink3);margin:0 0 14px;font-family:var(--mono)}
   .lord{font-family:var(--mono);font-size:12px;color:var(--ink2);margin-bottom:14px}
-  .thralls{display:flex;flex-direction:column;gap:10px}
+  .thralls{display:flex;flex-direction:column;gap:0}
+  .lordnode{font-family:var(--mono);font-size:13px;color:var(--ink);padding:4px 0 12px;display:flex;align-items:center;gap:8px}
+  .lordnode .badge{background:var(--accent);color:#08121a;font-weight:700;font-size:11px;padding:2px 8px;border-radius:3px;letter-spacing:.04em}
+  .lordnode .dim{color:var(--ink3);font-size:11px}
+  .group{margin:0 0 6px 8px;border-left:2px solid var(--rule);padding:0 0 4px 16px}
+  .glabel{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--ink3);margin:6px 0 8px}
+  .glabel b{color:var(--accent);font-weight:600}
+  .gbody{display:flex;flex-direction:column;gap:9px}
   .thrall{background:var(--panel);border:1px solid var(--rule);border-left:4px solid var(--ink3);border-radius:5px;padding:12px 14px}
   .thrall.ready{border-left-color:var(--ready)}
   .thrall.starting{border-left-color:var(--starting)}
@@ -81,35 +88,50 @@
   function esc(s){ return String(s==null?"":s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c];}); }
   function fmt(n){ return (n==null)?"-":n; }
 
+  function thrallCard(th){
+    var st = STATUSES[th.status] ? th.status : "";
+    var m = th.metrics || {};
+    var tags = []; // show a tag only for a flag that is actually set - not a greyed-out label
+    if(th.durable) tags.push('<span class="tag on">durable</span>');
+    if(th.event_log) tags.push('<span class="tag on">event_log</span>');
+    if(th.scope==="singleton") tags.push('<span class="tag on">singleton</span>');
+    if(th.replicas>1) tags.push('<span class="tag">×'+th.replicas+'</span>');
+    return '<div class="thrall '+st+'">'
+      + '<div class="row"><span class="name">'+esc(th.name)+'</span>'
+      + '<span class="status">'+esc(th.status||"unknown")+'</span>'
+      + '<span class="tags">'+tags.join("")+'</span></div>'
+      + '<div class="metrics">'
+      +   metric("mailbox", m.mailbox_depth)
+      +   metric("latency ms", (m.mailbox_latency_ms!=null?m.mailbox_latency_ms.toFixed(2):null))
+      +   metric("processed", m.processed)
+      +   metric("backlog", m.durable_backlog)
+      +   metric("restarts", m.restarts)
+      +   metric("restart", th.restart)
+      + '</div></div>';
+  }
+
+  function group(label, list){
+    if(!list.length) return "";
+    return '<div class="group"><div class="glabel">'+label+'</div>'
+      + '<div class="gbody">'+list.map(thrallCard).join("")+'</div></div>';
+  }
+
   function renderTree(t){
     document.getElementById("app").textContent = t.app || "-";
     document.getElementById("strategy").textContent = t.strategy || "-";
     document.getElementById("mode").textContent = t.nats_mode || "-";
     document.getElementById("lord").textContent = t.lord_id || "-";
     var box = document.getElementById("thralls");
-    if(!t.thralls || !t.thralls.length){ box.innerHTML = '<div class="empty">no thralls</div>'; return; }
-    box.innerHTML = t.thralls.map(function(th){
-      var st = STATUSES[th.status] ? th.status : "";
-      var m = th.metrics || {};
-      var tags = [];
-      tags.push('<span class="tag'+(th.durable?' on':'')+'">durable</span>');
-      tags.push('<span class="tag'+(th.event_log?' on':'')+'">event_log</span>');
-      if(th.scope==="singleton") tags.push('<span class="tag on">singleton</span>');
-      if(th.dynamic) tags.push('<span class="tag on">dynamic</span>');
-      if(th.replicas>1) tags.push('<span class="tag">×'+th.replicas+'</span>');
-      return '<div class="thrall '+st+'">'
-        + '<div class="row"><span class="name">'+esc(th.name)+'</span>'
-        + '<span class="status">'+esc(th.status||"unknown")+'</span>'
-        + '<span class="tags">'+tags.join("")+'</span></div>'
-        + '<div class="metrics">'
-        +   metric("mailbox", m.mailbox_depth)
-        +   metric("latency ms", (m.mailbox_latency_ms!=null?m.mailbox_latency_ms.toFixed(2):null))
-        +   metric("processed", m.processed)
-        +   metric("backlog", m.durable_backlog)
-        +   metric("restarts", m.restarts)
-        +   metric("restart", th.restart)
-        + '</div></div>';
-    }).join("");
+    var list = t.thralls || [];
+    if(!list.length){ box.innerHTML = '<div class="empty">no thralls</div>'; return; }
+    // The lord is the root; static (manifest) children share the manifest strategy, while
+    // dynamic children are supervised one_for_one, outside that group - so show two branches.
+    var stat = list.filter(function(x){ return !x.dynamic; });
+    var dyn  = list.filter(function(x){ return x.dynamic; });
+    var html = '<div class="lordnode"><span class="badge">lord</span><span class="dim">'+esc(t.lord_id)+'</span></div>';
+    html += group('manifest · strategy <b>'+esc(t.strategy||"one_for_one")+'</b>', stat);
+    html += group('dynamic · <b>one_for_one</b> (outside the group)', dyn);
+    box.innerHTML = html;
   }
   function metric(k,v){ return '<div class="m"><span class="k">'+esc(k)+'</span><span class="v">'+esc(fmt(v))+'</span></div>'; }
 
@@ -147,6 +169,9 @@
 
   loadTree();
   connect();
+  // Refresh the tree periodically too, so metric values (processed, mailbox depth, backlog) stay
+  // live during steady message flow - not only when a lifecycle event fires an SSE refresh.
+  setInterval(loadTree, 3000);
 </script>
 </body>
 </html>
