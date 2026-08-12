@@ -12,7 +12,7 @@ import { open, readEnv } from "./connection";
 import { useConnection, call, cast, startChild, stopChild, orNewTrace } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent } from "./rebuild";
-import { startFencingIfSingleton } from "./fencing";
+import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
 import {
   subscribeData,
   subscribeVerb,
@@ -273,4 +273,5 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
 
   startHeartbeat(nc, name, () => machine.snapshot());
   await startFencingIfSingleton(nc, name, log);
+  await startLordLivenessFencing(nc, name, log);
 }
