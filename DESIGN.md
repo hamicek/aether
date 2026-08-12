@@ -548,6 +548,22 @@ trace to downstream messages; it is logged, so a log line and a trace can be joi
 operation followed across process boundaries. Full OTLP tracing is deferred - this is log-based
 correlation, which the exporter-agnostic model can later bridge.
 
+**Observer dashboard.** A read-only web view of the supervision tree, the aether analogue of
+Erlang's `observer` (the "Observer / dashboard" row of §2). Opt-in via `[observability] dashboard`,
+it is served on the lord's existing HTTP server (the one serving `/metrics`, hence it requires
+`metrics_addr`; a fail-fast guards the misconfiguration). It is a **consumer of signals the lord
+already holds** - the children and their status/self-metrics for a `/api/tree` snapshot, and the
+`aether._lord.events` lifecycle stream forwarded to browsers over SSE so the tree updates live -
+so it needs no SDK change and works the same embedded or external. Two deliberate boundaries keep
+it small and safe: it does **not** chart metrics over time (that is Prometheus/Grafana, which
+`/metrics` feeds; a dashboard reimplementation would fight that split), and it is **read-only** -
+control actions (restart/drain from the UI) and authentication for network exposure are follow-ups,
+not v1. The page is self-contained (embedded, no external assets) so it serves in a closed
+environment. Because aether is bounded to tens of processes, the whole tree renders on one screen -
+unlike a BEAM-scale process list. Cluster-wide aggregation (one view across several lords via the
+KV registry) is future work; v1 shows a single lord's local subtree, consistent with "lord = a
+local process manager".
+
 ---
 
 ## 14. Deliberately deferred (gaps in the design)

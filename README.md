@@ -299,6 +299,7 @@ AETHER_LOG_FORMAT=json   # json | text                  (default text, for dev)
 ```toml
 [observability]
 metrics_addr = "127.0.0.1:7391"   # empty / omitted = disabled
+dashboard    = true               # also serve the read-only observer dashboard at / (off by default)
 ```
 
 Then scrape `http://127.0.0.1:7391/metrics`. The endpoint is the lord's own HTTP server, so it
@@ -340,6 +341,19 @@ embedded NATS.)
 an edge (the CLI, or the first message) mints it, `ctx.Call` / `ctx.Cast` pass it downstream, and
 it appears in the logs - so one logical operation can be followed across processes. See
 `examples/tracing/` for a runnable two-thrall demo.
+
+**Observer dashboard.** A read-only web view of the supervision tree, aether's analogue of
+Erlang's `observer` / Phoenix LiveDashboard. Enable `dashboard = true` (it shares the `/metrics`
+server, so it needs `metrics_addr`) and open `http://127.0.0.1:7391/`. It shows the live tree -
+each thrall's status (`starting`/`ready`/`down`/`stale`), scope, restart policy, `durable`/
+`event_log` flags and self-metrics (mailbox depth/latency, processed, durable backlog, restarts) -
+and a live event feed pushed over SSE from the lifecycle stream, so the tree updates within ~1s of
+a spawn/crash/restart without a page refresh. It is a consumer of signals the lord already holds
+(no SDK change) and works the same embedded or external. It deliberately does **not** chart metrics
+over time - that stays the domain of Prometheus/Grafana, which `/metrics` feeds - and it is
+read-only (no control actions). The page is self-contained (no external assets), so it works
+offline. Like `/metrics`, it binds wherever `metrics_addr` says (default a loopback address);
+exposing it on a network needs authentication (a follow-up).
 
 ## Quickstart
 
