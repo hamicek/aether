@@ -37,9 +37,15 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
-| **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go) -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups |
+| **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
+
+Dynamic children live only in the running lord and do **not** survive a lord restart by
+design - re-establishing them is the owner's job, not the lord's. Because `StartChild` is
+idempotent on name, a supervising thrall can re-spawn its children blindly from its own
+`init` (and re-apply on demand) with no duplicates. Runnable demo:
+`examples/dynamic-topology/` (Go/TS/Python); rationale in `DESIGN.md` section 12.
 
 ## Layout
 
@@ -60,6 +66,7 @@ sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
 examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
 examples/eventsourced/ event-sourced rebuild demo - state that survives a restart
+examples/dynamic-topology/ dynamic children re-established by their owner after a lord restart
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 ```
 
