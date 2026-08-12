@@ -179,6 +179,39 @@ func TestDynamicSpawnIdempotent(t *testing.T) {
 	}
 }
 
+// TestDynamicSpawnRevivesDeadChild: a dead dynamic child of the same name (one that was not
+// restarted) lingers in the lord's slice. Re-spawning must bring a fresh process back, not
+// silently no-op on the corpse - otherwise reconcile-as-recovery would never revive it.
+func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	// A temporary child is not restarted when it exits, so after a crash it lingers dead -
+	// exactly the state a re-spawn must revive.
+	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("first spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+	pid1 := callInt(t, nc, "demo", "dyn", "pid")
+
+	cast(t, nc, "demo", "dyn", "crash")
+	waitFor(t, 5*time.Second, "dead temporary child stops answering", func() bool {
+		_, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return !ok
+	})
+
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("re-spawn of a dead child: %+v", r.Error)
+	}
+	waitFor(t, 5*time.Second, "dead child revived with a new process", func() bool {
+		pid2, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return ok && pid2 != pid1
+	})
+}
+
 // TestDynamicSpawnNameConflictsStatic: a dynamic spawn must not shadow a manifest name -
 // that is a genuine misconfiguration the author must see, not an idempotent no-op.
 func TestDynamicSpawnNameConflictsStatic(t *testing.T) {
@@ -189,5 +222,9 @@ func TestDynamicSpawnNameConflictsStatic(t *testing.T) {
 
 	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "static", Cmd: probeCmd(t)}); r.Status != "error" {
 		t.Fatalf("spawning over a manifest name should be refused, got %q", r.Status)
+	}
+	// The refused spawn must not have disturbed the existing static child.
+	if _, ok := tryCallInt(nc, "demo", "static", "pid"); !ok {
+		t.Fatal("static child stopped answering after a refused dynamic spawn over its name")
 	}
 }

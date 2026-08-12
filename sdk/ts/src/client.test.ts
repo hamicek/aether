@@ -70,8 +70,9 @@ test("startChild throws on the lord's error reply", async () => {
 });
 
 test("startChild resolves when the lord answers ok for an already-running child (idempotent)", async () => {
-  // The lord makes a repeat spawn of a live name a no-op and replies ok, so calling
-  // startChild blindly from init to re-establish topology does not throw.
+  // Client-side contract: when the lord answers ok (its idempotent no-op reply), the
+  // client resolves the name rather than throwing - so an owner can call startChild
+  // blindly from init. The lord's no-op logic itself is covered by the Go integration test.
   const nc = fakeLord((r) => ({
     v: 1,
     id: r.id,

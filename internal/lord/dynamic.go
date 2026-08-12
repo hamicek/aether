@@ -80,21 +80,33 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 	}
 
 	// Reserve the name and append atomically. A repeat spawn of a name already under
-	// supervision is idempotent: an existing dynamic child of that name makes the spawn a
-	// no-op, so an owner may call StartChild blindly from its init to re-establish its
-	// topology after a lord restart without risking a duplicate. A name that belongs to a
-	// manifest (static) child is a genuine conflict the author must see, not a no-op.
+	// supervision is idempotent: an existing *running* dynamic child of that name makes the
+	// spawn a no-op, so an owner may call StartChild blindly from its init to re-establish
+	// its topology after a lord restart without risking a duplicate. A name that belongs to
+	// a manifest (static) child is a genuine conflict the author must see, not a no-op.
+	//
+	// A dead dynamic child of that name may still linger in the slice (it gave up on restart
+	// intensity, or a temporary/transient child exited without being restarted). That must
+	// NOT no-op: the owner is asking to re-establish it, so replace the dead entry with a
+	// fresh child below rather than silently doing nothing.
 	l.childrenMu.Lock()
-	for _, c := range l.children {
-		if c.spec.Name == spec.Name {
-			existingDynamic := c.dynamic
+	for i, c := range l.children {
+		if c.spec.Name != spec.Name {
+			continue
+		}
+		if !c.dynamic {
 			l.childrenMu.Unlock()
-			if existingDynamic {
-				l.log.Info("dynamic spawn is a no-op, child already running", slog.String("name", spec.Name))
-				return spec.Name, nil
-			}
 			return "", fmt.Errorf("a child named %q is defined in the manifest", spec.Name)
 		}
+		if c.running() {
+			l.childrenMu.Unlock()
+			l.log.Info("dynamic spawn is a no-op, child already running", slog.String("name", spec.Name))
+			return spec.Name, nil
+		}
+		// Drop the dead entry and fall through to spawn a fresh child in its place.
+		l.children = append(l.children[:i], l.children[i+1:]...)
+		l.log.Info("re-spawning a dead dynamic child", slog.String("name", spec.Name))
+		break
 	}
 	l.children = append(l.children, ch)
 	l.childrenMu.Unlock()

@@ -87,8 +87,9 @@ class DynamicSupervisor(unittest.IsolatedAsyncioTestCase):
             await ctx.start_child(aether.SpawnSpec(name="worker-1", cmd="./w"))
 
     async def test_idempotent_ok_reply_resolves(self):
-        # The lord makes a repeat spawn of a live name a no-op and replies ok, so calling
-        # start_child blindly from init to re-establish topology does not raise.
+        # Client-side contract: when the lord answers ok (its idempotent no-op reply), the
+        # client returns the name rather than raising - so an owner can call start_child
+        # blindly from init. The lord's no-op logic itself is covered by the Go integration test.
         lord = _FakeLord(lambda req: _ok(req, {"name": req["payload"]["name"]}))
         ctx = aether.Ctx(nats=lord, name="mgr", app="demo")
 
