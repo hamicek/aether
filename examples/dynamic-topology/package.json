@@ -1,0 +1,7 @@
+{
+  "name": "dynamic-topology-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}

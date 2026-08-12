@@ -69,18 +69,41 @@ func TestStartChildSuccess(t *testing.T) {
 	}
 }
 
-// TestStartChildError: the lord's error reply surfaces as a Go error.
+// TestStartChildError: a refusal from the lord (e.g. it is draining) surfaces as a Go
+// error.
 func TestStartChildError(t *testing.T) {
 	nc := testConn(t)
 	fakeLord(t, nc, func(e wire.Envelope) wire.Envelope {
 		return wire.Envelope{V: 1, ID: e.ID, Kind: wire.KindReply, Status: "error",
-			Error: &wire.WireError{Type: "spawn_failed", Message: "name already exists"}}
+			Error: &wire.WireError{Type: "spawn_failed", Message: "lord is draining"}}
 	})
 
 	ctx := &thrall.Ctx{NATS: nc, App: "demo"}
-	_, err := ctx.StartChild(wire.SpawnSpec{Name: "dup", Cmd: "./w"}, time.Second)
+	_, err := ctx.StartChild(wire.SpawnSpec{Name: "worker-1", Cmd: "./w"}, time.Second)
 	if err == nil {
 		t.Fatal("expected an error from the lord's refusal")
+	}
+}
+
+// TestStartChildIdempotent: a repeat spawn the lord answers ok (the child is already
+// running) resolves to the name without error, so an owner may call StartChild blindly
+// from its init to re-establish topology.
+func TestStartChildIdempotent(t *testing.T) {
+	nc := testConn(t)
+	fakeLord(t, nc, func(e wire.Envelope) wire.Envelope {
+		var sp wire.SpawnSpec
+		_ = json.Unmarshal(e.Payload, &sp)
+		return wire.Envelope{V: 1, ID: e.ID, Kind: wire.KindReply, Status: "ok",
+			Payload: mustMarshalReply(wire.SpawnReply{Name: sp.Name})}
+	})
+
+	ctx := &thrall.Ctx{NATS: nc, App: "demo"}
+	name, err := ctx.StartChild(wire.SpawnSpec{Name: "worker-1", Cmd: "./w"}, time.Second)
+	if err != nil {
+		t.Fatalf("idempotent spawn should resolve without error: %v", err)
+	}
+	if name != "worker-1" {
+		t.Fatalf("name = %q, want worker-1", name)
 	}
 }
 

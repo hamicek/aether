@@ -1,0 +1,3 @@
+# Python dependencies for the dynamic-topology example (manager.py).
+# Pinned so a fresh venv matches what the example was verified against.
+nats-py==2.15.0
