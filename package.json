@@ -4,6 +4,7 @@
   "workspaces": [
     "sdk/ts",
     "examples/counter",
+    "examples/dynamic-topology",
     "examples/eventsourced",
     "examples/fsm",
     "examples/scada-spike",

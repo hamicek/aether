@@ -34,6 +34,14 @@ cd examples/dynamic-topology
 ../../bin/aether up -f aether.toml
 ```
 
+**TypeScript** (`aether-ts.toml`):
+
+```bash
+bun install
+cd examples/dynamic-topology
+../../bin/aether up -f aether-ts.toml
+```
+
 ## What to look for
 
 In another shell, list the supervised thralls - the manager plus the three workers it
