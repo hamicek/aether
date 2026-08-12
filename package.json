@@ -5,6 +5,7 @@
     "sdk/ts",
     "examples/counter",
     "examples/dynamic-topology",
+    "examples/eventbus",
     "examples/eventsourced",
     "examples/fsm",
     "examples/scada-spike",

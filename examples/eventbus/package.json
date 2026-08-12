@@ -1,0 +1,7 @@
+{
+  "name": "eventbus-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}

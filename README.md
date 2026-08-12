@@ -29,7 +29,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Spawn** | ✅ | The lord starts thralls as OS processes, injects the `AETHER_*` env, watches their exit code |
 | **Polyglot SDK** | ✅ | **TS/Bun**, **Python**, **Go** - the same wire contract, indistinguishable to the lord |
 | **Messaging** | ✅ | `call` (sync request/reply), `cast` (fire-and-forget), a serialized mailbox |
-| **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`) and a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue) - see [State machine](#state-machine-fsm-behaviour) |
+| **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
@@ -61,11 +61,12 @@ internal/
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
-sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM, call, cast
-sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm
-sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine)
+sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM + defEvent/startEvent, call, cast
+sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm + def_event/start_event/run_event
+sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine) + thrall.EventManager/StartEvent (event manager)
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
 examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
+examples/eventbus/    event-manager (gen_event) behaviour demo - one event, many handlers
 examples/eventsourced/ event-sourced rebuild demo - state that survives a restart
 examples/dynamic-topology/ dynamic children re-established by their owner after a lord restart
 scripts/soak.sh       run the soak/chaos suite (out of CI)
@@ -159,6 +160,48 @@ An event with no reaction in the current state is rejected (`no_transition`), no
 The FSM is deliberately domain-neutral - a lifecycle/alarm automaton is built *on top* of it, not
 inside it. Mirrored in all three SDKs (`startFSM`/`defFSM` in TS, `start_fsm`/`FSM` in Python).
 Runnable demo: `examples/fsm/`.
+
+## Event manager (gen_event) behaviour
+
+The third behaviour is an **event manager** - aether's analogue of OTP's `gen_event`. Instead of
+one state and one handler, you register several named **handlers**; one incoming event (an async
+`cast` to the manager's name) is dispatched to **every** handler, in registration order, on the
+same serialized mailbox - so handlers see events in a stable order and each keeps its own state.
+That is what raw NATS fan-out (N independent subscribers) does not give: co-located, ordered
+handlers. A handler that throws is logged and skipped, so the others still run.
+
+```ts
+import { defEvent, startEvent } from "@hamicek/aether";
+
+const alarms = defEvent({
+  name: "alarms",
+  handlers: {
+    audit: {                                     // counts every alarm in its own state
+      init: () => ({ count: 0 }),
+      handleEvent: (ev, s: { count: number }, ctx) => {
+        const count = s.count + 1;
+        ctx.log.info("alarm audited", { op: ev.op, total: count });
+        return { count };
+      },
+    },
+    pager: {                                     // reacts only to a hot temperature
+      init: () => ({}),
+      handleEvent: (ev, s, ctx) => {
+        const p = (ev.payload ?? {}) as { celsius?: number };
+        if (ev.op === "temp_high" && (p.celsius ?? 0) >= 80) ctx.log.warn("would page on-call");
+        return s;
+      },
+    },
+  },
+});
+
+await startEvent(alarms);
+```
+
+Events are async: a `call` to an event manager is answered with an error rather than a silent
+timeout (synchronous events and runtime add/remove of handlers are deliberate follow-ups). Mirrored
+in all three SDKs (`startEvent`/`defEvent` in TS, `start_event`/`def_event` in Python,
+`StartEvent`/`EventManager` in Go). Runnable demo: `examples/eventbus/`.
 
 ## Manifest (example)
 
