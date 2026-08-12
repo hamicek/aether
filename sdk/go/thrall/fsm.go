@@ -181,6 +181,9 @@ func StartFSM[D any](def FSM[D]) error {
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return err
 	}
+	if err := startLordLivenessFencing(nc, name, log, stop); err != nil {
+		return err
+	}
 
 	<-stop
 	m.mu.Lock()
