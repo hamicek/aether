@@ -17,6 +17,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/eventbus": {
+      "name": "eventbus-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/eventsourced": {
       "name": "eventsourced-example",
       "dependencies": {
@@ -63,6 +69,8 @@
     "counter-example": ["counter-example@workspace:examples/counter"],
 
     "dynamic-topology-example": ["dynamic-topology-example@workspace:examples/dynamic-topology"],
+
+    "eventbus-example": ["eventbus-example@workspace:examples/eventbus"],
 
     "eventsourced-example": ["eventsourced-example@workspace:examples/eventsourced"],
 
