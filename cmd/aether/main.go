@@ -52,6 +52,9 @@ func main() {
 		castCmd(os.Args[2:])
 	case "call":
 		callCmd(os.Args[2:])
+	case "_edge":
+		// internal: a built-in HTTP ingress server, spawned by the lord from [[edge.http]].
+		edgeCmd(os.Args[2:])
 	case "down":
 		fmt.Println("use Ctrl-C on a running `aether up` for a graceful shutdown")
 	default:
