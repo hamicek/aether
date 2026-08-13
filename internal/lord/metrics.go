@@ -25,6 +25,8 @@ const (
 	metricMailboxLat     = "aether_mailbox_latency_ms"
 	metricProcessed      = "aether_processed_total"
 	metricDurableBacklog = "aether_durable_backlog"
+	metricThrallRSS      = "aether_thrall_rss_bytes"
+	metricThrallCPU      = "aether_thrall_cpu_percent"
 )
 
 // knownStatuses is the closed set of thrall statuses the lord assigns; the thralls gauge
@@ -38,6 +40,7 @@ var knownStatuses = []string{"starting", "ready", "down", "stale"}
 var perThrallMetrics = []string{
 	metricRestarts, metricGaveUp, metricHeartbeatMiss,
 	metricMailboxDepth, metricMailboxLat, metricProcessed, metricDurableBacklog,
+	metricThrallRSS, metricThrallCPU,
 }
 
 // thrallRaw holds the latest raw metric values per thrall, kept alongside the Prometheus
@@ -51,6 +54,8 @@ type thrallRaw struct {
 	restarts       uint64
 	gaveUp         uint64
 	heartbeatMiss  uint64
+	rssBytes       int64
+	cpuPercent     float64
 }
 
 // thrallMetricSnapshot is the read-only per-thrall view the observer dashboard consumes.
@@ -63,6 +68,8 @@ type thrallMetricSnapshot struct {
 	Restarts       uint64  `json:"restarts"`
 	GaveUp         uint64  `json:"gave_up"`
 	HeartbeatMiss  uint64  `json:"heartbeat_misses"`
+	RSSBytes       int64   `json:"rss_bytes"`
+	CPUPercent     float64 `json:"cpu_percent"`
 }
 
 // lordMetrics owns the runtime metric registry and the derived per-status gauge. It tracks each
@@ -86,6 +93,8 @@ func newLordMetrics() *lordMetrics {
 	reg.Gauge(metricMailboxLat, "thrall mailbox handler latency in milliseconds")
 	reg.Counter(metricProcessed, "messages processed by a thrall")
 	reg.Gauge(metricDurableBacklog, "pending casts in a thrall's durable stream")
+	reg.Gauge(metricThrallRSS, "thrall resident memory in bytes (summed over its process group)")
+	reg.Gauge(metricThrallCPU, "thrall CPU usage in percent (summed over its process group)")
 
 	reg.Set(metricUp, nil, 1)
 	lm := &lordMetrics{reg: reg, status: map[string]string{}, raw: map[string]*thrallRaw{}}
@@ -125,6 +134,8 @@ func (lm *lordMetrics) snapshot() map[string]thrallMetricSnapshot {
 			s.Restarts = r.restarts
 			s.GaveUp = r.gaveUp
 			s.HeartbeatMiss = r.heartbeatMiss
+			s.RSSBytes = r.rssBytes
+			s.CPUPercent = r.cpuPercent
 		}
 		out[n] = s
 	}
@@ -246,6 +257,20 @@ func (lm *lordMetrics) recordBacklog(name string, pending float64) {
 	lm.rawFor(name).durableBacklog = pending
 	lm.mu.Unlock()
 	lm.reg.Set(metricDurableBacklog, map[string]string{"name": name}, pending)
+}
+
+// recordProcStats stores a thrall's process-group resident memory (bytes) and CPU usage (percent)
+// in both the registry and the raw snapshot.
+func (lm *lordMetrics) recordProcStats(name string, rssBytes int64, cpuPercent float64) {
+	lm.mu.Lock()
+	r := lm.rawFor(name)
+	r.rssBytes = rssBytes
+	r.cpuPercent = cpuPercent
+	lm.mu.Unlock()
+
+	labels := map[string]string{"name": name}
+	lm.reg.Set(metricThrallRSS, labels, float64(rssBytes))
+	lm.reg.Set(metricThrallCPU, labels, cpuPercent)
 }
 
 // durableChildren returns the current children with a durable mailbox.
