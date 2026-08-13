@@ -259,7 +259,12 @@ doing an auth check beside the declarative ingress). Design and roadmap (TS/Py p
 ```go
 thrall.StartEdge(thrall.EdgeDef{
     Init: func(ctx *thrall.Ctx) error { /* build the http.Server */ return nil },
-    Run:  func(ctx *thrall.Ctx, stop <-chan struct{}) error { return srv.ListenAndServe() },
+    Run: func(ctx *thrall.Ctx, stop <-chan struct{}) error {
+        if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+            return err // a real error -> abnormal exit -> the lord restarts; ErrServerClosed is a clean drain
+        }
+        return nil
+    },
     Stop: func() { srv.Shutdown(context.Background()) }, // graceful hook on drain
 })
 ```

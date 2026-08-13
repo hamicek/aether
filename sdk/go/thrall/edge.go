@@ -31,11 +31,13 @@ type EdgeDef struct {
 	// Init runs once before Run, for setup that may fail (open a listener, dial a device).
 	Init func(ctx *Ctx) error
 	// Run is the socket-owning loop. It runs until stop is closed (a drain from the lord) and must
-	// honor it. Returning (even nil) ends the edge; returning an error logs it - the lord then
-	// restarts the process per its restart policy.
+	// honor it. Returning nil is a clean stop; returning an error ends the edge ABNORMALLY (the
+	// process exits non-zero, so the lord restarts it per its restart policy). Clean up any resources
+	// opened in Init at the end of Run - Stop is only a drain-time unblocker, not a general cleanup.
 	Run func(ctx *Ctx, stop <-chan struct{}) error
-	// Stop is an optional graceful-stop hook invoked on drain, before waiting for Run to finish -
-	// e.g. http.Server.Shutdown, which unblocks a Run blocked in Serve.
+	// Stop is an optional hook invoked ONLY on a drain, before waiting for Run to finish - e.g.
+	// http.Server.Shutdown, which unblocks a Run blocked in Serve. It is not called when Run exits on
+	// its own, so it is an unblocker, not a place for resource cleanup (do that at the end of Run).
 	Stop func()
 }
 
@@ -82,13 +84,24 @@ func StartEdge(def EdgeDef) error {
 	var stopOnce sync.Once
 	closeStop := func() { stopOnce.Do(func() { close(stop) }) }
 
+	var runErr error
 	runDone := make(chan struct{})
 	go func() {
 		defer close(runDone)
-		if err := def.Run(ctx, stop); err != nil {
-			log.Error("edge run-loop failed", slog.Any("err", err))
+		runErr = def.Run(ctx, stop) // read after <-runDone (the close synchronizes it)
+		if runErr != nil {
+			log.Error("edge run-loop failed", slog.Any("err", runErr))
 		}
 	}()
+
+	// fail tears down after the run-loop is already running, so an error setting up ctl/fencing does
+	// not leave the run-loop holding its socket with no way to be told to stop.
+	fail := func(err error) error {
+		closeStop()
+		<-runDone
+		_ = nc.Drain()
+		return err
+	}
 
 	// ctl: controlled shutdown from the lord (drain / shutdown).
 	if _, err := nc.Subscribe(wire.Ctl(name), func(m *nats.Msg) {
@@ -97,31 +110,33 @@ func StartEdge(def EdgeDef) error {
 			closeStop()
 		}
 	}); err != nil {
-		return err
+		return fail(err)
 	}
 
 	// The edge has no mailbox, so it reports zero self-metrics - the shape the lord's reaper expects.
 	go heartbeat(nc, name, &mailboxStats{}, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
-		return err
+		return fail(err)
 	}
 	if err := startLordLivenessFencing(nc, name, log, stop); err != nil {
-		return err
+		return fail(err)
 	}
 
 	select {
 	case <-stop:
-		// Drain from the lord: run the graceful hook (unblocks Run), then wait for it to finish.
+		// Drain from the lord: run the graceful hook (unblocks Run), then wait for it to finish. A
+		// run-loop error during a drain is expected (e.g. http.ErrServerClosed) and ignored.
 		if def.Stop != nil {
 			def.Stop()
 		}
 		<-runDone
+		return nc.Drain()
 	case <-runDone:
-		// The run-loop ended on its own (e.g. a socket error): close stop so heartbeat and fencing
-		// wind down, then tear the connection down - the lord restarts the process per policy.
+		// The run-loop ended on its own: wind down heartbeat/fencing and drain. Returning runErr makes
+		// a run-loop error an abnormal (non-zero) exit, so the lord restarts per policy; nil is a clean stop.
 		closeStop()
+		_ = nc.Drain()
+		return runErr
 	}
-
-	return nc.Drain()
 }
