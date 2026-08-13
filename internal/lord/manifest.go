@@ -149,6 +149,7 @@ func (m *Manifest) validate() error {
 		}
 		seen[t.Name] = "thrall"
 	}
+	addrs := make(map[string]string) // addr -> edge server that bound it first
 	for _, e := range m.Edge.HTTP {
 		if e.Name == "" {
 			return fmt.Errorf("edge.http server with empty name")
@@ -160,6 +161,11 @@ func (m *Manifest) validate() error {
 		if e.Addr == "" {
 			return fmt.Errorf("edge.http %q: empty addr", e.Name)
 		}
+		// Two servers on one addr would both parse but the second crash-loops on net.Listen; reject early.
+		if other, dup := addrs[e.Addr]; dup {
+			return fmt.Errorf("edge.http %q: addr %q already used by %q", e.Name, e.Addr, other)
+		}
+		addrs[e.Addr] = e.Name
 		if len(e.Routes) == 0 {
 			return fmt.Errorf("edge.http %q: no routes", e.Name)
 		}

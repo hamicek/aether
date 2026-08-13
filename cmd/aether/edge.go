@@ -57,6 +57,10 @@ func edgeCmd(argv []string) {
 	srv := &http.Server{
 		Handler:           edgeHandler(nc, ep.App, router, edgeCallTimeout, logger),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		// WriteTimeout must exceed edgeCallTimeout, so a legitimately slow thrall reply is not cut off.
+		WriteTimeout: edgeCallTimeout + 10*time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	// The edge binds an OS port, so the lord runs it as a singleton and injects the fencing tokens.
@@ -96,7 +100,13 @@ func edgeCmd(argv []string) {
 	}
 }
 
+// maxRequestBytes caps the request body an edge accepts - a baseline guard against a memory-exhaustion
+// POST at the ingress boundary. Larger payloads are an application-specific concern for a reverse proxy.
+const maxRequestBytes = 1 << 20 // 1 MiB
+
 // edgeHandler translates each HTTP request into an ether call/cast and the outcome back to HTTP.
+// Server-side failures are logged (the operator's only window into 5xx) and returned to the caller as
+// a generic status text - the underlying NATS/thrall detail stays in the log, not on the wire.
 func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Duration, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route, ok := router.Match(r.Method, r.URL.Path)
@@ -104,23 +114,35 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 			http.Error(w, "no route for "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 			return
 		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			// Over the limit or a broken read: too large / unreadable, not a bad gateway.
+			logger.Warn("edge: reading request body", slog.String("route", r.Method+" "+r.URL.Path), slog.String("err", err.Error()))
+			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
+		// The payload is forwarded verbatim as the envelope body, so it must be JSON. Reject early
+		// with a clear message rather than leaking a marshal error later.
+		if len(body) > 0 && !json.Valid(body) {
+			http.Error(w, "request body must be valid JSON", http.StatusBadRequest)
 			return
 		}
 
 		env := edge.BuildEnvelope(route, body, r.URL.Query())
 		data, err := json.Marshal(env)
 		if err != nil {
-			http.Error(w, "encode request: "+err.Error(), http.StatusBadRequest)
+			logger.Error("edge: encoding envelope", slog.String("route", r.Method+" "+r.URL.Path), slog.String("err", err.Error()))
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 			return
 		}
 
 		// cast: hand the message to the ether and acknowledge acceptance without waiting.
 		if route.Kind == "cast" {
 			if err := nc.Publish(wire.Cast(app, route.Thrall), data); err != nil {
-				http.Error(w, err.Error(), http.StatusBadGateway)
+				logger.Error("edge: publishing cast", slog.String("thrall", route.Thrall), slog.String("err", err.Error()))
+				http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 				return
 			}
 			_ = nc.Flush()
@@ -131,20 +153,33 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		// call: wait for the thrall's reply and return it.
 		msg, err := nc.Request(wire.Call(app, route.Thrall), data, timeout)
 		if err != nil {
-			http.Error(w, err.Error(), edge.StatusForError(err))
+			status := edge.StatusForError(err)
+			logger.Warn("edge: call failed", slog.String("thrall", route.Thrall), slog.String("op", route.Op),
+				slog.Int("status", status), slog.String("err", err.Error()))
+			http.Error(w, http.StatusText(status), status)
 			return
 		}
 		var reply wire.Envelope
 		if err := json.Unmarshal(msg.Data, &reply); err != nil {
-			http.Error(w, "decode reply: "+err.Error(), http.StatusBadGateway)
+			logger.Error("edge: decoding reply", slog.String("thrall", route.Thrall), slog.String("err", err.Error()))
+			http.Error(w, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(edge.StatusForReply(reply))
 		if reply.Status == "error" {
-			_ = json.NewEncoder(w).Encode(reply.Error)
+			// Application error from the thrall: log the detail, return a generic status to the caller.
+			status := edge.StatusForReply(reply)
+			var errType, errMsg string
+			if reply.Error != nil {
+				errType, errMsg = reply.Error.Type, reply.Error.Message
+			}
+			logger.Warn("edge: thrall error reply", slog.String("thrall", route.Thrall), slog.String("op", route.Op),
+				slog.String("type", errType), slog.String("message", errMsg))
+			http.Error(w, http.StatusText(status), status)
 			return
 		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		if len(reply.Payload) > 0 {
 			_, _ = w.Write(reply.Payload)
 		}

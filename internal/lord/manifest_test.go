@@ -97,6 +97,21 @@ route."GET /v" = { thrall = "c", op = "v" }
 			wantErr: "duplicate name",
 		},
 		{
+			name: "duplicate addr across edge servers",
+			body: `
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."GET /v" = { thrall = "c", op = "v" }
+
+[[edge.http]]
+name = "admin"
+addr = ":8080"
+route."GET /w" = { thrall = "c", op = "w" }
+`,
+			wantErr: "already used by",
+		},
+		{
 			name: "empty addr",
 			body: `
 [[edge.http]]

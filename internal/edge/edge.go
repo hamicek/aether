@@ -93,7 +93,9 @@ func BuildEnvelope(route Route, body []byte, query url.Values) wire.Envelope {
 }
 
 // payloadFrom prefers the request body; when it is empty it projects the query parameters into a
-// flat JSON object (last value wins per key), and defaults to an empty object.
+// flat JSON object (last value wins per key), and defaults to an empty object. Query values are
+// always JSON strings (`?by=2` -> `{"by":"2"}`) - a handler needing typed fields should take a JSON
+// body; typed query coercion is out of scope.
 func payloadFrom(body []byte, query url.Values) json.RawMessage {
 	if len(body) > 0 {
 		return json.RawMessage(body)

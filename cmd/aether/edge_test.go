@@ -124,6 +124,46 @@ func TestEdgeHandlerBridge(t *testing.T) {
 		}
 	})
 
+	// non-JSON body -> 400 with a clear message
+	t.Run("invalid JSON body maps to 400", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/inc", "text/plain", strings.NewReader("not json"))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "valid JSON") {
+			t.Fatalf("body = %q, want a clear JSON error", body)
+		}
+	})
+
+	// body over the limit -> 413
+	t.Run("oversized body maps to 413", func(t *testing.T) {
+		big := strings.NewReader(strings.Repeat("x", (1<<20)+1))
+		resp, err := http.Post(srv.URL+"/inc", "application/json", big)
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want 413", resp.StatusCode)
+		}
+	})
+
+	// a thrall error reply must not leak the internal detail to the caller
+	t.Run("error reply does not leak thrall detail", func(t *testing.T) {
+		status, body := get(t, srv.URL+"/fail")
+		if status != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502", status)
+		}
+		if strings.Contains(body, "handler failed") || strings.Contains(body, "boom") {
+			t.Fatalf("response leaked thrall error detail: %q", body)
+		}
+	})
+
 	// missing thrall (no responders) -> 503
 	t.Run("no responders maps to 503", func(t *testing.T) {
 		status, _ := get(t, srv.URL+"/dead")
