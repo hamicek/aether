@@ -476,15 +476,32 @@ Where the A/B line falls: what maps cleanly as route -> operation is model A (de
 custom logic around the call is model B. Input validation follows the same line - model A can validate
 declaratively (a JSON schema on a route, a planned follow-up), model B validates in code.
 
+**Live push to the browser (implemented, SSE).** The reverse flow: ether -> browser. A frontend opens a
+connection and the edge pushes events out to it as they cross the ether. `thrall.SSEStream` (Go SDK) is
+the plumbing an edge runs inside `StartEdge`: it holds browser SSE connections, forwards ether events,
+handles backpressure (a bounded buffer that drops for a slow client rather than stalling) and drain
+(`Close` ends live connections so the HTTP server can shut down). Demo: `examples/live-dashboard/`.
+
+The hard part is **authorization**: it all flows over one ether, but client A may see only site 1,
+client B only site 2. The design makes that the application's job, not the runtime's - `ServeClient`
+takes the subject scope the application already authorized, and gives each connection its OWN NATS
+subscription on that scope, so NATS never delivers a client an out-of-scope event (scope-safe by
+construction, not by a filter that a bug could leak past). Where the A/B line falls: verifying the token
+and mapping it to a scope is model B code (a JWT's `site` claim -> `site.<x>.>`); a built-in declarative
+`[[edge.stream]]` with `auth = "jwt"` would be the model A path, deferred. The channel is **read-only** -
+control actions from the frontend go through an ingress route (call/cast), not this one. Reconnect is the
+browser's built-in `EventSource` retry; the edge keeps no history, so a client resumes with the live
+stream (durable replay is the event log's job, §13c), not a backfill.
+
 **Boundaries (deliberate):** a real OS port is held by one active instance (**singleton fit**; HA via
 the standby + fencing of §14), and aether does no SO_REUSEPORT or load balancing - scale a single
 port with a reverse proxy in front. HTTP routing/middleware and business logic stay in application
 code; the built-in model stays intentionally small (route -> operation). A slow serialized backend is
 the throughput ceiling, by design.
 
-**Planned (not yet implemented):** `StartEdge` parity in the TS/Python SDKs (Go-first for now), and
-**live push to the browser** (WS/SSE) - the harder half, whose core is subject-level authorization,
-building on the gen_event / subscription consumer.
+**Planned (not yet implemented):** `StartEdge`/`SSEStream` parity in the TS/Python SDKs (Go-first for
+now), WebSocket (for the bidirectional case; push is one-way, so SSE covers it), and the built-in
+declarative `[[edge.http]]` egress / `[[edge.stream]]` with configured auth.
 
 ---
 

@@ -253,7 +253,7 @@ transformation, a non-HTTP protocol (a SCADA driver, cron, tail) - write the edg
 `thrall.StartEdge` (Go SDK): you supply a run-loop that owns the socket and a graceful-stop hook, and
 get heartbeat/restart/drain/fencing for free. A custom edge is an ordinary `[[thrall]]` with a `cmd`, so
 it coexists with the built-in ingress in one manifest. Demo: `examples/webserver-custom/` (a custom edge
-doing an auth check beside the declarative ingress). Design and roadmap (TS/Py parity, live WS/SSE push):
+doing an auth check beside the declarative ingress). Design and roadmap (TS/Py parity):
 [DESIGN.md §12b](./DESIGN.md).
 
 ```go
@@ -267,6 +267,24 @@ thrall.StartEdge(thrall.EdgeDef{
     },
     Stop: func() { srv.Shutdown(context.Background()) }, // graceful hook on drain
 })
+```
+
+**Live push to the browser (SSE).** The reverse flow - ether -> browser. `thrall.SSEStream` lets an edge
+push events out over Server-Sent Events, scoped per client: your handler authorizes the request and
+passes the authorized subject scope to `ServeClient`, which gives that connection its own NATS
+subscription - so NATS never delivers a client an out-of-scope event. Backpressure drops for a slow
+client; `Close` drains live connections. Read-only (control goes through ingress); reconnect is the
+browser's `EventSource` retry with no server-side replay. Demo: `examples/live-dashboard/` (two clients,
+each streaming only its own site).
+
+```go
+stream := thrall.NewSSEStream(ctx)
+mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
+    scope := authorize(r)                 // your code: verify a token -> subject scope
+    if scope == nil { http.Error(w, "unauthorized", 401); return }
+    stream.ServeClient(w, r, scope...)    // holds the SSE connection, forwards only that scope
+})
+// on drain: stream.Close(); srv.Shutdown(ctx)
 ```
 
 ## Durability
