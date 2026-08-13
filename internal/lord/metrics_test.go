@@ -164,3 +164,17 @@ func TestMetricsSnapshotForgetsThrall(t *testing.T) {
 		t.Error("forgotten thrall still present in snapshot")
 	}
 }
+
+// TestMetricsSnapshotIncludesProcStats covers the RSS/CPU read-back for the dashboard.
+func TestMetricsSnapshotIncludesProcStats(t *testing.T) {
+	lm := newLordMetrics()
+	lm.recordProcStats("worker", 52<<20, 12.5) // 52 MB, 12.5% CPU
+	w := lm.snapshot()["worker"]
+	if w.RSSBytes != 52<<20 || w.CPUPercent != 12.5 {
+		t.Errorf("procstats snapshot = rss %d / cpu %v, want %d / 12.5", w.RSSBytes, w.CPUPercent, int64(52<<20))
+	}
+	lm.forget("worker")
+	if _, ok := lm.snapshot()["worker"]; ok {
+		t.Error("forgotten thrall still in snapshot after recordProcStats")
+	}
+}

@@ -27,6 +27,7 @@ func newDashboardLord() *Lord {
 
 	l.metrics.setStatus("counter", "ready")
 	l.metrics.recordHeartbeat("counter", wire.HeartbeatMetrics{MailboxDepth: 2, ProcessedTotal: 10})
+	l.metrics.recordProcStats("counter", 48<<20, 7.5) // 48 MB, 7.5% CPU
 	l.metrics.setStatus("worker", "stale")
 	l.metrics.incRestart("worker")
 	return l
@@ -56,6 +57,9 @@ func TestTreeSnapshotReflectsChildren(t *testing.T) {
 	}
 	if c.Metrics.MailboxDepth != 2 || c.Metrics.Processed != 10 {
 		t.Errorf("counter metrics wrong: %+v", c.Metrics)
+	}
+	if c.Metrics.RSSBytes != 48<<20 || c.Metrics.CPUPercent != 7.5 {
+		t.Errorf("counter proc stats = rss %d / cpu %v, want %d / 7.5", c.Metrics.RSSBytes, c.Metrics.CPUPercent, int64(48<<20))
 	}
 
 	w := byName["worker"]
