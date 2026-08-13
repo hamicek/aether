@@ -1,0 +1,28 @@
+app = "web"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# The stateful backend both edges talk to.
+[[thrall]]
+name = "counter"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+scope   = "local"
+
+# Model A: the built-in HTTP ingress (AE-035). No code - just a route -> operation mapping.
+[[edge.http]]
+name = "api"
+addr = ":7392"
+route."GET /value" = { thrall = "counter", op = "get", kind = "call" }
+
+# Model B: a custom edge thrall written via thrall.StartEdge. It is an ordinary [[thrall]] with a cmd,
+# supervised like any other. It does an Authorization check the declarative ingress cannot express,
+# then calls the same counter. Both edges coexist in this one manifest.
+[[thrall]]
+name = "secure-gw"
+cmd  = "../../bin/edge-custom"
+restart = "permanent"
+scope   = "singleton"
