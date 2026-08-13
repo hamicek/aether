@@ -18,6 +18,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/edge"
 	"github.com/hamicek/aether/internal/ether"
 	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
@@ -153,7 +154,46 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 			hbIntervalMs: intervalMs,
 		})
 	}
+	// Built-in edge servers become children too: each is spawned as the internal `aether _edge`
+	// subcommand and supervised as a singleton (it binds an OS port), so it inherits the same
+	// spawn/heartbeat/drain/fencing machinery as any thrall.
+	if len(m.Edge.HTTP) > 0 {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate aether binary for edge servers: %w", err)
+		}
+		for _, espec := range m.Edge.HTTP {
+			specJSON, err := json.Marshal(edgeSpecToRuntime(espec))
+			if err != nil {
+				return nil, fmt.Errorf("edge %q: encode spec: %w", espec.Name, err)
+			}
+			l.children = append(l.children, &child{
+				spec: ThrallSpec{
+					Name:    espec.Name,
+					Cmd:     fmt.Sprintf("%q _edge", exe),
+					Restart: "permanent",
+					Scope:   "singleton",
+				},
+				natsURL:      eth.URL(),
+				app:          m.App,
+				caPath:       m.Nats.TLS.CA,
+				nkeySeed:     m.Nats.Auth.NkeySeed,
+				hbIntervalMs: intervalMs,
+				edgeSpecJSON: string(specJSON),
+			})
+		}
+	}
 	return l, nil
+}
+
+// edgeSpecToRuntime converts a manifest [[edge.http]] entry into the runtime edge.Spec transported
+// to the spawned process (decoupling the TOML shape from the JSON the edge subcommand consumes).
+func edgeSpecToRuntime(e EdgeHTTPSpec) edge.Spec {
+	routes := make(map[string]edge.Route, len(e.Routes))
+	for key, r := range e.Routes {
+		routes[key] = edge.Route{Thrall: r.Thrall, Op: r.Op, Kind: r.Kind}
+	}
+	return edge.Spec{Name: e.Name, Addr: e.Addr, Routes: routes}
 }
 
 // Start provisions durable mailboxes, starts the supervisor loop, the heartbeat consumer and the thralls.
