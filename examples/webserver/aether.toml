@@ -1,0 +1,28 @@
+app = "web"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# A stateful counter thrall - the edge servers translate HTTP into calls/casts against it.
+[[thrall]]
+name = "counter"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+scope   = "local"
+
+# Public API edge server: read the value (call -> body) and increment it (cast -> 202).
+# No code - the runtime maps each route to a thrall operation over the ether.
+[[edge.http]]
+name = "api"
+addr = ":7392"
+route."GET /value"      = { thrall = "counter", op = "get", kind = "call" }
+route."POST /increment" = { thrall = "counter", op = "inc", kind = "cast" }
+
+# A second, independent edge server on its own port, with its own routes: multiple HTTP
+# servers coexist in one manifest, each supervised as its own singleton process.
+[[edge.http]]
+name = "admin"
+addr = ":7393"
+route."POST /decrement" = { thrall = "counter", op = "dec", kind = "cast" }
