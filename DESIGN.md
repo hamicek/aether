@@ -462,17 +462,29 @@ map deterministically - an application error reply -> 502, no responders -> 503,
 `nats.Conn`), not the thrall runtime, so it carries no mailbox. Multiple `[[edge.http]]` servers
 coexist in one manifest, each on its own port. Demo: `examples/webserver/`.
 
+**Custom edge (implemented, model "you write the code").** When the ingress cannot be expressed by
+configuration - custom auth, transformation, a non-HTTP protocol (a Modbus/OPC-UA/MQTT driver, cron,
+tail) - you write the edge yourself over the same machinery, via `thrall.StartEdge` (Go SDK). It is a
+fourth thrall shape alongside `Start`/`StartFSM`/`StartEvent`, but **not a behaviour** - it has no
+mailbox. You supply a run-loop that owns the socket and an optional graceful-stop hook; connect,
+heartbeat, drain and fencing are reused. A custom edge is an ordinary `[[thrall]]` with a `cmd` in the
+manifest, so model A and model B **coexist in one manifest** and the lord supervises both identically.
+State still lives in ordinary thralls behind it, reached via `ctx.Call`/`ctx.Cast`. Demo:
+`examples/webserver-custom/` (a custom edge doing an Authorization check beside the built-in ingress).
+
+Where the A/B line falls: what maps cleanly as route -> operation is model A (declarative, no code);
+custom logic around the call is model B. Input validation follows the same line - model A can validate
+declaratively (a JSON schema on a route, a planned follow-up), model B validates in code.
+
 **Boundaries (deliberate):** a real OS port is held by one active instance (**singleton fit**; HA via
 the standby + fencing of §14), and aether does no SO_REUSEPORT or load balancing - scale a single
 port with a reverse proxy in front. HTTP routing/middleware and business logic stay in application
-code; the built-in model stays intentionally small (route -> operation), and anything beyond it
-belongs in a custom edge written against a thin SDK helper (planned, model "you write the code"). A
-slow serialized backend is the throughput ceiling, by design.
+code; the built-in model stays intentionally small (route -> operation). A slow serialized backend is
+the throughput ceiling, by design.
 
-**Planned (not yet implemented):** a thin SDK `edge` helper (a run-loop + graceful-stop hook over the
-same supervision machinery) for custom edges and SCADA drivers, and **live push to the browser**
-(WS/SSE) - the harder half, whose core is subject-level authorization, building on the gen_event /
-subscription consumer.
+**Planned (not yet implemented):** `StartEdge` parity in the TS/Python SDKs (Go-first for now), and
+**live push to the browser** (WS/SSE) - the harder half, whose core is subject-level authorization,
+building on the gen_event / subscription consumer.
 
 ---
 
