@@ -532,6 +532,14 @@ NATS mode, so it works the same embedded or external - satisfying "not built on 
 privilege" (see §9/§10) without depending on `$SYS`. The metric model is exporter-agnostic, leaving
 room for an OTLP bridge later.
 
+The lord also samples each thrall's **resident memory and CPU** (`aether_thrall_rss_bytes` /
+`aether_thrall_cpu_percent`) on a poll loop, via one `ps` per tick aggregated by process group.
+This matters because a thrall runs as `sh -c '<cmd>'` in its own process group, so its real
+footprint is the sum over the group (the `sh` leader plus the interpreter grandchild), not the
+leader PID; CPU is a delta over the sample interval, not a lifetime average. Like the durable
+backlog these are lord-observed (the SDK carries nothing extra), so they work uniformly across
+languages and the two NATS modes.
+
 **Heartbeat miss detection.** Heartbeats previously only flipped a thrall to `ready`. A reaper now
 tracks last-seen per thrall and marks one `stale` (with an event and a counter) when it stops
 heart-beating - catching a hung process the OS-level exit watcher cannot see. A resumed heartbeat

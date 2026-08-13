@@ -316,6 +316,8 @@ works the same embedded or external. Exposed series:
 | `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
 | `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
 | `aether_durable_backlog{name}` | gauge | pending casts in a durable thrall's stream (JetStream `num_pending`) |
+| `aether_thrall_rss_bytes{name}` | gauge | thrall resident memory, summed over its process group |
+| `aether_thrall_cpu_percent{name}` | gauge | thrall CPU usage %, a delta over the sample interval, summed over its process group |
 
 Thralls report their own mailbox metrics on the heartbeat they already send every 2s; the lord
 aggregates them plus its own supervision counters. A thrall that stops heart-beating is marked
@@ -346,7 +348,7 @@ it appears in the logs - so one logical operation can be followed across process
 Erlang's `observer` / Phoenix LiveDashboard. Enable `dashboard = true` (it shares the `/metrics`
 server, so it needs `metrics_addr`) and open `http://127.0.0.1:7391/`. It shows the live tree -
 each thrall's status (`starting`/`ready`/`down`/`stale`), scope, restart policy, `durable`/
-`event_log` flags and self-metrics (mailbox depth/latency, processed, durable backlog, restarts) -
+`event_log` flags and self-metrics (memory/CPU, mailbox depth/latency, processed, durable backlog, restarts) -
 and a live event feed pushed over SSE from the lifecycle stream, so the tree updates within ~1s of
 a spawn/crash/restart without a page refresh. It is a consumer of signals the lord already holds
 (no SDK change) and works the same embedded or external. It deliberately does **not** chart metrics
