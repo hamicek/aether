@@ -13,6 +13,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/edge"
 	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
@@ -45,6 +46,10 @@ type child struct {
 	lordKey   string
 	lordEpoch uint64
 
+	// edgeSpecJSON is the JSON edge.Spec for a built-in edge server (cmd = "aether _edge"),
+	// injected as AETHER_EDGE_SPEC. Empty for an ordinary thrall.
+	edgeSpecJSON string
+
 	dynamic bool        // started at runtime (ctx.StartChild), not from the manifest
 	live    atomic.Bool // the process is currently running
 	retired atomic.Bool // stopped on purpose (StopChild) -> must not be restarted
@@ -74,6 +79,11 @@ func (c *child) env() []string {
 	}
 	if c.nkeySeed != "" {
 		env = append(env, "AETHER_NATS_NKEY_SEED="+c.nkeySeed)
+	}
+	// Built-in edge server: its route table travels as JSON so the spawned `aether _edge` process
+	// configures itself from the same manifest, without re-reading the file.
+	if c.edgeSpecJSON != "" {
+		env = append(env, edge.EnvSpec+"="+c.edgeSpecJSON)
 	}
 	// Singleton fencing token: only present for a scope="singleton" thrall holding a lock,
 	// so the thrall can verify ownership against the KV bucket independently of the lord.

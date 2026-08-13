@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -16,7 +17,10 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/edge"
+	"github.com/hamicek/aether/internal/fencing"
+	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -53,6 +57,13 @@ func edgeCmd(argv []string) {
 	srv := &http.Server{
 		Handler:           edgeHandler(nc, ep.App, router, edgeCallTimeout, logger),
 		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	// The edge binds an OS port, so the lord runs it as a singleton and injects the fencing tokens.
+	// Verify them like any thrall and self-terminate on loss, so an edge never outlives its lord and
+	// never runs as a second instance behind a stale lock.
+	if err := startEdgeFencing(nc, spec.Name, logger); err != nil {
+		log.Fatalf("edge %q: fencing: %v", spec.Name, err)
 	}
 
 	stopHB := make(chan struct{})
@@ -138,6 +149,32 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 			_, _ = w.Write(reply.Payload)
 		}
 	})
+}
+
+// startEdgeFencing starts the self-fencing loops for the tokens the lord injected: the singleton
+// lock (the edge holds a port) and the lord-liveness lease (every spawned process). Each is a no-op
+// if its token is absent (e.g. an edge run outside a lord). A confirmed loss terminates the process.
+func startEdgeFencing(nc *nats.Conn, name string, logger *slog.Logger) error {
+	stop := make(chan struct{}) // fencing runs for the whole process lifetime
+	if cfg, ok := fencing.ConfigFromEnv("AETHER_SINGLETON_EPOCH", "AETHER_SINGLETON_KEY"); ok {
+		mgr, err := singleton.Open(nc)
+		if err != nil {
+			return fmt.Errorf("singleton fencing: open lock bucket: %w", err)
+		}
+		verify := func() (bool, error) { return mgr.Verify(cfg.Key, cfg.Epoch) }
+		go fencing.Loop("singleton fencing", verify, singleton.TTL/3, singleton.TTL, logger, stop,
+			fencing.ExitOnLost("singleton fencing", name, logger))
+	}
+	if cfg, ok := fencing.ConfigFromEnv("AETHER_LORD_EPOCH", "AETHER_LORD_KEY"); ok {
+		mgr, err := lordlease.Open(nc)
+		if err != nil {
+			return fmt.Errorf("lord-liveness fencing: open lease bucket: %w", err)
+		}
+		verify := func() (bool, error) { return mgr.Verify(cfg.Key, cfg.Epoch) }
+		go fencing.Loop("lord-liveness fencing", verify, lordlease.TTL/3, lordlease.TTL, logger, stop,
+			fencing.ExitOnLost("lord-liveness fencing", name, logger))
+	}
+	return nil
 }
 
 // heartbeat publishes a heartbeat to the lord at the injected interval so the reaper sees the edge
