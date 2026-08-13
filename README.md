@@ -39,6 +39,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
+| **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
 
@@ -221,6 +222,32 @@ restart = "permanent"                    # | transient | temporary
 scope   = "local"                        # | singleton
 durable = false                          # true -> cast over JetStream
 ```
+
+## HTTP edge (ingress)
+
+An **edge** is a process whose input arrives from *outside* the ether (a push - HTTP) rather than
+from a mailbox (a pull). A `[[edge.http]]` section maps HTTP routes to a thrall operation with **no
+code** - the lord runs a built-in `aether _edge` server for it, supervised as a singleton thrall
+(heartbeat, restart, drain, fencing):
+
+```toml
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."GET /value"      = { thrall = "counter", op = "get", kind = "call" }   # waits for the reply -> body
+route."POST /increment" = { thrall = "counter", op = "inc", kind = "cast" }   # fire-and-forget -> 202
+
+[[edge.http]]                            # multiple servers, each on its own port, in one manifest
+name = "admin"
+addr = ":8081"
+route."POST /decrement" = { thrall = "counter", op = "dec", kind = "cast" }
+```
+
+A `call` route returns the thrall's reply as the body (200); a `cast` route returns 202. Errors map
+deterministically: application error -> 502, no responders -> 503, reply timeout -> 504, unknown
+route -> 404. A real port is held by one active instance (singleton); aether does no load balancing -
+put a reverse proxy in front to scale a single port. Runnable demo: `examples/webserver/`. Design and
+the roadmap (SDK helper for custom edges, live WS/SSE push): [DESIGN.md §12b](./DESIGN.md).
 
 ## Durability
 

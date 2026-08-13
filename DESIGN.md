@@ -432,6 +432,50 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
 
 ---
 
+## 12b. Edge: input from outside the ether (HTTP ingress)
+
+Every block so far is a *pull* from the ether: a thrall sits on a serialized mailbox and reacts to
+call/cast. Real systems also need *push from outside* - an HTTP request, a SCADA driver reading a
+device, a timer. That is the opposite shape: input arrives on an OS socket the process owns, it is
+concurrent and stateless, and it does not fit a serialized mailbox (a thousand parallel requests
+would queue behind one goroutine - head-of-line blocking). So an **edge** is not a behaviour; it is
+a socket-owning process that bridges the outside world to the ether, holding no state itself - the
+state lives in ordinary thralls behind it.
+
+**HTTP ingress (implemented, model "built-in, by configuration").** A `[[edge.http]]` section maps
+routes to a thrall operation, with **no code**:
+
+```toml
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."GET /value"      = { thrall = "counter", op = "value", kind = "call" }
+route."POST /increment" = { thrall = "counter", op = "increment", kind = "cast" }
+```
+
+The lord synthesizes a supervised child per section running the internal `aether _edge` subcommand;
+it is a normal singleton thrall to the lord, so it inherits spawn, heartbeat, drain and fencing
+unchanged. Each request is translated to a wire envelope: a `call` route waits for the reply and
+returns it as the body (200), a `cast` route hands the message to the ether and returns 202. Errors
+map deterministically - an application error reply -> 502, no responders -> 503, a reply timeout ->
+504, an unknown route -> 404. The edge connects with the same client path as the CLI (`wire` +
+`nats.Conn`), not the thrall runtime, so it carries no mailbox. Multiple `[[edge.http]]` servers
+coexist in one manifest, each on its own port. Demo: `examples/webserver/`.
+
+**Boundaries (deliberate):** a real OS port is held by one active instance (**singleton fit**; HA via
+the standby + fencing of §14), and aether does no SO_REUSEPORT or load balancing - scale a single
+port with a reverse proxy in front. HTTP routing/middleware and business logic stay in application
+code; the built-in model stays intentionally small (route -> operation), and anything beyond it
+belongs in a custom edge written against a thin SDK helper (planned, model "you write the code"). A
+slow serialized backend is the throughput ceiling, by design.
+
+**Planned (not yet implemented):** a thin SDK `edge` helper (a run-loop + graceful-stop hook over the
+same supervision machinery) for custom edges and SCADA drivers, and **live push to the browser**
+(WS/SSE) - the harder half, whose core is subject-level authorization, building on the gen_event /
+subscription consumer.
+
+---
+
 ## 13. Durability model (what survives what)
 
 Durability is easy to over-read. Two things must be kept apart:
