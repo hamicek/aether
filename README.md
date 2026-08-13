@@ -246,8 +246,23 @@ route."POST /decrement" = { thrall = "counter", op = "dec", kind = "cast" }
 A `call` route returns the thrall's reply as the body (200); a `cast` route returns 202. Errors map
 deterministically: application error -> 502, no responders -> 503, reply timeout -> 504, unknown
 route -> 404. A real port is held by one active instance (singleton); aether does no load balancing -
-put a reverse proxy in front to scale a single port. Runnable demo: `examples/webserver/`. Design and
-the roadmap (SDK helper for custom edges, live WS/SSE push): [DESIGN.md §12b](./DESIGN.md).
+put a reverse proxy in front to scale a single port. Runnable demo: `examples/webserver/`.
+
+**Custom edge (you write the code).** When a route cannot be expressed as configuration - custom auth,
+transformation, a non-HTTP protocol (a SCADA driver, cron, tail) - write the edge yourself via
+`thrall.StartEdge` (Go SDK): you supply a run-loop that owns the socket and a graceful-stop hook, and
+get heartbeat/restart/drain/fencing for free. A custom edge is an ordinary `[[thrall]]` with a `cmd`, so
+it coexists with the built-in ingress in one manifest. Demo: `examples/webserver-custom/` (a custom edge
+doing an auth check beside the declarative ingress). Design and roadmap (TS/Py parity, live WS/SSE push):
+[DESIGN.md §12b](./DESIGN.md).
+
+```go
+thrall.StartEdge(thrall.EdgeDef{
+    Init: func(ctx *thrall.Ctx) error { /* build the http.Server */ return nil },
+    Run:  func(ctx *thrall.Ctx, stop <-chan struct{}) error { return srv.ListenAndServe() },
+    Stop: func() { srv.Shutdown(context.Background()) }, // graceful hook on drain
+})
+```
 
 ## Durability
 
