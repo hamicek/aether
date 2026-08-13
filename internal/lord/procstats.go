@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procAgg is the aggregated resource use of one process group: summed resident memory (bytes) and
@@ -77,4 +78,86 @@ func sampleProcStats() (map[int]procAgg, error) {
 		return nil, err
 	}
 	return parseProcStats(string(out)), nil
+}
+
+// cpuPercent computes CPU usage as the fraction of wall time spent on CPU between two samples, in
+// percent. It returns 0 for a non-positive interval or a CPU-time decrease (a restarted process
+// whose counter reset), so a fresh or restarted thrall never reports a bogus value.
+func cpuPercent(prevCPU, curCPU float64, elapsed time.Duration) float64 {
+	sec := elapsed.Seconds()
+	if sec <= 0 || curCPU < prevCPU {
+		return 0
+	}
+	return (curCPU - prevCPU) / sec * 100
+}
+
+// cpuSample is a thrall's previous CPU time and when it was taken, for the percentage delta.
+type cpuSample struct {
+	cpuSeconds float64
+	at         time.Time
+}
+
+// pollProcStats periodically samples each live thrall's process-group RSS and CPU and records
+// them. It runs from Start, independent of the NATS mode. A failed ps sample is skipped, never
+// fatal, so it cannot stall supervision. The previous CPU time per thrall lives here (only this
+// goroutine touches it), so the CPU percentage is a delta over the poll interval.
+func (l *Lord) pollProcStats() {
+	if l.procStatsPollEvery <= 0 {
+		return
+	}
+	prev := map[string]cpuSample{}
+	t := time.NewTicker(l.procStatsPollEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-l.appCtx.Done():
+			return
+		case now := <-t.C:
+			l.pollProcStatsOnce(prev, now)
+		}
+	}
+}
+
+// pollProcStatsOnce samples ps once and records RSS + CPU% for every live thrall, keyed by its
+// process group (pgid == the leader pid, thanks to Setpgid). prev carries the last CPU time per
+// thrall for the delta; entries for thralls no longer live are dropped, so a restarted thrall
+// (fresh process, reset counter) starts clean instead of producing a bogus delta.
+func (l *Lord) pollProcStatsOnce(prev map[string]cpuSample, now time.Time) {
+	agg, err := sampleProcStats()
+	if err != nil {
+		return // ps unavailable this tick - skip, never disturb supervision
+	}
+
+	type liveThrall struct {
+		name string
+		pgid int
+	}
+	l.childrenMu.RLock()
+	lives := make([]liveThrall, 0, len(l.children))
+	for _, ch := range l.children {
+		if ch.live.Load() {
+			lives = append(lives, liveThrall{ch.spec.Name, ch.pid()})
+		}
+	}
+	l.childrenMu.RUnlock()
+
+	seen := make(map[string]struct{}, len(lives))
+	for _, lv := range lives {
+		seen[lv.name] = struct{}{}
+		a, ok := agg[lv.pgid]
+		if !ok {
+			continue // process group not visible to ps this tick
+		}
+		cpu := 0.0
+		if p, ok := prev[lv.name]; ok {
+			cpu = cpuPercent(p.cpuSeconds, a.CPUSeconds, now.Sub(p.at))
+		}
+		prev[lv.name] = cpuSample{cpuSeconds: a.CPUSeconds, at: now}
+		l.metrics.recordProcStats(lv.name, a.RSSBytes, cpu)
+	}
+	for name := range prev {
+		if _, ok := seen[name]; !ok {
+			delete(prev, name)
+		}
+	}
 }

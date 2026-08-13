@@ -36,6 +36,9 @@ const (
 
 	// backlogPollInterval is how often the lord samples durable consumer backlogs.
 	backlogPollInterval = 2 * time.Second
+
+	// procStatsPollInterval is how often the lord samples each thrall's RSS and CPU.
+	procStatsPollInterval = 2 * time.Second
 )
 
 // exit reports the end of one process generation (sent by the watcher).
@@ -90,7 +93,8 @@ type Lord struct {
 	hbMissAfter  time.Duration // no heartbeat for this long -> stale
 	hbCheckEvery time.Duration // how often the reaper checks
 
-	backlogPollEvery time.Duration // how often durable consumer backlogs are sampled
+	backlogPollEvery   time.Duration // how often durable consumer backlogs are sampled
+	procStatsPollEvery time.Duration // how often thrall RSS/CPU are sampled
 }
 
 // New creates the root lord from a manifest.
@@ -119,24 +123,25 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 	}
 	hbInterval := time.Duration(intervalMs) * time.Millisecond
 	l := &Lord{
-		manifest:         m,
-		ether:            eth,
-		reg:              reg,
-		locks:            locks,
-		lordLease:        leases,
-		id:               fmt.Sprintf("%s-%d", host, os.Getpid()),
-		log:              obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
-		metrics:          newLordMetrics(),
-		exits:            make(chan exit, len(m.Thralls)+8),
-		procCtx:          procCtx,
-		procCancel:       procCancel,
-		ready:            map[string]bool{},
-		stale:            map[string]bool{},
-		lastSeen:         map[string]time.Time{},
-		statusApplied:    map[string]uint64{},
-		hbMissAfter:      hbInterval * time.Duration(misses),
-		hbCheckEvery:     hbInterval,
-		backlogPollEvery: backlogPollInterval,
+		manifest:           m,
+		ether:              eth,
+		reg:                reg,
+		locks:              locks,
+		lordLease:          leases,
+		id:                 fmt.Sprintf("%s-%d", host, os.Getpid()),
+		log:                obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
+		metrics:            newLordMetrics(),
+		exits:              make(chan exit, len(m.Thralls)+8),
+		procCtx:            procCtx,
+		procCancel:         procCancel,
+		ready:              map[string]bool{},
+		stale:              map[string]bool{},
+		lastSeen:           map[string]time.Time{},
+		statusApplied:      map[string]uint64{},
+		hbMissAfter:        hbInterval * time.Duration(misses),
+		hbCheckEvery:       hbInterval,
+		backlogPollEvery:   backlogPollInterval,
+		procStatsPollEvery: procStatsPollInterval,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
@@ -204,6 +209,7 @@ func (l *Lord) Start(ctx context.Context) error {
 	go l.supervisorLoop()
 	go l.reapHeartbeats()
 	go l.pollDurableBacklog()
+	go l.pollProcStats()
 
 	for _, ch := range l.children {
 		ch.lordKey = l.manifest.App

@@ -3,6 +3,7 @@ package lord
 import (
 	"math"
 	"testing"
+	"time"
 )
 
 func TestParseCPUTime(t *testing.T) {
@@ -55,5 +56,24 @@ func TestParseProcStatsSkipsGarbage(t *testing.T) {
 	}
 	if agg[50].RSSBytes != 2048*1024 {
 		t.Errorf("pgid 50 RSS = %d", agg[50].RSSBytes)
+	}
+}
+
+func TestCPUPercent(t *testing.T) {
+	// 1 CPU-second over a 2s interval = 50%.
+	if got := cpuPercent(10.0, 11.0, 2*time.Second); math.Abs(got-50.0) > 0.01 {
+		t.Errorf("cpuPercent(10,11,2s) = %v, want 50", got)
+	}
+	// 2 CPU-seconds over 2s = 100% (one fully-busy core).
+	if got := cpuPercent(0, 2, 2*time.Second); math.Abs(got-100.0) > 0.01 {
+		t.Errorf("cpuPercent(0,2,2s) = %v, want 100", got)
+	}
+	// Zero interval (no previous sample) -> 0, not a divide-by-zero.
+	if got := cpuPercent(5, 6, 0); got != 0 {
+		t.Errorf("cpuPercent with zero elapsed = %v, want 0", got)
+	}
+	// CPU-time decrease (a restarted process whose counter reset) -> 0, not negative.
+	if got := cpuPercent(100, 1, 2*time.Second); got != 0 {
+		t.Errorf("cpuPercent on a counter reset = %v, want 0", got)
 	}
 }
