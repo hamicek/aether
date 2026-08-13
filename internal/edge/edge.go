@@ -8,14 +8,35 @@ package edge
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/wire"
 )
+
+// EnvSpec is the environment variable through which the lord hands an edge process its Spec as JSON.
+const EnvSpec = "AETHER_EDGE_SPEC"
+
+// SpecFromEnv reads and parses the edge Spec the lord injected via EnvSpec.
+func SpecFromEnv() (Spec, error) {
+	raw := os.Getenv(EnvSpec)
+	if raw == "" {
+		return Spec{}, fmt.Errorf("%s not set", EnvSpec)
+	}
+	var s Spec
+	if err := json.Unmarshal([]byte(raw), &s); err != nil {
+		return Spec{}, fmt.Errorf("parse %s: %w", EnvSpec, err)
+	}
+	if s.Addr == "" || len(s.Routes) == 0 {
+		return Spec{}, fmt.Errorf("edge spec incomplete (missing addr or routes)")
+	}
+	return s, nil
+}
 
 // Spec is the runtime configuration of one HTTP edge server. The lord transports it to the spawned
 // `aether _edge` process as JSON (env AETHER_EDGE_SPEC); it mirrors the manifest's [[edge.http]]
