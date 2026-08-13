@@ -128,32 +128,38 @@ func (l *Lord) pollProcStatsOnce(prev map[string]cpuSample, now time.Time) {
 		return // ps unavailable this tick - skip, never disturb supervision
 	}
 
-	type liveThrall struct {
+	type childSnap struct {
 		name string
 		pgid int
+		live bool
 	}
 	l.childrenMu.RLock()
-	lives := make([]liveThrall, 0, len(l.children))
+	kids := make([]childSnap, 0, len(l.children))
 	for _, ch := range l.children {
-		if ch.live.Load() {
-			lives = append(lives, liveThrall{ch.spec.Name, ch.pid()})
-		}
+		kids = append(kids, childSnap{ch.spec.Name, ch.pid(), ch.live.Load()})
 	}
 	l.childrenMu.RUnlock()
 
-	seen := make(map[string]struct{}, len(lives))
-	for _, lv := range lives {
-		seen[lv.name] = struct{}{}
-		a, ok := agg[lv.pgid]
+	seen := make(map[string]struct{}, len(kids))
+	for _, k := range kids {
+		seen[k.name] = struct{}{}
+		if !k.live {
+			// Not running: report zero rather than a stale figure, and drop the CPU baseline so a
+			// restart starts clean.
+			delete(prev, k.name)
+			l.metrics.recordProcStats(k.name, 0, 0)
+			continue
+		}
+		a, ok := agg[k.pgid]
 		if !ok {
-			continue // process group not visible to ps this tick
+			continue // live but its process group is not visible to ps this tick - keep the last value
 		}
 		cpu := 0.0
-		if p, ok := prev[lv.name]; ok {
+		if p, ok := prev[k.name]; ok {
 			cpu = cpuPercent(p.cpuSeconds, a.CPUSeconds, now.Sub(p.at))
 		}
-		prev[lv.name] = cpuSample{cpuSeconds: a.CPUSeconds, at: now}
-		l.metrics.recordProcStats(lv.name, a.RSSBytes, cpu)
+		prev[k.name] = cpuSample{cpuSeconds: a.CPUSeconds, at: now}
+		l.metrics.recordProcStats(k.name, a.RSSBytes, cpu)
 	}
 	for name := range prev {
 		if _, ok := seen[name]; !ok {
