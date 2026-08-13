@@ -1,0 +1,25 @@
+app = "demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# Two site sensors, each publishing readings to its own event subject (aether.demo.site-N.evt).
+[[thrall]]
+name = "site-1"
+cmd  = "../../bin/site-sensor"
+restart = "permanent"
+
+[[thrall]]
+name = "site-2"
+cmd  = "../../bin/site-sensor"
+restart = "permanent"
+
+# The live edge: holds browser SSE connections and pushes each client only its site's events.
+# It binds a real port, so it runs as a singleton.
+[[thrall]]
+name = "dashboard"
+cmd  = "../../bin/live-edge"
+restart = "permanent"
+scope   = "singleton"
