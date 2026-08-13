@@ -156,3 +156,82 @@ func TestServeClientRejectsEmptyScope(t *testing.T) {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 }
+
+// A wildcard subject would silently widen the scope, so it must be rejected (defense in depth).
+func TestServeClientRejectsWildcardScope(t *testing.T) {
+	nc, _ := embeddedNATS(t)
+	stream := NewSSEStream(&Ctx{NATS: nc})
+
+	for _, subj := range []string{"test.>", "test.*.evt"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/events", nil)
+		err := stream.ServeClient(rec, req, subj)
+		if err == nil {
+			t.Fatalf("subject %q: expected a wildcard rejection", subj)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("subject %q: status = %d, want 400", subj, rec.Code)
+		}
+	}
+}
+
+// A client scoped to several subjects receives events from all of them.
+func TestSSEStreamMultipleSubjects(t *testing.T) {
+	nc, _ := embeddedNATS(t)
+	stream := NewSSEStream(&Ctx{NATS: nc})
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = stream.ServeClient(w, r, "test.a.evt", "test.b.evt")
+	}))
+	defer ts.Close()
+
+	lines, cancel := sseClient(t, ts.URL)
+	defer cancel()
+
+	_ = nc.Publish("test.a.evt", []byte(`{"from":"a"}`))
+	_ = nc.Flush()
+	if got := waitForData(t, lines, 2*time.Second); got != `data: {"from":"a"}` {
+		t.Fatalf("frame = %q, want the a-subject event", got)
+	}
+	_ = nc.Publish("test.b.evt", []byte(`{"from":"b"}`))
+	_ = nc.Flush()
+	if got := waitForData(t, lines, 2*time.Second); got != `data: {"from":"b"}` {
+		t.Fatalf("frame = %q, want the b-subject event", got)
+	}
+}
+
+// A client that stops reading must not stall delivery to other clients (backpressure drops for it).
+func TestSSEStreamSlowClientDoesNotStall(t *testing.T) {
+	nc, _ := embeddedNATS(t)
+	stream := NewSSEStream(&Ctx{NATS: nc})
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = stream.ServeClient(w, r, "test.load.evt")
+	}))
+	defer ts.Close()
+
+	// A slow client: connects but never reads its body, so its buffer fills and its writer blocks.
+	ctxSlow, cancelSlow := context.WithCancel(context.Background())
+	defer cancelSlow()
+	reqSlow, _ := http.NewRequestWithContext(ctxSlow, http.MethodGet, ts.URL, nil)
+	respSlow, err := http.DefaultClient.Do(reqSlow)
+	if err != nil {
+		t.Fatalf("slow connect: %v", err)
+	}
+	defer respSlow.Body.Close()
+
+	// Flood events - a stuck client must not block the ether or other clients.
+	for i := 0; i < 100; i++ {
+		_ = nc.Publish("test.load.evt", []byte(`{"n":0}`))
+	}
+	_ = nc.Flush()
+
+	// A healthy reading client (connecting after the flood) still receives fresh events.
+	lines, cancel := sseClient(t, ts.URL)
+	defer cancel()
+	_ = nc.Publish("test.load.evt", []byte(`{"live":true}`))
+	_ = nc.Flush()
+	if got := waitForData(t, lines, 2*time.Second); got != `data: {"live":true}` {
+		t.Fatalf("frame = %q, want the live event despite a stalled peer", got)
+	}
+}

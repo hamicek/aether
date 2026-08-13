@@ -12,8 +12,8 @@ package thrall
 
 import (
 	"fmt"
-	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +23,11 @@ import (
 // sseKeepAlive is how often an SSE comment (":\n\n") is sent to keep the connection alive through
 // proxies during quiet periods; it is ignored by the EventSource client.
 const sseKeepAlive = 20 * time.Second
+
+// sseWriteTimeout bounds a single frame write, so a stuck client (one that stops reading) cannot block
+// the writer loop forever and thus survive a drain. It is applied per write, not as a server-wide
+// WriteTimeout (which would cut off the long-lived stream).
+const sseWriteTimeout = 10 * time.Second
 
 // sseClientBuffer bounds the per-connection queue. A client that cannot keep up drops events (a live
 // view tolerates a missed event, not a stalled stream) rather than blocking the NATS callback.
@@ -61,6 +66,14 @@ func (s *SSEStream) ServeClient(w http.ResponseWriter, r *http.Request, subjects
 		http.Error(w, "no subject scope", http.StatusForbidden)
 		return fmt.Errorf("sse: empty subject scope")
 	}
+	// Defense in depth for a security primitive: the scope must be exact subjects. A wildcard (from an
+	// application bug that let a client-controlled segment into the subject) would silently widen the scope.
+	for _, subj := range subjects {
+		if strings.ContainsAny(subj, "*>") {
+			http.Error(w, "invalid subject scope", http.StatusBadRequest)
+			return fmt.Errorf("sse: subject %q contains a wildcard - scope must be exact subjects", subj)
+		}
+	}
 
 	// A per-connection buffered channel; the subscription callbacks feed it, the writer loop drains it.
 	// It is never closed (the connection owns it), so a callback racing Unsubscribe just does a safe send.
@@ -91,7 +104,21 @@ func (s *SSEStream) ServeClient(w http.ResponseWriter, r *http.Request, subjects
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	flusher.Flush() // send the headers so the browser's EventSource opens immediately
+	w.Header().Set("X-Accel-Buffering", "no") // tell nginx & co not to buffer the stream
+	flusher.Flush()                           // send the headers so the browser's EventSource opens immediately
+
+	// writeFrame writes one SSE frame under a per-write deadline, so a stuck client cannot block the loop
+	// (and thus survive a drain). All chunk writes and the flush are checked; any error ends the connection.
+	rc := http.NewResponseController(w)
+	writeFrame := func(chunks ...[]byte) error {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) // best-effort; ignore if unsupported
+		for _, c := range chunks {
+			if _, err := w.Write(c); err != nil {
+				return err
+			}
+		}
+		return rc.Flush()
+	}
 
 	keepAlive := time.NewTicker(sseKeepAlive)
 	defer keepAlive.Stop()
@@ -103,18 +130,14 @@ func (s *SSEStream) ServeClient(w http.ResponseWriter, r *http.Request, subjects
 		case <-s.done: // the edge is draining
 			return nil
 		case <-keepAlive.C:
-			if _, err := io.WriteString(w, ":\n\n"); err != nil {
+			if writeFrame([]byte(":\n\n")) != nil {
 				return nil
 			}
-			flusher.Flush()
 		case msg := <-ch:
 			// SSE frame: "data: <payload>\n\n". The payload is the raw event JSON from the ether.
-			if _, err := w.Write([]byte("data: ")); err != nil {
+			if writeFrame([]byte("data: "), msg, []byte("\n\n")) != nil {
 				return nil
 			}
-			_, _ = w.Write(msg)
-			_, _ = w.Write([]byte("\n\n"))
-			flusher.Flush()
 		}
 	}
 }
