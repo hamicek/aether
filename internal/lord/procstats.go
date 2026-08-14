@@ -8,6 +8,7 @@ package lord
 
 import (
 	"bufio"
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -70,10 +71,18 @@ func parseProcStats(psOut string) map[int]procAgg {
 	return out
 }
 
+// procStatsSampleTimeout bounds a single ps invocation. ps is not expected to hang, but a wedged one
+// would otherwise stall the poll goroutine (further RSS/CPU samples) - a cheap insurance, not a
+// supervision concern.
+const procStatsSampleTimeout = 2 * time.Second
+
 // sampleProcStats runs ps once and returns per-process-group aggregates. A single subprocess per
-// poll, independent of the thrall count.
-func sampleProcStats() (map[int]procAgg, error) {
-	out, err := exec.Command("ps", "-A", "-o", "pgid=,rss=,time=").Output()
+// poll, independent of the thrall count. The parent context (the lord's app context) plus a per-call
+// timeout bound a hung ps, so lord shutdown or the deadline reclaims the goroutine.
+func sampleProcStats(ctx context.Context) (map[int]procAgg, error) {
+	ctx, cancel := context.WithTimeout(ctx, procStatsSampleTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-A", "-o", "pgid=,rss=,time=").Output()
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +132,7 @@ func (l *Lord) pollProcStats() {
 // thrall for the delta; entries for thralls no longer live are dropped, so a restarted thrall
 // (fresh process, reset counter) starts clean instead of producing a bogus delta.
 func (l *Lord) pollProcStatsOnce(prev map[string]cpuSample, now time.Time) {
-	agg, err := sampleProcStats()
+	agg, err := sampleProcStats(l.appCtx)
 	if err != nil {
 		return // ps unavailable this tick - skip, never disturb supervision
 	}
