@@ -3,6 +3,7 @@
 package edgeperf
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -265,4 +266,110 @@ func TestEdgePerf(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// --- SSE push fan-out ---
+
+type sseResult struct {
+	clients, published int
+	delivered          int
+	fanout             float64 // delivered events/s across all clients
+	p50, p99, max      time.Duration
+	drops              int
+}
+
+// measureSSEFanout connects `clients` SSE clients to one edge stream, publishes `rate` events/s for
+// `dur`, and measures how many event->client deliveries the edge sustains and the event->client latency.
+// A drop is an event a client's bounded buffer shed under load (published*clients - delivered).
+func measureSSEFanout(t *testing.T, nc *nats.Conn, clients, rate int, dur time.Duration) sseResult {
+	t.Helper()
+	const subject = "perf.sse.evt"
+	stream := thrall.NewSSEStream(&thrall.Ctx{NATS: nc})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = stream.ServeClient(w, r, subject)
+	}))
+	defer ts.Close()
+
+	clientCtx, cancelClients := context.WithCancel(context.Background())
+	perClient := make([][]time.Duration, clients)
+	var wg sync.WaitGroup
+	for c := 0; c < clients; c++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req, _ := http.NewRequestWithContext(clientCtx, http.MethodGet, ts.URL, nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			lats := make([]time.Duration, 0, 4096)
+			sc := bufio.NewScanner(resp.Body)
+			for sc.Scan() {
+				line := sc.Text()
+				if !strings.HasPrefix(line, "data: ") {
+					continue // keep-alive comment or blank line
+				}
+				now := time.Now().UnixNano()
+				var ev struct {
+					T int64 `json:"t"`
+				}
+				if json.Unmarshal([]byte(line[len("data: "):]), &ev) == nil {
+					lats = append(lats, time.Duration(now-ev.T))
+				}
+			}
+			perClient[idx] = lats
+		}(c)
+	}
+
+	// Give the clients a moment to connect and subscribe before publishing.
+	time.Sleep(300 * time.Millisecond)
+
+	published := 0
+	interval := time.Second / time.Duration(rate)
+	ticker := time.NewTicker(interval)
+	deadline := time.Now().Add(dur)
+	for time.Now().Before(deadline) {
+		<-ticker.C
+		ev := fmt.Sprintf(`{"t":%d}`, time.Now().UnixNano())
+		_ = nc.Publish(subject, []byte(ev))
+		published++
+	}
+	ticker.Stop()
+	_ = nc.Flush()
+
+	time.Sleep(200 * time.Millisecond) // let in-flight deliveries land
+	cancelClients()
+	stream.Close()
+	wg.Wait()
+
+	var all []time.Duration
+	for _, l := range perClient {
+		all = append(all, l...)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i] < all[j] })
+	delivered := len(all)
+	return sseResult{
+		clients:   clients,
+		published: published,
+		delivered: delivered,
+		fanout:    float64(delivered) / dur.Seconds(),
+		p50:       pct(all, 0.50),
+		p99:       pct(all, 0.99),
+		max:       pct(all, 1.0),
+		drops:     published*clients - delivered,
+	}
+}
+
+func TestEdgeSSEPerf(t *testing.T) {
+	h := setup(t)
+	defer h.stop()
+
+	const rate = 2000 // events/s published to the stream
+	t.Logf("edge-perf SSE: rate=%d/s dur=%s (fan-out = rate x clients if no drops)", rate, benchDur)
+	for _, clients := range []int{1, 10, 50, 200} {
+		r := measureSSEFanout(t, h.nc, clients, rate, benchDur)
+		t.Logf("SSE-FANOUT clients=%-4d published=%-6d delivered=%-8d fanout=%-9.0f p50=%-9s p99=%-9s max=%-9s drops=%d",
+			r.clients, r.published, r.delivered, r.fanout, r.p50, r.p99, r.max, r.drops)
+	}
 }
