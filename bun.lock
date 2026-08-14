@@ -35,6 +35,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/live-dashboard": {
+      "name": "live-dashboard-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/scada-spike": {
       "name": "scada-spike-example",
       "dependencies": {
@@ -43,6 +49,12 @@
     },
     "examples/tracing": {
       "name": "tracing-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
+    "examples/webserver-custom": {
+      "name": "webserver-custom-example",
       "dependencies": {
         "@hamicek/aether": "workspace:*",
       },
@@ -76,6 +88,8 @@
 
     "fsm-example": ["fsm-example@workspace:examples/fsm"],
 
+    "live-dashboard-example": ["live-dashboard-example@workspace:examples/live-dashboard"],
+
     "nats": ["nats@2.29.3", "", { "dependencies": { "nkeys.js": "1.1.0" } }, "sha512-tOQCRCwC74DgBTk4pWZ9V45sk4d7peoE2njVprMRCBXrhJ5q5cYM7i6W+Uvw2qUrcfOSnuisrX7bEx3b3Wx4QA=="],
 
     "nkeys.js": ["nkeys.js@1.1.0", "", { "dependencies": { "tweetnacl": "1.0.3" } }, "sha512-tB/a0shZL5UZWSwsoeyqfTszONTt4k2YS0tuQioMOD180+MbombYVgzDUYHlx+gejYK6rgf08n/2Df99WY0Sxg=="],
@@ -89,5 +103,7 @@
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="],
 
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
+
+    "webserver-custom-example": ["webserver-custom-example@workspace:examples/webserver-custom"],
   }
 }

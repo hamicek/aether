@@ -499,9 +499,15 @@ port with a reverse proxy in front. HTTP routing/middleware and business logic s
 code; the built-in model stays intentionally small (route -> operation). A slow serialized backend is
 the throughput ceiling, by design.
 
-**Planned (not yet implemented):** `StartEdge`/`SSEStream` parity in the TS/Python SDKs (Go-first for
-now), WebSocket (for the bidirectional case; push is one-way, so SSE covers it), and the built-in
-declarative `[[edge.http]]` egress / `[[edge.stream]]` with configured auth.
+The **TS SDK has parity**: `startEdge` + `SSEStream` mirror the Go shape (a run-loop + graceful-stop hook,
+scoped per-connection SSE), so a TS edge is indistinguishable from a Go edge under the same lord (demos:
+`examples/webserver-custom/edge.ts`, `examples/live-dashboard/edge.ts`). The TS run-loop awaits `stop`
+rather than blocking (node `http` does not block like Go's `ListenAndServe`), so it needs no separate stop
+hook - otherwise the semantics match, including rethrowing a run-loop error for a non-zero exit.
+
+**Planned (not yet implemented):** `startEdge`/`SSEStream` parity in the **Python** SDK, WebSocket (for the
+bidirectional case; push is one-way, so SSE covers it), and the built-in declarative `[[edge.http]]` egress
+/ `[[edge.stream]]` with configured auth.
 
 ---
 
