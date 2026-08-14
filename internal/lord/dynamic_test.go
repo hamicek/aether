@@ -179,17 +179,19 @@ func TestDynamicSpawnIdempotent(t *testing.T) {
 	}
 }
 
-// TestDynamicSpawnRevivesDeadChild: a dead dynamic child of the same name (one that was not
-// restarted) lingers in the lord's slice. Re-spawning must bring a fresh process back, not
-// silently no-op on the corpse - otherwise reconcile-as-recovery would never revive it.
+// TestDynamicSpawnRevivesDeadChild: a re-spawn of a name whose dead dynamic entry is still in
+// the slice must bring a fresh process back, not silently no-op on the corpse. The lord now
+// retires a dead dynamic child on exit, so this dead-entry-still-present state is the race
+// window between the exit's retirement and the re-spawn - the revive path covers it either
+// way: if the entry is gone the spawn just appends fresh, if it lingers the spawn replaces it.
 func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
 	eth := startEmbedded(t)
 	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
 	nc := eth.Conn()
 	waitReady(t, eth, "static")
 
-	// A temporary child is not restarted when it exits, so after a crash it lingers dead -
-	// exactly the state a re-spawn must revive.
+	// A temporary child is not restarted when it exits, so after a crash it is dead - either
+	// already retired or briefly lingering; a re-spawn must bring a fresh process back regardless.
 	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}
 	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
 		t.Fatalf("first spawn: %+v", r.Error)
