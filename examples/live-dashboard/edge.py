@@ -36,8 +36,8 @@ async def run(ctx, stop):
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", addr)
-    await site.start()
+    server = web.TCPSite(runner, "0.0.0.0", addr)  # not named `site`: that is the per-client scope here
+    await server.start()
     ctx.log.info("live-dashboard edge (py) listening", addr=addr)
     try:
         await stop.wait()

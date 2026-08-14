@@ -36,8 +36,8 @@ async def run(ctx, stop):
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", addr)
-    await site.start()  # an error here (e.g. address in use) ends run abnormally -> the lord restarts it
+    server = web.TCPSite(runner, "0.0.0.0", addr)
+    await server.start()  # an error here (e.g. address in use) ends run abnormally -> the lord restarts it
     ctx.log.info("custom edge (py) listening", addr=addr)
     try:
         await stop.wait()

@@ -10,8 +10,13 @@ from aether import _sub_evt, def_thrall, run
 
 name = os.environ.get("AETHER_NAME") or "site-1"
 
+# Hold a strong reference to the ticker task: asyncio keeps only a weak reference to a bare
+# create_task result, so an unreferenced task can be garbage-collected mid-run.
+_ticker: asyncio.Task | None = None
+
 
 def init(ctx):
+    global _ticker
     subject = _sub_evt(ctx.app, ctx.name)  # aether.<app>.<name>.evt
 
     async def tick():
@@ -22,7 +27,7 @@ def init(ctx):
             temp = 18 + (seq % 6)  # a deterministic wobble between 18 and 23 C
             await ctx.nats.publish(subject, json.dumps({"site": ctx.name, "temp": temp, "seq": seq}).encode())
 
-    asyncio.create_task(tick())
+    _ticker = asyncio.create_task(tick())
     return 0
 
 
