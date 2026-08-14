@@ -93,6 +93,15 @@ export async function startEdge(def: EdgeDef): Promise<void> {
       log.error("edge run-loop failed", { err: String(e) });
     });
 
+  // fail tears down after the run-loop is already running, so an error setting up ctl/fencing does not
+  // leave the run-loop holding its socket with no way to be told to stop (mirrors Go's fail helper).
+  const fail = async (err: unknown): Promise<never> => {
+    closeStop();
+    await runDone;
+    await nc.drain();
+    throw err;
+  };
+
   // ctl: controlled shutdown from the lord. Unlike the other behaviours (which process.exit(0) here), the
   // edge only signals stop and drains gracefully below.
   const ctlSub = nc.subscribe(subjects.ctl(name));
@@ -107,8 +116,12 @@ export async function startEdge(def: EdgeDef): Promise<void> {
   })();
 
   startHeartbeat(nc, name, zeroMetrics);
-  await startFencingIfSingleton(nc, name, log);
-  await startLordLivenessFencing(nc, name, log);
+  try {
+    await startFencingIfSingleton(nc, name, log);
+    await startLordLivenessFencing(nc, name, log);
+  } catch (e) {
+    return fail(e);
+  }
 
   // Await whichever settles first (Go's select { <-stop / <-runDone }).
   const winner = await Promise.race([

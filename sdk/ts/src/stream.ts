@@ -65,13 +65,6 @@ export class SSEStream {
       }
     }
 
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no", // tell nginx & co not to buffer the stream
-    });
-
     const decoder = new TextDecoder();
     const writeFrame = (data: Uint8Array): void => {
       // Backpressure: if the client is not keeping up, drop this event rather than buffering unboundedly.
@@ -80,13 +73,34 @@ export class SSEStream {
     };
 
     // Per-connection subscriptions, one per exact subject; NATS never delivers anything outside the scope.
-    const subs: Subscription[] = subjects.map((subj) =>
-      this.nc.subscribe(subj, {
-        callback: (err, msg) => {
-          if (!err) writeFrame(msg.data);
-        },
-      }),
-    );
+    // Subscribe BEFORE sending the 200, so a subscribe failure can still be reported as a clean 500 with
+    // earlier subs cleaned up (mirrors Go's subscribe-error handling).
+    const subs: Subscription[] = [];
+    try {
+      for (const subj of subjects) {
+        subs.push(
+          this.nc.subscribe(subj, {
+            callback: (err, msg) => {
+              if (!err) writeFrame(msg.data);
+            },
+          }),
+        );
+      }
+    } catch (e) {
+      for (const sub of subs) sub.unsubscribe();
+      res.writeHead(500);
+      res.end("subscribe failed");
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // tell nginx & co not to buffer the stream
+    });
+    // A write landing on a just-closed socket (EPIPE) would otherwise surface as an unhandled 'error'.
+    res.on("error", () => {});
 
     const keepAlive = setInterval(() => res.write(":\n\n"), sseKeepAliveMs);
     (keepAlive as { unref?: () => void }).unref?.();
@@ -102,8 +116,11 @@ export class SSEStream {
       };
       _req.on("close", cleanup); // the browser disconnected
       void this.done.then(() => {
-        // draining: end the response and tear down
+        // Draining: end the response and force the socket closed - a stuck client (not reading) would
+        // otherwise keep res.end() from flushing and block the HTTP server's shutdown. Go bounds each
+        // write with a deadline; here the drain destroys the connection.
         res.end();
+        res.destroy();
         cleanup();
       });
     });
