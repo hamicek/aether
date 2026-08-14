@@ -2,6 +2,7 @@ package lord
 
 import (
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -52,13 +53,13 @@ func TestDurableBacklogReported(t *testing.T) {
 		}
 	}
 
-	l.pollDurableBacklogOnce()
-
-	v, ok := metricValue(t, scrape(t, l), `aether_durable_backlog{name="q"}`)
-	if !ok {
-		t.Fatalf("durable backlog not reported")
-	}
-	if v != pending {
-		t.Errorf("durable backlog = %v, want %d", v, pending)
-	}
+	// The consumer's num_pending settles asynchronously after the synchronous publishes (the ack
+	// confirms the stream append, not the consumer's pending update). Poll the sampled metric until
+	// it reaches the expected backlog rather than reading it once, which races the settle on a loaded
+	// CI runner. A real regression (backlog never reported, or wrong count) still fails on the timeout.
+	waitFor(t, 3*time.Second, "durable backlog to settle at the pending count", func() bool {
+		l.pollDurableBacklogOnce()
+		v, ok := metricValue(t, scrape(t, l), `aether_durable_backlog{name="q"}`)
+		return ok && v == pending
+	})
 }
