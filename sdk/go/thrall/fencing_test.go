@@ -8,6 +8,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/fencing"
 	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
@@ -58,9 +59,9 @@ func runFencing(t *testing.T, nc *nats.Conn) (mgr *singleton.Manager, lock *sing
 	}
 	lost = make(chan string, 1)
 	stop = make(chan struct{})
-	cfg := fenceConfig{key: "single", epoch: lock.Epoch()}
-	verify := func() (bool, error) { return mgr.Verify(cfg.key, cfg.epoch) }
-	go fencing("singleton fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
+	epoch := lock.Epoch()
+	verify := func() (bool, error) { return mgr.Verify("single", epoch) }
+	go fencing.Loop("singleton fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
 		func(reason string) { lost <- reason })
 	t.Cleanup(func() { close(stop) })
 	return mgr, lock, lost, stop
@@ -114,7 +115,7 @@ func TestLordLivenessFencingFiresWhenLordReplaced(t *testing.T) {
 	defer close(stop)
 	epoch := lease.Epoch()
 	verify := func() (bool, error) { return mgr.Verify("demo", epoch) }
-	go fencing("lord-liveness fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
+	go fencing.Loop("lord-liveness fencing", verify, fenceInterval, fenceLease, obs.NewLogger(), stop,
 		func(reason string) { lost <- reason })
 
 	// A replacement lord (a restart) stamps a new epoch; the running thrall still holds the old.
