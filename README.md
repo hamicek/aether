@@ -250,12 +250,12 @@ put a reverse proxy in front to scale a single port. Runnable demo: `examples/we
 
 **Custom edge (you write the code).** When a route cannot be expressed as configuration - custom auth,
 transformation, a non-HTTP protocol (a SCADA driver, cron, tail) - write the edge yourself via
-`StartEdge` / `startEdge` (**Go and TS SDK**): you supply a run-loop that owns the socket and a
-graceful-stop hook, and get heartbeat/restart/drain/fencing for free. A custom edge is an ordinary
-`[[thrall]]` with a `cmd`, so it coexists with the built-in ingress in one manifest - and a TS edge is
-indistinguishable from a Go edge under the same lord. Demos: `examples/webserver-custom/` (`main.go` and
-`edge.ts`). `SSEStream` (live push) has the same Go+TS parity; Python is the remaining SDK. Design:
-[DESIGN.md §12b](./DESIGN.md).
+`StartEdge` / `startEdge` / `start_edge` (**Go, TS and Python SDK**): you supply a run-loop that owns the
+socket and a graceful-stop hook, and get heartbeat/restart/drain/fencing for free. A custom edge is an
+ordinary `[[thrall]]` with a `cmd`, so it coexists with the built-in ingress in one manifest - and a TS or
+Python edge is indistinguishable from a Go edge under the same lord. Demos: `examples/webserver-custom/`
+(`main.go`, `edge.ts`, `edge.py`). `SSEStream` (live push) has the same full Go+TS+Python parity - edge is
+polyglot across all three SDKs. Design: [DESIGN.md §12b](./DESIGN.md).
 
 ```go
 thrall.StartEdge(thrall.EdgeDef{

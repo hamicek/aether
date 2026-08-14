@@ -1,0 +1,24 @@
+app = "demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# Two site sensors in Python, each publishing readings to its own event subject (aether.demo.site-N.evt).
+[[thrall]]
+name = "site-1"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python sensor.py"
+restart = "permanent"
+
+[[thrall]]
+name = "site-2"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python sensor.py"
+restart = "permanent"
+
+# The live edge in Python: holds browser SSE connections and pushes each client only its site's events.
+[[thrall]]
+name = "dashboard"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python edge.py"
+restart = "permanent"
+scope   = "singleton"
