@@ -271,6 +271,38 @@ func TestStaticChildNotRemovedOnDontRestart(t *testing.T) {
 	}
 }
 
+// TestDynamicChildRemovedAfterGiveUp: once the lord gives up restarting a dynamic child that
+// keeps crashing past the restart-intensity cap, the dead child must be dropped from the
+// supervision slice, not left to accumulate. The static sibling stays supervised throughout.
+func TestDynamicChildRemovedAfterGiveUp(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "demo", "one_for_one", spec("static", "permanent", "local"))
+	m.RestartIntensity = Intensity{Max: 1, WithinMs: 60000} // give up after a couple of restarts
+	l := startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	// Crash it whenever it comes back up; the lord restarts it until the intensity cap trips,
+	// then gives up - at which point the child is retired from the slice.
+	waitFor(t, 10*time.Second, "dynamic child gives up and is removed from the slice", func() bool {
+		if !childInSlice(l, "dyn") {
+			return true
+		}
+		if _, ok := tryCallInt(nc, "demo", "dyn", "pid"); ok {
+			cast(t, nc, "demo", "dyn", "crash")
+		}
+		return false
+	})
+	if !childInSlice(l, "static") {
+		t.Fatal("static child disappeared from the supervision slice")
+	}
+}
+
 // TestDynamicSpawnNameConflictsStatic: a dynamic spawn must not shadow a manifest name -
 // that is a genuine misconfiguration the author must see, not an idempotent no-op.
 func TestDynamicSpawnNameConflictsStatic(t *testing.T) {

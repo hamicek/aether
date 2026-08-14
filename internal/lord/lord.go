@@ -431,6 +431,7 @@ func (l *Lord) handleCrash(ch *child, abnormal bool) {
 // restartOne restarts only the crashed thrall (with restart-intensity protection and backoff).
 func (l *Lord) restartOne(ch *child) {
 	if l.overIntensity(ch) {
+		l.retireDynamic(ch)
 		return
 	}
 	if l.backoff() {
