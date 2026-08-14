@@ -158,17 +158,38 @@ func (l *Lord) stopChild(name string) error {
 	return nil
 }
 
-// removeChild drops a child from the slice (rollback path when a spawn fails after the
-// name was reserved).
-func (l *Lord) removeChild(ch *child) {
+// retireDynamic drops a dead dynamic child - one the lord will not restart (it gave up on
+// restart-intensity, or a temporary/transient child exited without a restart) - from the
+// supervision slice and clears its observability state, the way a controlled stop does. A
+// static (manifest) child is left in place: it is owned by the manifest and drained on Stop,
+// so this is a no-op for it. removeChild matches by pointer identity, so if a concurrent
+// re-spawn already replaced the dead entry with a fresh child of the same name, removeChild
+// finds nothing and we must NOT touch the name's observability state - it now belongs to the
+// live child. Only clear it when we actually removed our own dead entry.
+func (l *Lord) retireDynamic(ch *child) {
+	if !ch.dynamic {
+		return
+	}
+	if !l.removeChild(ch) {
+		return
+	}
+	l.setStatus(ch.spec.Name, 0, "down")
+	l.forgetThrall(ch.spec.Name)
+}
+
+// removeChild drops a child from the slice by pointer identity, reporting whether it was
+// found (rollback path when a spawn fails after the name was reserved; retirement of a dead
+// child). A miss means the entry was already replaced or removed by a concurrent op.
+func (l *Lord) removeChild(ch *child) bool {
 	l.childrenMu.Lock()
 	defer l.childrenMu.Unlock()
 	for i, c := range l.children {
 		if c == ch {
 			l.children = append(l.children[:i], l.children[i+1:]...)
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (l *Lord) respondOK(m *nats.Msg, req wire.Envelope, payload any) {

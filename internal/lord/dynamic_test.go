@@ -179,17 +179,19 @@ func TestDynamicSpawnIdempotent(t *testing.T) {
 	}
 }
 
-// TestDynamicSpawnRevivesDeadChild: a dead dynamic child of the same name (one that was not
-// restarted) lingers in the lord's slice. Re-spawning must bring a fresh process back, not
-// silently no-op on the corpse - otherwise reconcile-as-recovery would never revive it.
+// TestDynamicSpawnRevivesDeadChild: a re-spawn of a name whose dead dynamic entry is still in
+// the slice must bring a fresh process back, not silently no-op on the corpse. The lord now
+// retires a dead dynamic child on exit, so this dead-entry-still-present state is the race
+// window between the exit's retirement and the re-spawn - the revive path covers it either
+// way: if the entry is gone the spawn just appends fresh, if it lingers the spawn replaces it.
 func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
 	eth := startEmbedded(t)
 	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
 	nc := eth.Conn()
 	waitReady(t, eth, "static")
 
-	// A temporary child is not restarted when it exits, so after a crash it lingers dead -
-	// exactly the state a re-spawn must revive.
+	// A temporary child is not restarted when it exits, so after a crash it is dead - either
+	// already retired or briefly lingering; a re-spawn must bring a fresh process back regardless.
 	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}
 	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
 		t.Fatalf("first spawn: %+v", r.Error)
@@ -210,6 +212,97 @@ func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
 		pid2, ok := tryCallInt(nc, "demo", "dyn", "pid")
 		return ok && pid2 != pid1
 	})
+}
+
+// childInSlice reports whether a child of the given name is currently in the supervision
+// slice (read under the same lock the supervisor uses).
+func childInSlice(l *Lord, name string) bool {
+	l.childrenMu.RLock()
+	defer l.childrenMu.RUnlock()
+	for _, c := range l.children {
+		if c.spec.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDynamicTemporaryChildRemovedOnExit: a dynamic temporary child that exits is not
+// restarted (DontRestart), so the lord must drop it from the supervision slice instead of
+// leaving a dead entry to accumulate.
+func TestDynamicTemporaryChildRemovedOnExit(t *testing.T) {
+	eth := startEmbedded(t)
+	l := startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	cast(t, nc, "demo", "dyn", "crash")
+	waitFor(t, 5*time.Second, "dead temporary child removed from supervision slice", func() bool {
+		return !childInSlice(l, "dyn")
+	})
+	// The static sibling is untouched.
+	if !childInSlice(l, "static") {
+		t.Fatal("static child disappeared from the supervision slice")
+	}
+}
+
+// TestStaticChildNotRemovedOnDontRestart: a static (manifest) temporary child that exits also
+// hits DontRestart, but it is owned by the manifest and drained on Stop, so it must stay in
+// the supervision slice - only dynamic children are retired.
+func TestStaticChildNotRemovedOnDontRestart(t *testing.T) {
+	eth := startEmbedded(t)
+	l := startLord(t, eth, manifest(t, "demo", "one_for_one",
+		spec("keeper", "permanent", "local"),
+		spec("victim", "temporary", "local"),
+	))
+	nc := eth.Conn()
+	waitReady(t, eth, "victim")
+
+	cast(t, nc, "demo", "victim", "crash")
+	waitFor(t, 5*time.Second, "static temporary child stops answering", func() bool {
+		_, ok := tryCallInt(nc, "demo", "victim", "pid")
+		return !ok
+	})
+	if !childInSlice(l, "victim") {
+		t.Fatal("static temporary child was removed from the supervision slice; only dynamic children should be retired")
+	}
+}
+
+// TestDynamicChildRemovedAfterGiveUp: once the lord gives up restarting a dynamic child that
+// keeps crashing past the restart-intensity cap, the dead child must be dropped from the
+// supervision slice, not left to accumulate. The static sibling stays supervised throughout.
+func TestDynamicChildRemovedAfterGiveUp(t *testing.T) {
+	eth := startEmbedded(t)
+	m := manifest(t, "demo", "one_for_one", spec("static", "permanent", "local"))
+	m.RestartIntensity = Intensity{Max: 1, WithinMs: 60000} // give up after a couple of restarts
+	l := startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "permanent"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	// Crash it whenever it comes back up; the lord restarts it until the intensity cap trips,
+	// then gives up - at which point the child is retired from the slice.
+	waitFor(t, 10*time.Second, "dynamic child gives up and is removed from the slice", func() bool {
+		if !childInSlice(l, "dyn") {
+			return true
+		}
+		if _, ok := tryCallInt(nc, "demo", "dyn", "pid"); ok {
+			cast(t, nc, "demo", "dyn", "crash")
+		}
+		return false
+	})
+	if !childInSlice(l, "static") {
+		t.Fatal("static child disappeared from the supervision slice")
+	}
 }
 
 // TestDynamicSpawnNameConflictsStatic: a dynamic spawn must not shadow a manifest name -
