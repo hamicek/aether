@@ -37,6 +37,18 @@ curl -sN localhost:7392/events                      # no token -> 401
 `-N` disables curl buffering so you see events as they arrive (`data: {"site":"site-1",...}`). From a
 browser it is `new EventSource("http://localhost:7392/events?token=tok-site-1")`.
 
+## Polyglot
+
+The sensors and the live edge exist in all three SDKs - `sensor/main.go`+`edge/main.go`, `sensor.ts`+
+`edge.ts`, and `sensor.py`+`edge.py`. `aether.toml` runs the Go set, `aether-ts.toml` the TypeScript,
+`aether-py.toml` the Python one (asyncio + aiohttp; `SSEStream` over aiohttp's `StreamResponse`):
+
+```bash
+cd examples/live-dashboard
+uv venv && uv pip install --python .venv/bin/python -r requirements.txt
+../../bin/aether up -f aether-py.toml   # then the same curls on :7392
+```
+
 ## Boundaries
 
 - **Authorization is your code.** The helper never authorizes - here a demo token maps to a site; in

@@ -1,0 +1,22 @@
+app = "web"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# The stateful backend the edge talks to - a Go counter, so a Python edge fronting a Go thrall proves
+# the edge is wire-compatible across languages under one lord.
+[[thrall]]
+name = "counter"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+scope   = "local"
+
+# The custom edge, in Python (parity of main.go / edge.ts). An ordinary [[thrall]] with a cmd; the lord
+# supervises it like any other. It does an Authorization check then calls the Go counter.
+[[thrall]]
+name = "secure-gw"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python edge.py"
+restart = "permanent"
+scope   = "singleton"
