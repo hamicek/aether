@@ -12,13 +12,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/fencing"
 	"github.com/hamicek/aether/internal/lordlease"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
@@ -435,39 +435,11 @@ func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan stru
 	}
 }
 
-// fenceConfig is the singleton fencing token, injected by the lord (AETHER_SINGLETON_*).
-type fenceConfig struct {
-	key   string
-	epoch uint64
-}
-
-// fenceConfigFromEnv reads the singleton fencing token; ok=false for a non-singleton thrall.
-func fenceConfigFromEnv() (fenceConfig, bool) {
-	return fenceConfigFrom("AETHER_SINGLETON_EPOCH", "AETHER_SINGLETON_KEY")
-}
-
-// lordFenceConfigFromEnv reads the lord-liveness token (AETHER_LORD_*), injected into every
-// thrall the lord spawns; ok=false for a thrall started outside a lord.
-func lordFenceConfigFromEnv() (fenceConfig, bool) {
-	return fenceConfigFrom("AETHER_LORD_EPOCH", "AETHER_LORD_KEY")
-}
-
-func fenceConfigFrom(epochEnv, keyEnv string) (fenceConfig, bool) {
-	epoch, err := strconv.ParseUint(os.Getenv(epochEnv), 10, 64)
-	if err != nil || epoch == 0 {
-		return fenceConfig{}, false
-	}
-	key := os.Getenv(keyEnv)
-	if key == "" {
-		return fenceConfig{}, false
-	}
-	return fenceConfig{key: key, epoch: epoch}, true
-}
-
 // startFencingIfSingleton starts the singleton fencing loop when the thrall is a singleton (the
-// lord injected AETHER_SINGLETON_*); it is a no-op otherwise. Shared by Start and StartFSM.
+// lord injected AETHER_SINGLETON_*); it is a no-op otherwise. Shared by Start and StartFSM. The loop
+// itself lives in internal/fencing, shared with the edge subcommand (cmd/aether/edge.go).
 func startFencingIfSingleton(nc *nats.Conn, name string, log *slog.Logger, stop <-chan struct{}) error {
-	cfg, ok := fenceConfigFromEnv()
+	cfg, ok := fencing.ConfigFromEnv("AETHER_SINGLETON_EPOCH", "AETHER_SINGLETON_KEY")
 	if !ok {
 		return nil
 	}
@@ -475,8 +447,8 @@ func startFencingIfSingleton(nc *nats.Conn, name string, log *slog.Logger, stop 
 	if err != nil {
 		return fmt.Errorf("singleton fencing: open lock bucket: %w", err)
 	}
-	verify := func() (bool, error) { return mgr.Verify(cfg.key, cfg.epoch) }
-	go fencing("singleton fencing", verify, singleton.TTL/3, singleton.TTL, log, stop, exitOnLost("singleton fencing", name, log))
+	verify := func() (bool, error) { return mgr.Verify(cfg.Key, cfg.Epoch) }
+	go fencing.Loop("singleton fencing", verify, singleton.TTL/3, singleton.TTL, log, stop, fencing.ExitOnLost("singleton fencing", name, log))
 	return nil
 }
 
@@ -486,7 +458,7 @@ func startFencingIfSingleton(nc *nats.Conn, name string, log *slog.Logger, stop 
 // lord is gone or was replaced, closing the "no thrall survives its lord" invariant for a lord
 // crash (an external SIGKILL, where the process-group kill never runs). Shared by Start and StartFSM.
 func startLordLivenessFencing(nc *nats.Conn, name string, log *slog.Logger, stop <-chan struct{}) error {
-	cfg, ok := lordFenceConfigFromEnv()
+	cfg, ok := fencing.ConfigFromEnv("AETHER_LORD_EPOCH", "AETHER_LORD_KEY")
 	if !ok {
 		return nil
 	}
@@ -494,52 +466,9 @@ func startLordLivenessFencing(nc *nats.Conn, name string, log *slog.Logger, stop
 	if err != nil {
 		return fmt.Errorf("lord-liveness fencing: open lease bucket: %w", err)
 	}
-	verify := func() (bool, error) { return mgr.Verify(cfg.key, cfg.epoch) }
-	go fencing("lord-liveness fencing", verify, lordlease.TTL/3, lordlease.TTL, log, stop, exitOnLost("lord-liveness fencing", name, log))
+	verify := func() (bool, error) { return mgr.Verify(cfg.Key, cfg.Epoch) }
+	go fencing.Loop("lord-liveness fencing", verify, lordlease.TTL/3, lordlease.TTL, log, stop, fencing.ExitOnLost("lord-liveness fencing", name, log))
 	return nil
-}
-
-// exitOnLost is the production onLost: it logs the loss and terminates the process. Tests inject
-// a channel-based onLost instead, so the shared fencing loop stays verifiable without exiting.
-func exitOnLost(label, name string, log *slog.Logger) func(reason string) {
-	return func(reason string) {
-		log.Error(label+": self-terminating", slog.String("name", name), slog.String("reason", reason))
-		os.Exit(1)
-	}
-}
-
-// fencing runs a self-fencing loop independent of the lord: on each tick it calls verify(). A
-// confirmed loss (verify returns false - the epoch was superseded or the key is gone) calls
-// onLost immediately. When verify cannot conclude (an error, e.g. the KV is unreachable) it calls
-// onLost once the lease elapses with no confirmation, bounding the window in which the fenced
-// condition may already have failed. onLost is expected to terminate the process (os.Exit); label
-// prefixes the log lines.
-func fencing(label string, verify func() (bool, error), interval, lease time.Duration, log *slog.Logger, stop <-chan struct{}, onLost func(reason string)) {
-	lastConfirmed := time.Now()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-t.C:
-			ok, err := verify()
-			switch {
-			case err != nil:
-				// Cannot reach the KV: fail safe only once the lease has fully elapsed.
-				if time.Since(lastConfirmed) > lease {
-					onLost(fmt.Sprintf("unverifiable for over %s: %v", lease, err))
-					return
-				}
-				log.Warn(label+": verify failed, within lease", slog.Any("err", err))
-			case !ok:
-				onLost("epoch superseded or key gone")
-				return
-			default:
-				lastConfirmed = time.Now()
-			}
-		}
-	}
 }
 
 func okReply(req wire.Envelope, payload any) wire.Envelope {
