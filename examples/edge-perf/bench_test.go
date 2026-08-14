@@ -64,9 +64,13 @@ func setup(t *testing.T) *harness {
 		t.Fatalf("ether start: %v", err)
 	}
 	// The in-process thrall reads its wiring from the environment, exactly as a spawned process would.
+	// AETHER_* is process-global, so these tests must run sequentially (no t.Parallel) - each setup
+	// overwrites it with its own fresh embedded URL.
 	os.Setenv("AETHER_NATS_URL", eth.URL())
 	os.Setenv("AETHER_APP", benchApp)
 	os.Setenv("AETHER_NAME", backendName)
+	// thrall.Start blocks for the life of the process; this goroutine is deliberately not joined (it
+	// ends when the test binary exits). Harmless for a measurement harness.
 	go func() { _ = thrall.Start(counterDef()) }()
 
 	nc, err := nats.Connect(eth.URL())
@@ -163,18 +167,27 @@ type loadResult struct {
 	count, errors int
 }
 
+// warmupRequests are sent (unrecorded) per worker before measuring, so the TCP handshake and first-hit
+// costs do not show up as latency outliers.
+const warmupRequests = 5
+
 // measureClosedLoop runs `workers` goroutines that each send requests back-to-back for `dur`, recording
 // per-request latency. Closed-loop (each worker waits for its request to finish) matches how a call
-// blocks on the reply; throughput is then count/dur at that concurrency.
+// blocks on the reply; throughput is then count/dur at that concurrency. Note: this is closed-loop at a
+// fixed concurrency - the percentiles describe latency at that concurrency, not tail latency under a
+// fixed offered rate (no coordinated-omission correction).
 func measureClosedLoop(dur time.Duration, workers int, send func() error) loadResult {
 	perWorker := make([][]time.Duration, workers) // no lock in the hot loop
 	errs := make([]int, workers)
-	deadline := time.Now().Add(dur)
+	deadline := time.Now().Add(dur) // read-only after this point (no race)
 	var wg sync.WaitGroup
 	for wIdx := 0; wIdx < workers; wIdx++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
+			for i := 0; i < warmupRequests; i++ {
+				_ = send() // warm the connection (handshake, first-hit); not recorded
+			}
 			lats := make([]time.Duration, 0, 4096)
 			for time.Now().Before(deadline) {
 				t0 := time.Now()

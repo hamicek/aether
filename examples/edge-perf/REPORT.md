@@ -13,6 +13,11 @@ translation. The harness measures the **edge data path** (router match → envel
 status) against a bare-handler baseline. It does **not** measure process spawn, fencing or heartbeat
 overhead (one-off, off the hot path), nor cross-machine network latency (loopback here).
 
+The load is **closed-loop**: a fixed number of clients each send back-to-back, with no target arrival
+rate. So the latency percentiles describe behavior *at that concurrency* - they are not tail latency
+under a fixed offered rate (no coordinated-omission correction). That is the right lens for "cost of the
+layer" and "where the ceiling sits", which is what this report is about.
+
 ## HTTP ingress (16 clients, closed-loop)
 
 | Scenario | req/s | p50 | p99 | Note |
@@ -42,10 +47,12 @@ concurrency (≈10k → 110k req/s from 1 → 128 clients), only latency grows w
 | 32 | ~1 750 | ~18 ms | ~21 ms |
 | 128 | ~1 800 | ~73 ms | ~76 ms |
 
-Throughput **plateaus near 1/handler-time (~1750/s ≈ 1/500µs)** regardless of concurrency; adding clients
-does not add throughput, it only **grows latency linearly** as the queue. This is the hard number behind
-the design's verbal rule "a slow serialized backend is the throughput ceiling": to scale past it you make
-the handler faster or split the load across more thralls - edge concurrency does not remove the limit.
+Throughput **plateaus at ~1750/s** regardless of concurrency; adding clients does not add throughput, it
+only **grows latency linearly** as the queue. Note the ceiling is `1/(handler-time + per-message
+overhead)`: ~1750/s ≈ 1/570µs, i.e. the 500µs handler plus ~70µs of serialized per-message aether cost
+(NATS request/reply + envelope), not 1/500µs exactly. This is the hard number behind the design's verbal
+rule "a slow serialized backend is the throughput ceiling": to scale past it you make the handler faster
+or split the load across more thralls - edge concurrency does not remove the limit.
 
 ## SSE push fan-out (2000 events/s published, per-client bounded buffer 16)
 
@@ -57,9 +64,14 @@ the handler faster or split the load across more thralls - edge concurrency does
 | 200 | ~390 000 | ~1-3 ms | ~10 ms | ~1 100 (≈0.1%) |
 
 Fan-out scales cleanly to ~100k deliveries/s at 50 clients with no drops and sub-ms latency. At 200 clients
-the edge pushes ~390k deliveries/s but the bounded per-client buffer starts shedding (~0.1% drop) and
+the edge pushes ~390k deliveries/s but the bounded per-client buffer starts shedding (~0.1-0.2% drop) and
 latency climbs - the deliberate backpressure trade-off (a live view drops a stale event rather than
 stalling). To go further: fewer/leaner events, or scale edges behind a reverse proxy.
+
+(The `drops` figure is an upper bound: it counts `published*clients - delivered`, which also absorbs any
+events missed while a client was still connecting or in-flight at shutdown, not only buffer shedding. That
+50 clients show **zero** drops confirms the connect race does not inflate it materially - the 200-client
+drops are predominantly real backpressure shedding.)
 
 ## Verdict
 
