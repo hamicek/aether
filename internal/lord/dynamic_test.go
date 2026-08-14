@@ -212,6 +212,65 @@ func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
 	})
 }
 
+// childInSlice reports whether a child of the given name is currently in the supervision
+// slice (read under the same lock the supervisor uses).
+func childInSlice(l *Lord, name string) bool {
+	l.childrenMu.RLock()
+	defer l.childrenMu.RUnlock()
+	for _, c := range l.children {
+		if c.spec.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestDynamicTemporaryChildRemovedOnExit: a dynamic temporary child that exits is not
+// restarted (DontRestart), so the lord must drop it from the supervision slice instead of
+// leaving a dead entry to accumulate.
+func TestDynamicTemporaryChildRemovedOnExit(t *testing.T) {
+	eth := startEmbedded(t)
+	l := startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	if r := spawnDynamic(t, nc, wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	cast(t, nc, "demo", "dyn", "crash")
+	waitFor(t, 5*time.Second, "dead temporary child removed from supervision slice", func() bool {
+		return !childInSlice(l, "dyn")
+	})
+	// The static sibling is untouched.
+	if !childInSlice(l, "static") {
+		t.Fatal("static child disappeared from the supervision slice")
+	}
+}
+
+// TestStaticChildNotRemovedOnDontRestart: a static (manifest) temporary child that exits also
+// hits DontRestart, but it is owned by the manifest and drained on Stop, so it must stay in
+// the supervision slice - only dynamic children are retired.
+func TestStaticChildNotRemovedOnDontRestart(t *testing.T) {
+	eth := startEmbedded(t)
+	l := startLord(t, eth, manifest(t, "demo", "one_for_one",
+		spec("keeper", "permanent", "local"),
+		spec("victim", "temporary", "local"),
+	))
+	nc := eth.Conn()
+	waitReady(t, eth, "victim")
+
+	cast(t, nc, "demo", "victim", "crash")
+	waitFor(t, 5*time.Second, "static temporary child stops answering", func() bool {
+		_, ok := tryCallInt(nc, "demo", "victim", "pid")
+		return !ok
+	})
+	if !childInSlice(l, "victim") {
+		t.Fatal("static temporary child was removed from the supervision slice; only dynamic children should be retired")
+	}
+}
+
 // TestDynamicSpawnNameConflictsStatic: a dynamic spawn must not shadow a manifest name -
 // that is a genuine misconfiguration the author must see, not an idempotent no-op.
 func TestDynamicSpawnNameConflictsStatic(t *testing.T) {

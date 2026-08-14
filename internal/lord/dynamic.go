@@ -158,6 +158,22 @@ func (l *Lord) stopChild(name string) error {
 	return nil
 }
 
+// retireDynamic drops a dead dynamic child - one the lord will not restart (it gave up on
+// restart-intensity, or a temporary/transient child exited without a restart) - from the
+// supervision slice and clears its observability state, the way a controlled stop does. A
+// static (manifest) child is left in place: it is owned by the manifest and drained on Stop,
+// so this is a no-op for it. removeChild matches by pointer identity, so if a concurrent
+// re-spawn already replaced the dead entry with a fresh child, this finds nothing and leaves
+// the fresh child untouched.
+func (l *Lord) retireDynamic(ch *child) {
+	if !ch.dynamic {
+		return
+	}
+	l.removeChild(ch)
+	l.setStatus(ch.spec.Name, 0, "down")
+	l.forgetThrall(ch.spec.Name)
+}
+
 // removeChild drops a child from the slice (rollback path when a spawn fails after the
 // name was reserved).
 func (l *Lord) removeChild(ch *child) {

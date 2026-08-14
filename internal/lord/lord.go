@@ -418,6 +418,7 @@ func (l *Lord) handleCrash(ch *child, abnormal bool) {
 	switch action {
 	case DontRestart:
 		l.log.Info("thrall not restarted", slog.String("name", ch.spec.Name), slog.String("policy", ch.spec.Restart))
+		l.retireDynamic(ch)
 	case RestartOne:
 		l.restartOne(ch)
 	case RestartAll:
