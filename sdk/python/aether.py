@@ -1276,6 +1276,10 @@ _SSE_WRITE_TIMEOUT_S = 10.0
 # missed event, not a stalled stream) rather than blocking the NATS callback. Exact parity with the Go
 # SDK's fixed 16-event per-connection buffer.
 _SSE_CLIENT_BUFFER = 16
+# How often the writer loop wakes to check for a client disconnect. aiohttp exposes no disconnect future
+# (unlike node's req 'close' event or Go's request context), so the loop polls request.transport at this
+# cadence - detection is bounded to one interval instead of waiting for the next keepalive/event write.
+_SSE_DISCONNECT_POLL_S = 1.0
 
 
 class SSEStream:
@@ -1347,25 +1351,37 @@ class SSEStream:
             except (ConnectionResetError, ConnectionError, RuntimeError, asyncio.TimeoutError):
                 return False
 
+        # The writer loop wakes on a short poll interval so it notices a client disconnect promptly,
+        # forwards a data frame the moment one is queued, and emits a keepalive comment only every
+        # _SSE_KEEPALIVE_S (last_write tracks either kind of write, so data traffic defers the keepalive).
         closed_task = asyncio.create_task(self._closed.wait())
+        last_write = time.monotonic()
         try:
             while True:
                 get_task = asyncio.create_task(queue.get())
                 done, _pending = await asyncio.wait(
-                    {get_task, closed_task}, timeout=_SSE_KEEPALIVE_S, return_when=asyncio.FIRST_COMPLETED
+                    {get_task, closed_task}, timeout=_SSE_DISCONNECT_POLL_S, return_when=asyncio.FIRST_COMPLETED
                 )
-                if not done:  # quiet period -> keepalive comment
-                    get_task.cancel()
-                    if not await write_frame(b":\n\n"):
-                        break
-                    continue
                 if closed_task in done:  # the edge is draining
                     get_task.cancel()
                     break
-                # SSE frame: "data: <payload>\n\n". The payload is the raw event JSON from the ether.
-                data = get_task.result()
-                if not await write_frame(b"data: " + data + b"\n\n"):
+                if get_task in done:
+                    # SSE frame: "data: <payload>\n\n". The payload is the raw event JSON from the ether.
+                    data = get_task.result()
+                    if not await write_frame(b"data: " + data + b"\n\n"):
+                        break
+                    last_write = time.monotonic()
+                    continue
+                # Poll tick with nothing queued: drop the client if it disconnected, else keep the
+                # connection alive through proxies with a comment once the keepalive interval has elapsed.
+                get_task.cancel()
+                transport = request.transport
+                if transport is None or transport.is_closing():
                     break
+                if time.monotonic() - last_write >= _SSE_KEEPALIVE_S:
+                    if not await write_frame(b":\n\n"):
+                        break
+                    last_write = time.monotonic()
         finally:
             closed_task.cancel()
             for sub in subs:
