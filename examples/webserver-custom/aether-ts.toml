@@ -1,0 +1,21 @@
+app = "web"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# A Go counter thrall - the TS edge below calls it over the ether (polyglot under one lord).
+[[thrall]]
+name = "counter"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+scope   = "local"
+
+# The custom edge, in TypeScript (parity of main.go). An ordinary [[thrall]] with a cmd; the lord
+# supervises it like any other. It does an Authorization check then calls the Go counter.
+[[thrall]]
+name = "secure-gw"
+cmd  = "bun run ./edge.ts"
+restart = "permanent"
+scope   = "singleton"
