@@ -1,10 +1,22 @@
 package lord
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
 )
+
+// TestSampleProcStatsHonorsCanceledContext proves the ps invocation is bound to its context: an
+// already-canceled context returns an error without waiting, so a wedged ps cannot outlive a lord
+// shutdown or the per-call timeout.
+func TestSampleProcStatsHonorsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := sampleProcStats(ctx); err == nil {
+		t.Fatal("want an error for an already-canceled context, got nil")
+	}
+}
 
 func TestParseCPUTime(t *testing.T) {
 	cases := map[string]float64{
