@@ -38,6 +38,11 @@ func counterDef() thrall.Def[int] {
 		Init: func(_ *thrall.Ctx) (int, error) { return 0, nil },
 		HandleCall: map[string]thrall.CallFn[int]{
 			"get": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return s, s, nil },
+			// slow simulates real per-message work; the serialized mailbox then becomes the ceiling.
+			"slow": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) {
+				time.Sleep(500 * time.Microsecond)
+				return s, s, nil
+			},
 		},
 		HandleCast: map[string]thrall.CastFn[int]{
 			"inc": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { return s + 1, nil },
@@ -135,6 +140,7 @@ func ingressSpec() edge.Spec {
 		Addr: ":0",
 		Routes: map[string]edge.Route{
 			"GET /value": {Thrall: backendName, Op: "get", Kind: "call"},
+			"GET /slow":  {Thrall: backendName, Op: "slow", Kind: "call"},
 			"POST /inc":  {Thrall: backendName, Op: "inc", Kind: "cast"},
 		},
 	}
@@ -266,6 +272,46 @@ func TestEdgePerf(t *testing.T) {
 		}
 		return nil
 	}))
+}
+
+// TestEdgeBackendCeiling sweeps client concurrency against ONE serialized thrall (a single mailbox) to
+// find where throughput plateaus (the mailbox saturates) and latency starts growing with the queue.
+func TestEdgeBackendCeiling(t *testing.T) {
+	h := setup(t)
+	defer h.stop()
+
+	edgeSrv := httptest.NewServer(benchEdgeHandler(h.nc, benchApp, edge.NewRouter(ingressSpec()), 5*time.Second))
+	defer edgeSrv.Close()
+
+	// A trivial handler (get): the mailbox is not the ceiling - throughput scales with concurrency,
+	// only latency grows with the queue.
+	t.Logf("edge-perf ceiling: sweep vs one thrall, trivial handler (get)")
+	sweepCeiling(t, "CEILING-GET", edgeSrv.URL+"/value")
+	// A ~500us handler (slow): the serialized mailbox IS the ceiling - throughput plateaus near
+	// 1/handler-time no matter the concurrency, and latency grows as the queue.
+	t.Logf("edge-perf ceiling: sweep vs one thrall, ~500us handler (slow)")
+	sweepCeiling(t, "CEILING-SLOW", edgeSrv.URL+"/slow")
+}
+
+func sweepCeiling(t *testing.T, label, url string) {
+	t.Helper()
+	for _, workers := range []int{1, 2, 4, 8, 16, 32, 64, 128} {
+		client := newClient(workers)
+		r := measureClosedLoop(2*time.Second, workers, func() error {
+			resp, err := client.Get(url)
+			if err != nil {
+				return err
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return fmt.Errorf("status %d", resp.StatusCode)
+			}
+			return nil
+		})
+		t.Logf("%s workers=%-4d req/s=%-8.0f p50=%-9s p99=%-9s max=%-9s errs=%d",
+			label, workers, r.achieved, r.p50, r.p99, r.max, r.errors)
+	}
 }
 
 // --- SSE push fan-out ---
