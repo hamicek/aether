@@ -34,6 +34,19 @@ curl -s localhost:7393/value                                   # model B: no aut
 curl -s -H 'Authorization: Bearer secret' localhost:7393/value # model B: authorized -> the value
 ```
 
+## Polyglot
+
+The custom edge exists in all three SDKs - `main.go`, `edge.ts` and `edge.py` - each an equivalent
+run-loop over its language's HTTP server, all supervised identically. `aether.toml` runs the Go edge
+(with the model A ingress alongside), `aether-ts.toml` the TypeScript one, `aether-py.toml` the Python
+one - a Python edge fronting the **Go** counter, so the wire contract is proven language-neutral:
+
+```bash
+cd examples/webserver-custom
+uv venv && uv pip install --python .venv/bin/python -r requirements.txt
+../../bin/aether up -f aether-py.toml   # then the same model B curls on :7393
+```
+
 ## Boundary: head-of-line blocking
 
 Both edges are concurrent, but the `counter` behind them is a single serialized mailbox - its

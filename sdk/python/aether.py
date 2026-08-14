@@ -1101,3 +1101,289 @@ async def rebuild(ctx: "Ctx", initial: Any, fold: Callable) -> Any:
         return state
     finally:
         await psub.unsubscribe()  # ephemeral consumer must be cleaned up (no self-clean)
+
+
+# --- edge behaviour (mirrors the Go StartEdge and TS startEdge) ---
+# Edge is the fourth thrall shape in the SDK, alongside the GenServer (start), the FSM (start_fsm) and
+# the EventManager (start_event) - but unlike them it is NOT a behaviour: it has no mailbox. An edge owns
+# a socket/connection whose input arrives from OUTSIDE the ether (a push - HTTP, a driver), which is
+# concurrent and does not fit a serialized mailbox. The user supplies a run-loop (owning the socket) and
+# an optional graceful-stop hook instead of call/cast handlers; the rest - connect, heartbeat, ctl-drain
+# and fencing - is the same machinery every thrall gets. It is the "model B" edge (you write the code):
+# the counterpart to the declarative built-in HTTP ingress (model A, [[edge.http]], lord-side). State
+# lives in ordinary thralls behind it, reached via ctx.call / ctx.cast.
+
+
+@dataclass
+class EdgeDef:
+    # name: taken from AETHER_NAME when empty.
+    name: str = ""
+    # init runs once before run, for setup that may fail (open a listener, dial a device).
+    init: Optional[Callable[["Ctx"], Any]] = None
+    # run is the socket-owning loop. It runs until `stop` is set (a drain from the lord) and must honor
+    # it (e.g. `await stop.wait()`). Returning is a clean stop; raising ends the edge ABNORMALLY (the
+    # process exits non-zero, so the lord restarts it per its restart policy). Clean up resources opened
+    # in init at the end of run - the stop hook is only a drain-time unblocker, not general cleanup.
+    run: Optional[Callable[["Ctx", asyncio.Event], Any]] = None
+    # stop is an optional hook invoked ONLY on a drain, to unblock run (e.g. server shutdown). It is not
+    # called when run returns/raises on its own.
+    stop: Optional[Callable[[], Any]] = None
+
+
+def def_edge(name="", init=None, run=None, stop=None) -> EdgeDef:
+    """A typed identity/keyword helper mirroring def_thrall / def_fsm / def_event."""
+    return EdgeDef(name, init, run, stop)
+
+
+async def start_edge(defn: EdgeDef) -> None:
+    """Connect an edge thrall to the ether and run its lifecycle. Mirrors start / start_fsm /
+    start_event - reusing the shared connect, heartbeat, ctl-drain and fencing plumbing - but runs the
+    user's run-loop in place of a serialized mailbox. Unlike the others (which return once wiring is set
+    up and let the process live on its subscriptions), start_edge AWAITS the run-loop: it returns on a
+    clean stop and RAISES if the run-loop raised, so the process exits non-zero and the lord restarts it."""
+    url = os.environ.get("AETHER_NATS_URL")
+    app = os.environ.get("AETHER_APP")
+    env_name = os.environ.get("AETHER_NAME", "")
+    if not url or not app:
+        raise RuntimeError("missing AETHER_NATS_URL / AETHER_APP - a thrall is started via `aether up`")
+    name = defn.name or env_name
+    if defn.run is None:
+        raise RuntimeError(f"edge {name}: run is required")
+    ca = os.environ.get("AETHER_NATS_CA")
+    nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
+
+    nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+
+    if defn.init is not None:
+        await _maybe(defn.init(ctx))
+
+    # stop is set once, by either the ctl drain or a self-terminating run-loop; asyncio.Event is
+    # idempotent, so the two racing sources are safe (the Go stop chan + sync.Once analogue).
+    stop = asyncio.Event()
+
+    # Run the run-loop as a tracked task; a raise is captured (not left unobserved) and resurfaced below
+    # as a non-zero exit, mirroring Go's runErr / TS's runErr.
+    run_err: Optional[BaseException] = None
+
+    async def run_wrapper() -> None:
+        nonlocal run_err
+        try:
+            await _maybe(defn.run(ctx, stop))
+        except Exception as ex:  # noqa: BLE001
+            run_err = ex or RuntimeError("edge run-loop failed")
+            ctx.log.error("edge run-loop failed", err=str(ex))
+
+    run_task = asyncio.create_task(run_wrapper())
+
+    # An edge has no mailbox, so it reports zero self-metrics on each heartbeat - the shape the lord's
+    # reaper expects (the never-advanced stats snapshot is all zeros).
+    stats = _MailboxStats()
+
+    ctl_sub = await nc.subscribe(_sub_ctl(name))
+
+    async def ctl_loop() -> None:
+        # Controlled shutdown from the lord. Unlike the other behaviours (which stop their mailbox and
+        # terminate), the edge only signals stop and drains gracefully below.
+        async for msg in ctl_sub.messages:
+            e = _decode(msg.data)
+            if e.get("op") in ("drain", "shutdown"):
+                stop.set()
+                return
+
+    async def heartbeat() -> None:
+        interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
+        while not stop.is_set():
+            hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
+            await nc.publish(_sub_hb(name), _encode(hb))
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    tasks: list[asyncio.Task] = [asyncio.create_task(c()) for c in (ctl_loop, heartbeat)]
+
+    async def fail(err: BaseException) -> None:
+        # Tear down after the run-loop is already running, so an error setting up fencing does not leave
+        # the run-loop holding its socket with no way to be told to stop (mirrors Go's fail helper).
+        stop.set()
+        await run_task
+        for t in tasks:
+            t.cancel()
+        await nc.drain()
+        raise err
+
+    try:
+        fence_task = await _start_fencing_if_singleton(nc, name, ctx.log, stop)
+        if fence_task is not None:
+            tasks.append(fence_task)
+        lord_fence_task = await _start_lord_liveness_fencing(nc, name, ctx.log, stop)
+        if lord_fence_task is not None:
+            tasks.append(lord_fence_task)
+    except Exception as ex:  # noqa: BLE001
+        await fail(ex)
+
+    # Await whichever settles first (Go's select { <-stop / <-runDone }; TS's Promise.race).
+    stop_task = asyncio.create_task(stop.wait())
+    done, _pending = await asyncio.wait({stop_task, run_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    if run_task in done and stop_task not in done:
+        # The run-loop ended on its own: wind down the plumbing and drain. A run-loop error is re-raised
+        # so the process exits non-zero (abnormal), letting the lord restart per policy; a clean return
+        # is a normal stop.
+        stop.set()
+        stop_task.cancel()
+        for t in tasks:
+            t.cancel()
+        await nc.drain()
+        if run_err is not None:
+            raise run_err
+        return
+
+    # Drain from the lord (stop set via ctl): run the graceful hook to unblock run, wait for run to
+    # finish, then cancel the plumbing and drain.
+    if defn.stop is not None:
+        await _maybe(defn.stop())
+    await run_task
+    for t in tasks:
+        t.cancel()
+    await nc.drain()
+
+
+def run_edge(defn: EdgeDef) -> None:
+    """Convenient entry point: asyncio.run(start_edge(defn))."""
+    asyncio.run(start_edge(defn))
+
+
+# --- SSEStream: live push to the browser (mirrors the Go/TS SSEStream) ---
+# The live-push counterpart to the edge: instead of pulling from the ether it pushes the ether OUT to
+# browsers over Server-Sent Events. An edge thrall (via start_edge) holds an HTTP server; on a stream
+# endpoint the application authorizes the request and derives a subject scope, then hands the connection
+# to serve_client, which holds it open and forwards only the events within that scope.
+#
+# Authorization is deliberately the application's job (verify a token -> subject scope), because auth is
+# policy, not mechanism. SSEStream supplies the plumbing: the SSE wire format, a per-connection NATS
+# subscription (so NATS never delivers a client an out-of-scope event), backpressure by dropping for a
+# slow client, and a drain that ends live connections so the HTTP server can shut down.
+
+# How often an SSE comment (":\n\n") is sent to keep the connection alive through proxies during quiet
+# periods; it is ignored by the EventSource client.
+_SSE_KEEPALIVE_S = 20.0
+# Bounds a single frame write, so a stuck client (one that stops reading) cannot block the writer loop
+# forever and thus survive a drain - the analogue of the Go SDK's per-write deadline.
+_SSE_WRITE_TIMEOUT_S = 10.0
+# Bounds the per-connection queue. A client that cannot keep up drops events (a live view tolerates a
+# missed event, not a stalled stream) rather than blocking the NATS callback. Exact parity with the Go
+# SDK's fixed 16-event per-connection buffer.
+_SSE_CLIENT_BUFFER = 16
+# How often the writer loop wakes to check for a client disconnect. aiohttp exposes no disconnect future
+# (unlike node's req 'close' event or Go's request context), so the loop polls request.transport at this
+# cadence - detection is bounded to one interval instead of waiting for the next keepalive/event write.
+_SSE_DISCONNECT_POLL_S = 1.0
+
+
+class SSEStream:
+    """Forwards ether events to browser clients over SSE. One instance is shared by an edge's handlers;
+    each serve_client call is one browser connection with its own scoped subscription. aiohttp is
+    imported lazily (in serve_client), so the SDK does not require aiohttp for non-SSE thralls."""
+
+    def __init__(self, ctx: "Ctx"):
+        self._nc = ctx.nats
+        self._closed = asyncio.Event()
+
+    def close(self) -> None:
+        """End every live serve_client connection. Call it on drain BEFORE closing the HTTP server, which
+        would otherwise wait for the (long-lived) SSE handlers."""
+        self._closed.set()
+
+    async def serve_client(self, request, *subjects: str):
+        """Hold one browser's SSE connection open, forwarding events from the given subjects until the
+        client disconnects or close() is called. Must be called AFTER the application has authorized the
+        request and mapped it to subjects - serve_client itself does no authorization. Returns the
+        aiohttp response (an early web.Response on a rejected scope, else the drained StreamResponse)."""
+        from aiohttp import web  # lazy: only SSE thralls need aiohttp
+
+        if not subjects:
+            return web.Response(status=403, text="no subject scope")
+        # Defense in depth for a security primitive: the scope must be exact subjects. A wildcard (from an
+        # application bug that let a client-controlled segment into the subject) would silently widen it.
+        for subj in subjects:
+            if "*" in subj or ">" in subj:
+                return web.Response(status=400, text="invalid subject scope")
+
+        # A per-connection bounded queue; the subscription callbacks feed it, the writer loop drains it.
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_SSE_CLIENT_BUFFER)
+
+        async def on_msg(msg) -> None:
+            try:
+                queue.put_nowait(msg.data)
+            except asyncio.QueueFull:
+                pass  # slow client - drop this event for it, keep the connection healthy
+
+        # Per-connection subscriptions, one per exact subject; NATS never delivers anything outside the
+        # scope. Subscribe BEFORE preparing the 200, so a subscribe failure is a clean 500 with earlier
+        # subs cleaned up (mirrors the Go/TS subscribe-error handling).
+        subs: list = []
+        try:
+            for subj in subjects:
+                subs.append(await self._nc.subscribe(subj, cb=on_msg))
+        except Exception:  # noqa: BLE001
+            for sub in subs:
+                await sub.unsubscribe()
+            return web.Response(status=500, text="subscribe failed")
+
+        resp = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",  # tell nginx & co not to buffer the stream
+            }
+        )
+        await resp.prepare(request)  # sends the headers so the browser's EventSource opens immediately
+
+        async def write_frame(frame: bytes) -> bool:
+            # One SSE frame under a per-write timeout, so a stuck client cannot block the loop (and thus
+            # survive a drain). Returns False when the connection is gone / the write timed out.
+            try:
+                await asyncio.wait_for(resp.write(frame), timeout=_SSE_WRITE_TIMEOUT_S)
+                return True
+            except (ConnectionResetError, ConnectionError, RuntimeError, asyncio.TimeoutError):
+                return False
+
+        # The writer loop wakes on a short poll interval so it notices a client disconnect promptly,
+        # forwards a data frame the moment one is queued, and emits a keepalive comment only every
+        # _SSE_KEEPALIVE_S (last_write tracks either kind of write, so data traffic defers the keepalive).
+        closed_task = asyncio.create_task(self._closed.wait())
+        last_write = time.monotonic()
+        try:
+            while True:
+                get_task = asyncio.create_task(queue.get())
+                done, _pending = await asyncio.wait(
+                    {get_task, closed_task}, timeout=_SSE_DISCONNECT_POLL_S, return_when=asyncio.FIRST_COMPLETED
+                )
+                if closed_task in done:  # the edge is draining
+                    get_task.cancel()
+                    break
+                if get_task in done:
+                    # SSE frame: "data: <payload>\n\n". The payload is the raw event JSON from the ether.
+                    data = get_task.result()
+                    if not await write_frame(b"data: " + data + b"\n\n"):
+                        break
+                    last_write = time.monotonic()
+                    continue
+                # Poll tick with nothing queued: drop the client if it disconnected, else keep the
+                # connection alive through proxies with a comment once the keepalive interval has elapsed.
+                get_task.cancel()
+                transport = request.transport
+                if transport is None or transport.is_closing():
+                    break
+                if time.monotonic() - last_write >= _SSE_KEEPALIVE_S:
+                    if not await write_frame(b":\n\n"):
+                        break
+                    last_write = time.monotonic()
+        finally:
+            closed_task.cancel()
+            for sub in subs:
+                await sub.unsubscribe()
+        return resp

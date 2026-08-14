@@ -1,0 +1,4 @@
+# Python dependencies for the live-dashboard thralls (sensor.py, edge.py).
+# Pinned so a fresh venv matches what the example was verified against.
+nats-py==2.15.0
+aiohttp
