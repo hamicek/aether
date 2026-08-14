@@ -499,15 +499,17 @@ port with a reverse proxy in front. HTTP routing/middleware and business logic s
 code; the built-in model stays intentionally small (route -> operation). A slow serialized backend is
 the throughput ceiling, by design.
 
-The **TS SDK has parity**: `startEdge` + `SSEStream` mirror the Go shape (a run-loop + graceful-stop hook,
-scoped per-connection SSE), so a TS edge is indistinguishable from a Go edge under the same lord (demos:
-`examples/webserver-custom/edge.ts`, `examples/live-dashboard/edge.ts`). The TS run-loop awaits `stop`
-rather than blocking (node `http` does not block like Go's `ListenAndServe`), so it needs no separate stop
-hook - otherwise the semantics match, including rethrowing a run-loop error for a non-zero exit.
+The **TS and Python SDKs have parity**: `startEdge`/`start_edge` + `SSEStream` mirror the Go shape (a
+run-loop + graceful-stop hook, scoped per-connection SSE), so a TS or Python edge is indistinguishable
+from a Go edge under the same lord (demos: `examples/webserver-custom/edge.{ts,py}`,
+`examples/live-dashboard/edge.{ts,py}`). Both non-Go run-loops await `stop` rather than blocking (node
+`http` / Python asyncio do not block like Go's `ListenAndServe`), so they need no separate stop hook -
+otherwise the semantics match, including rethrowing a run-loop error for a non-zero exit. The Python
+edge is asyncio + aiohttp (`SSEStream` pushes over aiohttp's `StreamResponse`, with the same bounded
+16-event drop-on-full backpressure as Go). Edge is thus **fully polyglot** (Go + TS + Python).
 
-**Planned (not yet implemented):** `startEdge`/`SSEStream` parity in the **Python** SDK, WebSocket (for the
-bidirectional case; push is one-way, so SSE covers it), and the built-in declarative `[[edge.http]]` egress
-/ `[[edge.stream]]` with configured auth.
+**Planned (not yet implemented):** WebSocket (for the bidirectional case; push is one-way, so SSE covers
+it), and the built-in declarative `[[edge.http]]` egress / `[[edge.stream]]` with configured auth.
 
 ---
 
