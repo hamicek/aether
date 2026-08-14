@@ -1,0 +1,7 @@
+{
+  "name": "webserver-custom-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}

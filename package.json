@@ -9,6 +9,8 @@
     "examples/eventsourced",
     "examples/fsm",
     "examples/scada-spike",
-    "examples/tracing"
+    "examples/tracing",
+    "examples/webserver-custom",
+    "examples/live-dashboard"
   ]
 }
