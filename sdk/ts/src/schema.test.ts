@@ -70,3 +70,11 @@ test("decode rejects an invalid payload before returning", () => {
     ValidationError,
   );
 });
+
+test("two distinct schema objects sharing an $id do not collide", () => {
+  // ajv keys schemas by $id; without addUsedSchema:false the second compile would throw
+  // "schema with key or id already exists".
+  const mk = () => ({ $id: "dup.json", type: "object", required: ["a"], properties: { a: { type: "number" } } });
+  expect(() => validate(mk(), { a: 1 })).not.toThrow();
+  expect(() => validate(mk(), { a: 2 })).not.toThrow();
+});

@@ -8,7 +8,10 @@
 import Ajv2020, { type ValidateFunction, type ErrorObject } from "ajv/dist/2020";
 import addFormats from "ajv-formats";
 
-const ajv = new Ajv2020({ allErrors: true, strict: false });
+// addUsedSchema:false keeps ajv from registering each compiled schema by its $id, so two
+// distinct schema objects that share an $id do not collide with a "schema already exists"
+// error. Memoization is our concern, handled by the WeakMap below.
+const ajv = new Ajv2020({ allErrors: true, strict: false, addUsedSchema: false });
 addFormats(ajv);
 
 // Compiled validators are cached by schema identity, so revalidating with the same schema
