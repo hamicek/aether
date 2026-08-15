@@ -1,0 +1,14 @@
+# HUB uzel - centrala. Lord se pripoji na lokalni HUB NATS (:7390, account HUB
+# pres no_auth_user) a supervizuje gateway thrall. Gateway na `check` vola obe
+# sajty cross-node. Spousti se: aether up -f aether-hub.toml (ze spike rootu).
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7390"
+
+[[thrall]]
+name    = "gateway"
+cmd     = "./bin/gateway"
+restart = "permanent"
