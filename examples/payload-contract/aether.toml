@@ -18,3 +18,11 @@ name = "driver"
 cmd  = "../../bin/contract-driver"
 restart = "transient"
 scope   = "local"
+
+# The HTTP edge validates POSTed measurements against the same schema before they reach the ether:
+# a malformed body gets a 400 naming the field, a valid one is cast to the BFF. Same contract, a
+# third consumer (an external HTTP client) - not a separate mechanism.
+[[edge.http]]
+name = "api"
+addr = ":7391"
+route."POST /ingest" = { thrall = "bff", op = "ingest", kind = "cast", schema = "schemas/measurement.schema.json" }

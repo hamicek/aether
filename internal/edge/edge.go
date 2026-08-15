@@ -52,6 +52,10 @@ type Route struct {
 	Thrall string `json:"thrall"`
 	Op     string `json:"op"`
 	Kind   string `json:"kind"` // call (wait for reply) | cast (fire-and-forget)
+	// SchemaJSON is the inlined JSON Schema content (empty = no schema validation). The lord reads
+	// and compile-checks the file at manifest load and inlines it here, so the edge process does
+	// not depend on a filesystem path or its working directory.
+	SchemaJSON string `json:"schemaJson,omitempty"`
 }
 
 // Router resolves an incoming request's method and path to a configured route.

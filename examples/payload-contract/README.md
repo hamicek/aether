@@ -42,6 +42,29 @@ cd examples/payload-contract
 bun test           # decode() accepts a valid measurement and rejects malformed ones, via the schema file
 ```
 
+## HTTP edge boundary
+
+The manifest also exposes an HTTP edge that validates POSTed measurements against the same schema
+**before they reach the ether** - a malformed body never enters the system. With the demo running:
+
+```bash
+# valid measurement -> 202, cast to the bff
+curl -i -X POST -H 'Content-Type: application/json' \
+  -d '{"siteId":"s-9","metric":"current","value":10.0,"ts":1}' \
+  http://127.0.0.1:7391/ingest
+
+# malformed measurement -> 400 at the edge, naming the offending field
+curl -i -X POST -H 'Content-Type: application/json' \
+  -d '{"siteId":"s-9","metric":"pressure","value":10.0,"ts":1}' \
+  http://127.0.0.1:7391/ingest
+# HTTP/1.1 400 Bad Request
+# payload does not match schema: /metric: value must be one of 'voltage', 'current', 'temperature'
+```
+
+The route opts in with a `schema` field (`aether.toml`); a route without one keeps the plain
+valid-JSON check. It is the same contract as the driver and bff - a third consumer, not a new
+mechanism.
+
 ## Codegen
 
 The native types live in `gen/`, generated from `schemas/`:

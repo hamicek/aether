@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/singleton"
 	"github.com/hamicek/aether/internal/wire"
+	"github.com/hamicek/aether/sdk/go/schema"
 )
 
 // edgeCallTimeout bounds how long a synchronous (call) route waits for the target thrall's reply
@@ -123,9 +125,25 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
 			return
 		}
-		// The payload is forwarded verbatim as the envelope body, so it must be JSON. Reject early
-		// with a clear message rather than leaking a marshal error later.
-		if len(body) > 0 && !json.Valid(body) {
+		// The payload is forwarded verbatim as the envelope body. When the route carries a schema
+		// the edge is a real boundary: reject a malformed body with a precise 400 naming the
+		// offending field, before anything reaches the ether. Otherwise fall back to a
+		// well-formed-JSON check so a marshal error does not leak downstream.
+		if route.SchemaJSON != "" {
+			if len(body) == 0 {
+				http.Error(w, "request body is required and must match the route schema", http.StatusBadRequest)
+				return
+			}
+			if err := schema.Validate([]byte(route.SchemaJSON), body); err != nil {
+				var ve *schema.ValidationError
+				if errors.As(err, &ve) {
+					http.Error(w, ve.Error(), http.StatusBadRequest)
+				} else {
+					http.Error(w, "request body: "+err.Error(), http.StatusBadRequest)
+				}
+				return
+			}
+		} else if len(body) > 0 && !json.Valid(body) {
 			http.Error(w, "request body must be valid JSON", http.StatusBadRequest)
 			return
 		}
