@@ -9,6 +9,8 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "nats": "^2.28.0"
   },
   "devDependencies": {
