@@ -37,3 +37,18 @@ jobs:
       - run: pip install nats-py aiohttp fastjsonschema
       - run: python -m unittest discover -p '*_test.py'
         working-directory: sdk/python
+
+  # The generated contract types (examples/payload-contract/gen) are derived from the schemas.
+  # Regenerate into a temp dir and fail if it differs from what is committed, so a schema change
+  # without a regeneration cannot merge. See PAYLOAD-CONTRACT.md (AE-042 §5).
+  codegen-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+      - uses: oven-sh/setup-bun@v2
+      - run: ./codegen.sh "$RUNNER_TEMP/gen"
+        working-directory: examples/payload-contract
+      - run: diff -ru examples/payload-contract/gen "$RUNNER_TEMP/gen"
