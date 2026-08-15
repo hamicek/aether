@@ -276,6 +276,21 @@ func TestEdgeHandlerSchemaValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("empty body on a schema route is a clear 400", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/ingest", "application/json", strings.NewReader(""))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "required") {
+			t.Fatalf("body = %q, want a clear 'body required' message", body)
+		}
+	})
+
 	t.Run("route without a schema keeps the valid-JSON check", func(t *testing.T) {
 		resp, err := http.Post(srv.URL+"/raw", "text/plain", strings.NewReader("not json"))
 		if err != nil {

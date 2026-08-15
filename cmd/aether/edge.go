@@ -130,6 +130,10 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		// offending field, before anything reaches the ether. Otherwise fall back to a
 		// well-formed-JSON check so a marshal error does not leak downstream.
 		if route.SchemaJSON != "" {
+			if len(body) == 0 {
+				http.Error(w, "request body is required and must match the route schema", http.StatusBadRequest)
+				return
+			}
 			if err := schema.Validate([]byte(route.SchemaJSON), body); err != nil {
 				var ve *schema.ValidationError
 				if errors.As(err, &ve) {
