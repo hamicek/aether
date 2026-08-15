@@ -3,5 +3,8 @@
   "private": true,
   "dependencies": {
     "@hamicek/aether": "workspace:*"
+  },
+  "devDependencies": {
+    "json-schema-to-typescript": "15.0.4"
   }
 }

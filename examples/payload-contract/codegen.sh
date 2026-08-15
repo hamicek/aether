@@ -10,9 +10,12 @@ cd "$(dirname "$0")"
 
 OUT="${1:-gen}"
 
-# Pinned tool versions keep the generated output stable, so the drift diff is meaningful.
+# Deterministic output is what makes the drift diff meaningful. The Go generator is pinned by
+# version (pure Go, output is environment-independent). The TS generator is pinned by the exact
+# devDependency in this package's package.json, so bun.lock freezes its whole tree (prettier
+# included) - run `bun install` first, then codegen uses the frozen local version, not a fresh
+# on-the-fly resolution that could format differently on another machine.
 GO_JSONSCHEMA="github.com/atombender/go-jsonschema@v0.24.1"
-JSON2TS="json-schema-to-typescript@15.0.4"
 
 mkdir -p "$OUT/go" "$OUT/ts"
 for schema in schemas/*.schema.json; do
@@ -20,5 +23,5 @@ for schema in schemas/*.schema.json; do
   go run "$GO_JSONSCHEMA" \
     --package contract --only-models --struct-name-from-title --tags json \
     "$schema" >"$OUT/go/${base}.go"
-  bunx --bun "$JSON2TS" "$schema" >"$OUT/ts/${base}.ts"
+  bunx json-schema-to-typescript "$schema" >"$OUT/ts/${base}.ts"
 done
