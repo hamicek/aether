@@ -1,0 +1,20 @@
+app = "contract-demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# The BFF (TS) validates every incoming measurement against the shared schema at its boundary.
+[[thrall]]
+name = "bff"
+cmd  = "bun run ./bff.ts"
+restart = "permanent"
+scope   = "local"
+
+# The driver (Go) produces measurements against the same schema and casts them to the BFF.
+[[thrall]]
+name = "driver"
+cmd  = "../../bin/contract-driver"
+restart = "transient"
+scope   = "local"

@@ -41,6 +41,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/payload-contract": {
+      "name": "payload-contract-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/scada-spike": {
       "name": "scada-spike-example",
       "dependencies": {
@@ -105,6 +111,8 @@
     "nats": ["nats@2.29.3", "", { "dependencies": { "nkeys.js": "1.1.0" } }, "sha512-tOQCRCwC74DgBTk4pWZ9V45sk4d7peoE2njVprMRCBXrhJ5q5cYM7i6W+Uvw2qUrcfOSnuisrX7bEx3b3Wx4QA=="],
 
     "nkeys.js": ["nkeys.js@1.1.0", "", { "dependencies": { "tweetnacl": "1.0.3" } }, "sha512-tB/a0shZL5UZWSwsoeyqfTszONTt4k2YS0tuQioMOD180+MbombYVgzDUYHlx+gejYK6rgf08n/2Df99WY0Sxg=="],
+
+    "payload-contract-example": ["payload-contract-example@workspace:examples/payload-contract"],
 
     "require-from-string": ["require-from-string@2.0.2", "", {}, "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw=="],
 
