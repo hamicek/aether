@@ -1,0 +1,7 @@
+{
+  "name": "payload-contract-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}

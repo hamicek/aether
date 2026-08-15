@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "measurement.schema.json",
+  "title": "Measurement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["siteId", "metric", "value", "ts"],
+  "properties": {
+    "siteId": { "type": "string", "minLength": 1 },
+    "metric": { "type": "string", "enum": ["voltage", "current", "temperature"] },
+    "value": { "type": "number" },
+    "unit": { "type": "string" },
+    "ts": { "type": "integer", "description": "unix millis" }
+  }
+}
