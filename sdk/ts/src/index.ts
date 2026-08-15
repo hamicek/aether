@@ -17,3 +17,5 @@ export { rebuild, appendEvent } from "./rebuild";
 export { heartbeatIntervalMs } from "./heartbeat";
 export { startFencing, fenceConfigFromEnv } from "./fencing";
 export type { FenceConfig, FenceOptions } from "./fencing";
+export { validate, decode, ValidationError } from "./schema";
+export type { Problem } from "./schema";
