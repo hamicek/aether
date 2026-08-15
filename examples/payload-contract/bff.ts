@@ -1,19 +1,12 @@
 import { defThrall, start, decode, ValidationError } from "@hamicek/aether";
 import measurementSchema from "./schemas/measurement.schema.json";
+import type { Measurement } from "./gen/ts/measurement";
 
 // The BFF is the trust boundary: measurements arrive from the driver as untyped `unknown`
 // payloads, and the BFF validates each one against the shared schema before it counts. This
 // is the payload contract in use - the same measurement.schema.json the producer is built
-// against. See PAYLOAD-CONTRACT.md (AE-042).
-
-// Hand-written for the PoC; the codegen follow-up (AE-042 §8, bundle 2) generates this.
-interface Measurement {
-  siteId: string;
-  metric: "voltage" | "current" | "temperature";
-  value: number;
-  unit?: string;
-  ts: number;
-}
+// against, with the Measurement type generated from it (see codegen.sh). PAYLOAD-CONTRACT.md
+// (AE-042).
 
 const bff = defThrall<number>({
   name: "bff",
