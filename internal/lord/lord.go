@@ -191,7 +191,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 func edgeSpecToRuntime(e EdgeHTTPSpec) edge.Spec {
 	routes := make(map[string]edge.Route, len(e.Routes))
 	for key, r := range e.Routes {
-		routes[key] = edge.Route{Thrall: r.Thrall, Op: r.Op, Kind: r.Kind}
+		routes[key] = edge.Route{Thrall: r.Thrall, Op: r.Op, Kind: r.Kind, SchemaJSON: r.schemaJSON}
 	}
 	return edge.Spec{Name: e.Name, Addr: e.Addr, Routes: routes}
 }

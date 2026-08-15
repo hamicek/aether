@@ -199,3 +199,94 @@ route."GET v" = { thrall = "c", op = "v" }
 		})
 	}
 }
+
+// writeFile writes body to name inside dir (helper for schema-alongside-manifest tests).
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return p
+}
+
+const measurementSchemaJSON = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["value"],
+  "properties": { "value": { "type": "number" } }
+}`
+
+// TestLoadManifestEdgeSchemaInlined: an edge route's schema path is resolved relative to the
+// manifest, its content read and compile-checked at load, and inlined into the runtime spec.
+func TestLoadManifestEdgeSchemaInlined(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "measurement.schema.json", measurementSchemaJSON)
+	path := writeFile(t, dir, "aether.toml", `
+app = "demo"
+
+[[thrall]]
+name = "worker"
+cmd  = "run worker"
+
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."POST /ingest" = { thrall = "worker", op = "ingest", kind = "cast", schema = "measurement.schema.json" }
+`)
+
+	m, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if got := m.Edge.HTTP[0].Routes["POST /ingest"].schemaJSON; got == "" {
+		t.Fatal("schema content was not inlined into the route")
+	}
+	// and it is carried into the runtime spec the edge process receives
+	rt := edgeSpecToRuntime(m.Edge.HTTP[0])
+	if rt.Routes["POST /ingest"].SchemaJSON == "" {
+		t.Fatal("schema content was not carried into the runtime edge spec")
+	}
+	// a route without a schema stays empty
+	if got := edgeSpecToRuntime(m.Edge.HTTP[0]).Routes["POST /ingest"].SchemaJSON; got == "" {
+		t.Fatal("expected the ingest route to carry a schema")
+	}
+}
+
+// TestLoadManifestEdgeSchemaFailFast: a missing or invalid schema fails the load, not the first request.
+func TestLoadManifestEdgeSchemaFailFast(t *testing.T) {
+	t.Run("missing file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeFile(t, dir, "aether.toml", `
+app = "demo"
+[[thrall]]
+name = "worker"
+cmd  = "run worker"
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."POST /x" = { thrall = "worker", op = "x", kind = "cast", schema = "nope.json" }
+`)
+		if _, err := LoadManifest(path); err == nil {
+			t.Fatal("expected LoadManifest to fail for a missing schema file")
+		}
+	})
+	t.Run("invalid schema", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, dir, "bad.json", `{"type": 123}`)
+		path := writeFile(t, dir, "aether.toml", `
+app = "demo"
+[[thrall]]
+name = "worker"
+cmd  = "run worker"
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."POST /x" = { thrall = "worker", op = "x", kind = "cast", schema = "bad.json" }
+`)
+		if _, err := LoadManifest(path); err == nil {
+			t.Fatal("expected LoadManifest to fail for an invalid schema")
+		}
+	})
+}
