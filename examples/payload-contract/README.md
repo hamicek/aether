@@ -1,12 +1,15 @@
 # payload-contract - shared schema across languages (PoC)
 
-Proof of ergonomics for the payload contract (AE-042 §8, bundle 1). One shared JSON Schema,
+Proof of ergonomics for the payload contract (AE-042). One shared JSON Schema,
 `schemas/measurement.schema.json`, used on both sides of a boundary in two languages:
 
 - **driver (Go)** produces typed `Measurement` values and casts them to the BFF.
 - **bff (TS)** validates every incoming measurement against the same schema with `decode()`
   at its boundary, before it counts. A valid measurement passes as a typed value; a malformed
   one is rejected with a clear reason and never pollutes state.
+
+The `Measurement` type on both sides is **generated from the schema** (see [Codegen](#codegen)),
+so the producer and consumer types cannot drift from the contract.
 
 The runtime is untouched: the payload stays untyped on the wire, and validation is an opt-in
 call the BFF makes at the boundary it owns - not something the transport enforces.
@@ -39,8 +42,25 @@ cd examples/payload-contract
 bun test           # decode() accepts a valid measurement and rejects malformed ones, via the schema file
 ```
 
-## What the codegen follow-up changes
+## Codegen
 
-The `Measurement` types here are hand-written on both sides. Bundle 2 (AE-042 §8) generates
-them from `schemas/measurement.schema.json`, so the producer and consumer types cannot drift
-from the schema.
+The native types live in `gen/`, generated from `schemas/`:
+
+```
+schemas/measurement.schema.json     # source of truth
+gen/go/measurement.go               # generated Go struct  (package contract)
+gen/ts/measurement.ts               # generated TS interface
+```
+
+`gen/` is a **derived, committed artifact** - do not edit it by hand. After changing a schema,
+regenerate and commit:
+
+```bash
+cd examples/payload-contract
+./codegen.sh          # go-jsonschema + json-schema-to-typescript, versions pinned in the script
+```
+
+CI enforces this: the `codegen-drift` job regenerates into a temp dir and diffs against the
+committed `gen/`, so a schema change that is not followed by a regeneration fails the build.
+Generating for other languages (e.g. a Python dataclass) is added when a consumer in that
+language needs it.
