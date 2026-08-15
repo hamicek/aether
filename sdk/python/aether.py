@@ -1387,3 +1387,87 @@ class SSEStream:
             for sub in subs:
                 await sub.unsubscribe()
         return resp
+
+
+# --- payload contract: opt-in schema validation (mirrors sdk/go/schema and sdk/ts/schema.ts) ---
+#
+# Validate a payload against a JSON Schema at an application boundary, and decode it into a
+# native value in one step. Deliberately outside the transport: the runtime stays untyped,
+# the payload stays Any on the wire, and nothing here is wired into call/cast. The application
+# calls validate/decode explicitly, at the boundary it owns. See PAYLOAD-CONTRACT.md (AE-042).
+
+
+@dataclass
+class Problem:
+    """One schema violation: the JSON Pointer path to the offending value and a message."""
+
+    path: str
+    message: str
+
+
+class ValidationError(Exception):
+    """Raised by validate/decode when a payload does not match its schema."""
+
+    def __init__(self, problems: list[Problem]):
+        self.problems = problems
+        detail = "; ".join(f"{p.path or '(root)'}: {p.message}" for p in problems)
+        super().__init__(f"payload does not match schema: {detail}")
+
+
+_schema_cache: dict[str, Any] = {}
+
+
+def _require_fastjsonschema():
+    try:
+        import fastjsonschema
+    except ImportError as e:  # opt-in dependency: only importers of the helper need it
+        raise ImportError(
+            "the aether schema helper needs 'fastjsonschema' (pip install fastjsonschema)"
+        ) from e
+    return fastjsonschema
+
+
+def _as_obj(x: Any) -> Any:
+    if isinstance(x, (bytes, bytearray)):
+        return json.loads(x)
+    if isinstance(x, str):
+        return json.loads(x)
+    return x
+
+
+def _compiled(schema: Any):
+    schema_obj = _as_obj(schema)
+    key = json.dumps(schema_obj, sort_keys=True)
+    fn = _schema_cache.get(key)
+    if fn is None:
+        fn = _require_fastjsonschema().compile(schema_obj)
+        _schema_cache[key] = fn
+    return fn
+
+
+def validate(schema: Any, payload: Any) -> None:
+    """Validate payload against schema; raises ValidationError with the offending path.
+
+    The compiled schema is cached by content, so repeated calls with the same schema do not
+    recompile it. `schema` and `payload` may be a dict/list or JSON bytes/str.
+    """
+    fastjsonschema = _require_fastjsonschema()
+    fn = _compiled(schema)
+    try:
+        fn(_as_obj(payload))
+    except fastjsonschema.JsonSchemaValueException as e:
+        # e.path is like ["data", "metric"]; the leading root variable is dropped so the
+        # pointer matches the Go/TS helpers ("/metric", "" for the document root).
+        pointer = "/" + "/".join(str(p) for p in e.path[1:]) if len(e.path) > 1 else ""
+        raise ValidationError([Problem(path=pointer, message=e.message)]) from None
+
+
+def decode(schema: Any, payload: Any) -> Any:
+    """Validate payload against schema and return it as a native value (dict/list).
+
+    The ergonomic boundary call: one step yields a trusted value. (A generated dataclass is
+    the codegen follow-up; here decode returns the validated JSON value.)
+    """
+    data = _as_obj(payload)
+    validate(schema, data)
+    return data
