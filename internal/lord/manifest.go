@@ -3,12 +3,15 @@ package lord
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 
 	"github.com/hamicek/aether/internal/ether"
 	"github.com/hamicek/aether/internal/obs"
+	"github.com/hamicek/aether/sdk/go/schema"
 )
 
 // Manifest = the contents of aether.toml (the supervision tree topology).
@@ -70,6 +73,14 @@ type EdgeRoute struct {
 	Thrall string `toml:"thrall"` // target thrall name
 	Op     string `toml:"op"`     // operation invoked on the thrall
 	Kind   string `toml:"kind"`   // call (wait for reply -> body) | cast (fire-and-forget -> 202); default call
+	// Schema is an optional path to a JSON Schema (relative to the manifest). When set, the edge
+	// validates the request body against it and rejects a malformed body with a 400 before the
+	// message reaches the ether. Empty = today's "is it valid JSON" check only.
+	Schema string `toml:"schema"`
+
+	// schemaJSON is the schema's content, read and compile-checked at manifest load (so a bad
+	// schema fails fast) and inlined into the runtime spec - the edge process does not re-read it.
+	schemaJSON string
 }
 
 // ThrallSpec = a single child in the manifest.
@@ -98,7 +109,34 @@ func LoadManifest(path string) (*Manifest, error) {
 	if err := m.validate(); err != nil {
 		return nil, err
 	}
+	if err := m.loadEdgeSchemas(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	return &m, nil
+}
+
+// loadEdgeSchemas resolves each edge route's optional schema path (relative to the manifest),
+// reads it, and compile-checks it, so a missing or invalid schema fails the load rather than the
+// first request or a spawned edge process. The content is inlined into the route for transport.
+func (m *Manifest) loadEdgeSchemas(dir string) error {
+	for i := range m.Edge.HTTP {
+		spec := &m.Edge.HTTP[i]
+		for key, route := range spec.Routes {
+			if route.Schema == "" {
+				continue
+			}
+			content, err := os.ReadFile(filepath.Join(dir, route.Schema))
+			if err != nil {
+				return fmt.Errorf("edge %q route %q: schema: %w", spec.Name, key, err)
+			}
+			if _, err := schema.Compile(content); err != nil {
+				return fmt.Errorf("edge %q route %q: schema %q: %w", spec.Name, key, route.Schema, err)
+			}
+			route.schemaJSON = string(content)
+			spec.Routes[key] = route // map values are copies; write the filled route back
+		}
+	}
+	return nil
 }
 
 func (m *Manifest) applyDefaults() {

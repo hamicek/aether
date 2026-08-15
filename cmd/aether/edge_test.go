@@ -183,3 +183,126 @@ func get(t *testing.T, url string) (int, string) {
 	body, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body)
 }
+
+const edgeMeasurementSchema = `{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["siteId", "metric", "value", "ts"],
+  "properties": {
+    "siteId": { "type": "string", "minLength": 1 },
+    "metric": { "type": "string", "enum": ["voltage", "current", "temperature"] },
+    "value":  { "type": "number" },
+    "ts":     { "type": "integer" }
+  }
+}`
+
+// TestEdgeHandlerSchemaValidation: a route carrying a schema validates the body against it and
+// rejects a malformed one with a 400 naming the offending field, before anything reaches the
+// ether. A route without a schema keeps the plain valid-JSON check.
+func TestEdgeHandlerSchemaValidation(t *testing.T) {
+	const app = "demo"
+
+	eth, err := ether.Start(context.Background(), ether.Config{Mode: "embedded"})
+	if err != nil {
+		t.Fatalf("ether.Start: %v", err)
+	}
+	t.Cleanup(eth.Stop)
+	nc, err := nats.Connect(eth.URL())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(nc.Close)
+
+	gotCast := make(chan wire.Envelope, 1)
+	if _, err := nc.Subscribe(wire.Cast(app, "bff"), func(m *nats.Msg) {
+		var env wire.Envelope
+		_ = json.Unmarshal(m.Data, &env)
+		gotCast <- env
+	}); err != nil {
+		t.Fatalf("subscribe cast: %v", err)
+	}
+	_ = nc.Flush()
+
+	spec := edge.Spec{
+		Name: "api",
+		Addr: ":0",
+		Routes: map[string]edge.Route{
+			"POST /ingest": {Thrall: "bff", Op: "ingest", Kind: "cast", SchemaJSON: edgeMeasurementSchema},
+			"POST /raw":    {Thrall: "bff", Op: "ingest", Kind: "cast"}, // no schema
+		},
+	}
+	srv := httptest.NewServer(edgeHandler(nc, app, edge.NewRouter(spec), time.Second, obs.NewLogger()))
+	t.Cleanup(srv.Close)
+
+	t.Run("valid measurement is accepted and forwarded", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/ingest", "application/json",
+			strings.NewReader(`{"siteId":"s-1","metric":"voltage","value":231.4,"ts":1}`))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusAccepted {
+			t.Fatalf("status = %d, want 202", resp.StatusCode)
+		}
+		select {
+		case env := <-gotCast:
+			if env.Op != "ingest" {
+				t.Fatalf("cast op = %q, want ingest", env.Op)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("valid measurement was not delivered to the ether")
+		}
+	})
+
+	t.Run("malformed measurement is rejected with the field path and not forwarded", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/ingest", "application/json",
+			strings.NewReader(`{"siteId":"s-1","metric":"pressure","value":1,"ts":1}`)) // metric out of enum
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "/metric") {
+			t.Fatalf("body = %q, want the offending field path /metric", body)
+		}
+		select {
+		case <-gotCast:
+			t.Fatal("a rejected body reached the ether")
+		case <-time.After(200 * time.Millisecond):
+		}
+	})
+
+	t.Run("empty body on a schema route is a clear 400", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/ingest", "application/json", strings.NewReader(""))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "required") {
+			t.Fatalf("body = %q, want a clear 'body required' message", body)
+		}
+	})
+
+	t.Run("route without a schema keeps the valid-JSON check", func(t *testing.T) {
+		resp, err := http.Post(srv.URL+"/raw", "text/plain", strings.NewReader("not json"))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", resp.StatusCode)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "valid JSON") {
+			t.Fatalf("body = %q, want a clear JSON error", body)
+		}
+	})
+}
