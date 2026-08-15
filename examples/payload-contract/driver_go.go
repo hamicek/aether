@@ -10,17 +10,9 @@ import (
 	"log"
 	"time"
 
+	contract "github.com/hamicek/aether/examples/payload-contract/gen/go"
 	"github.com/hamicek/aether/sdk/go/thrall"
 )
-
-// Hand-written for the PoC; the codegen follow-up (AE-042 §8, bundle 2) generates this.
-type Measurement struct {
-	SiteID string  `json:"siteId"`
-	Metric string  `json:"metric"`
-	Value  float64 `json:"value"`
-	Unit   string  `json:"unit,omitempty"`
-	TS     int64   `json:"ts"`
-}
 
 func main() {
 	def := thrall.Def[int]{
@@ -44,9 +36,12 @@ func produce(ctx *thrall.Ctx) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	valid := []Measurement{
-		{SiteID: "s-1", Metric: "voltage", Value: 231.4, Unit: "V", TS: time.Now().UnixMilli()},
-		{SiteID: "s-2", Metric: "current", Value: 12.5, Unit: "A", TS: time.Now().UnixMilli()},
+	// contract.Measurement is generated from schemas/measurement.schema.json (see codegen.sh).
+	volts, amps := "V", "A"
+	now := int(time.Now().UnixMilli())
+	valid := []contract.Measurement{
+		{SiteId: "s-1", Metric: contract.MeasurementMetricVoltage, Value: 231.4, Unit: &volts, Ts: now},
+		{SiteId: "s-2", Metric: contract.MeasurementMetricCurrent, Value: 12.5, Unit: &amps, Ts: now},
 	}
 	for _, m := range valid {
 		if err := ctx.Cast("bff", "ingest", m); err != nil {
