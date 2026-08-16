@@ -37,15 +37,16 @@ Hub client `7390`, hub leaf `7391`, spoke-A `7392`, spoke-B `7393` (aether dev b
 
 ## Manual checks
 
-While the servers are up you can inspect the topology directly:
+While the servers are up you can inspect the topology directly (paths are
+repo-root-relative; the script builds its own `aether` into the spike's `bin/`):
 
 ```
 # leaf connections established (hub side)
 grep -i leafnode examples/hub-spoke-spike/.run/hub.log
 
 # center reaches a site; flags come BEFORE the positional args
-bin/aether call --url nats://127.0.0.1:7390 --app demo counterA get
+examples/hub-spoke-spike/bin/aether call --url nats://127.0.0.1:7390 --app demo counterA get
 
 # a site cannot reach a foreign site (no responders)
-bin/aether call --url nats://127.0.0.1:7392 --app demo counterB get
+examples/hub-spoke-spike/bin/aether call --url nats://127.0.0.1:7392 --app demo counterB get
 ```

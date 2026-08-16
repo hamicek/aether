@@ -40,8 +40,8 @@ cleanup() {
   for pid in "${pids[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
   done
-  # dej lordum cas na graceful drain thrallu (sigtermGrace ~2s), pak dorazi zbytek
-  sleep 3
+  # dej lordum cas na graceful drain thrallu (drain ceiling ~5s), pak dorazi zbytek
+  sleep 6
   for pid in "${pids[@]:-}"; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
   done
@@ -57,6 +57,8 @@ echo "==> build (aether, counter, gateway, probe)"
 aether="$sp/bin/aether"
 
 # --- helpers -----------------------------------------------------------------
+# wait_for ceka na vyskyt vzoru v logu. Vzory nize jsou znenim logu nats-serveru
+# (pinnuty dev binar, viz CLAUDE.md); pri upgrade nats-serveru je overit.
 wait_for() { # <soubor> <vzor> <timeout_s>
   local file="$1" pat="$2" limit="${3:-10}" waited=0
   while ! grep -q "$pat" "$file" 2>/dev/null; do
@@ -131,19 +133,26 @@ poll_value "$spb" counterB 5 || echo "  varovani: counterB se neustalil na 5"
 
 # --- 1) DISTRIBUCE -----------------------------------------------------------
 echo "==> 1) DISTRIBUCE: centrala cte obe sajty cross-node"
+# gateway.check dela dva sekvencni cross-node cally (2s kazdy) -> outer timeout 5s
 check "gateway.check vidi obe sajty" \
   '{"counterA":3,"counterB":5}' \
-  "$("$aether" call --url "$hub" --app demo --timeout 3s gateway check)"
+  "$("$aether" call --url "$hub" --app demo --timeout 5s gateway check)"
 check "primy call hub -> counterA" 3 "$("$aether" call --url "$hub" --app demo --timeout 3s counterA get)"
 check "primy call hub -> counterB" 5 "$("$aether" call --url "$hub" --app demo --timeout 3s counterB get)"
 
 # --- 2) IZOLACE negativni ----------------------------------------------------
+# Rozlisujeme tri vysledky: uspech = izolace porusena; "no responders" = spravna
+# izolace; jina chyba (timeout/spojeni) = neprukazne -> FAIL, at nas maskovana
+# chyba nesvede k falesnemu PASS.
 echo "==> 2) IZOLACE(-): sajta A nedosahne na counterB"
-if "$aether" call --url "$spa" --app demo --timeout 2s counterB get >/dev/null 2>&1; then
-  echo "  FAIL  sajta A DOSAHLA na counterB (izolace porusena)"
+if iso_out="$("$aether" call --url "$spa" --app demo --timeout 2s counterB get 2>&1)"; then
+  echo "  FAIL  sajta A DOSAHLA na counterB (izolace porusena): $iso_out"
   failures=$((failures + 1))
-else
+elif printf '%s' "$iso_out" | grep -qi "no responders"; then
   echo "  PASS  sajta A -> counterB odmitnuto (no responders)"
+else
+  echo "  FAIL  neprukazne: ocekavano 'no responders', ziskano: $iso_out"
+  failures=$((failures + 1))
 fi
 
 # --- 3) IZOLACE pozitivni (odposlech) ----------------------------------------
