@@ -1,4 +1,5 @@
-# Build artefakty a runtime data spiku (generuje scripts/hub-spoke-spike.sh).
+# Build artefakty a runtime data spiku (generuji scripts/hub-spoke-*.sh).
 /bin/
 /.run/
+/.run-resilience/
 .aether-endpoint

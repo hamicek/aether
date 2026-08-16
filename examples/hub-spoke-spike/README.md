@@ -6,19 +6,23 @@ nodes** with **account** isolation. It proves that the center can reach both sit
 cross-node while the sites cannot see each other.
 
 This is a topology/verification spike, not product code - it lives entirely in this
-directory plus `scripts/hub-spoke-spike.sh`, and it is out of CI (it runs live servers).
-Read **REPORT.md** for the verdict and findings.
+directory plus `scripts/hub-spoke-spike.sh` (happy path) and `scripts/hub-spoke-resilience.sh`
+(failure), and it is out of CI (it runs live servers). Read **REPORT.md** for the
+distribution/isolation verdict and **RESILIENCE.md** for the behaviour under failure.
 
 ## Run
 
 ```
-scripts/hub-spoke-spike.sh
+scripts/hub-spoke-spike.sh        # distribution + isolation (AE-051)
+scripts/hub-spoke-resilience.sh   # center outage + site lord death (AE-053)
 ```
 
-It builds the binaries, starts three `nats-server` instances and three lords, seeds the
-site counters, asserts distribution and isolation, and tears everything down. Exit 0
-means every assertion passed. Requires `nats-server` on PATH (see the repo CLAUDE.md,
-"External NATS pro dev").
+`hub-spoke-spike.sh` builds the binaries, starts three `nats-server` instances and three
+lords, seeds the site counters, asserts distribution and isolation, and tears everything
+down. `hub-spoke-resilience.sh` reuses the same topology and injects failure: it asserts
+that a site keeps serving while the hub is down and recovers on reconnect, and that a
+site lord's death is fenced to its own node. Exit 0 means every assertion passed. Both
+require `nats-server` on PATH (see the repo CLAUDE.md, "External NATS pro dev").
 
 ## Layout
 
