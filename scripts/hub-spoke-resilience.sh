@@ -45,8 +45,11 @@ cleanup() {
   for pid in "${pids[@]:-}"; do
     [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null || true
   done
-  # defenzivni sweep: orphan thrally po zabitem lordu (scenar 2) nejsou v pids
-  pkill -9 -f "$sp/bin/" 2>/dev/null || true
+  # defenzivni sweep: orphan thrally po SIGKILL lorda (scenar 2) nejsou v pids.
+  # Lord je spousti relativne (`sh -c ./bin/counter`, cwd = $sp), takze cmdline
+  # NEobsahuje absolutni $sp/bin/ - matchujeme relativni jmena binarek.
+  pkill -9 -f 'bin/counter' 2>/dev/null || true
+  pkill -9 -f 'bin/gateway' 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -146,8 +149,8 @@ wait_for "$run/up-sb.log"  "thrall ready" 15
 echo "  vsechny thrally on the bus"
 
 echo "==> seed: counterA += 3, counterB += 5"
-for _ in 1 2 3;     do "$aether" cast --url "$spa" --app demo counterA inc >/dev/null; done
-for _ in 1 2 3 4 5; do "$aether" cast --url "$spb" --app demo counterB inc >/dev/null; done
+for _ in 1 2 3;     do "$aether" cast --url "$spa" --app demo counterA inc >/dev/null || true; done
+for _ in 1 2 3 4 5; do "$aether" cast --url "$spb" --app demo counterB inc >/dev/null || true; done
 poll_reach "$spa" counterA 3 || echo "  varovani: counterA se neustalil"
 poll_reach "$spb" counterB 5 || echo "  varovani: counterB se neustalil"
 

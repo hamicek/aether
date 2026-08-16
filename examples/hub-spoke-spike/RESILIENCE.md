@@ -12,13 +12,14 @@ the model needed changing - this is a validation, with no product code touched.
 
 ## What was asserted (`scripts/hub-spoke-resilience.sh`, self-asserting, exit 0; run repeatedly clean)
 
-1. **Center outage + recovery.** With the hub NATS killed, site A still answers a local call
-   (`counterA == 3`) and site B likewise - each site keeps running **cut off from the center**. After
-   the hub NATS is restarted, the leaf links reconnect **on their own** and the center reaches the
-   sites again - recovery was **sub-second** in every run.
+1. **Center outage + recovery.** The center is cut off by killing the hub NATS outright; with it down,
+   site A still answers a local call (`counterA == 3`) and site B likewise - each site keeps running
+   independently of the center. After the hub NATS is restarted, the leaf links reconnect **on their
+   own** and the center reaches the sites again - recovery completed within ~1 second in every run
+   (the script times it to whole-second resolution, always reporting 0-1 s, well inside a 45 s budget).
 2. **Site lord death is bounded.** Killing site A's lord (SIGKILL; the site's NATS stays up) makes
    `counterA` **self-exit** within the lease window (AE-031 lord-liveness fencing) - a call to it then
-   fails with *no responders* - while the **center and site B keep running untouched**.
+   fails (the thrall is gone) - while the **center and site B keep running untouched**.
 
 ## Findings
 
@@ -27,8 +28,8 @@ the model needed changing - this is a validation, with no product code touched.
 Because each site's lord connects to its **own local NATS** (not the hub), losing the hub only drops
 the leaf link; the site's lord and thralls keep serving local traffic. When the hub returns, the
 spokes' leaf remotes reconnect automatically (aether/NATS reconnect, no manual step) and cross-node
-reach is restored in well under a second. This is exactly the SCADA property wanted: a site runs
-through a center/WAN outage and rejoins cleanly.
+reach is restored within ~1 second (whole-second timing). This is exactly the SCADA property wanted:
+a site runs through a center/WAN outage and rejoins cleanly.
 
 ### 2. A lord's death is fenced to its own node
 
