@@ -376,6 +376,49 @@ away would be a mistake - it would take exactly the reliable things we go to NAT
 
 ---
 
+## 11b. Multi-node topology, isolation, and the auth boundary
+
+aether runs across many nodes by keeping the model simple: **one lord per NATS node.** A node is a
+lord plus its own NATS (embedded or a local server); distribution comes from linking the NATS servers
+at the bus layer (**leaf nodes**, clustering, gateways), *not* from running several lords over one
+bus. Two lords never share responsibility for the same app.
+
+**Isolated sites (hub-and-spoke).** A common shape is one central node plus sites that must not see
+one another (e.g. SCADA: a center plus individual sites). This is achieved entirely at the NATS
+layer: each site is a **leaf node bound to its own NATS account**, the hub **imports only each site's
+data plane** (`aether.<app>.<name>.*`), and the sites import nothing from each other. Isolation is
+then **structural** - a site cannot reach or observe another site because accounts are a hard
+boundary, not because application code is careful. A runnable, asserted example is
+`examples/hub-spoke-spike/` (distribution + isolation proven).
+
+**What crosses the node boundary.** Only the data plane (`aether.<app>.<name>.*`) needs to be exported
+across accounts. **Supervision** (`aether._lord.*`) and the KV fencing buckets are provisioned by each
+lord in its own NATS and stay **node-local** - they are never exported, so no supervision traffic
+leaks between sites. This is what makes one-lord-per-node clean. (Two consequences: a cross-node
+`ctx.Call` works transparently only within a *shared app namespace* - it is bound to the caller's app;
+and durable delivery *across* nodes is deliberately deferred - see §14 - because JetStream over leaf
+nodes needs a domain per node and cross-node streams mean mirror/source.)
+
+**The auth boundary.** "A site cannot see another site" and "a client is authorized only for its own
+subjects" are the same statement - authorization lives at the NATS layer, and aether does not
+reimplement it. Auth splits into three layers with a clear boundary:
+
+- **Infra (node ↔ bus)** - who may connect and to which subjects. aether provides the client-side
+  plumbing (nkey/CA from the manifest, injected into thralls; see §9); the bus policy - accounts,
+  exports/imports, subject permissions - is operator-authored NATS configuration. The supervision
+  subjects `aether._lord.>` should be permission-restricted to the lord/thrall users under network
+  exposure (ordinary clients deny them).
+- **Operator (control of aether)** - the dashboard, `/metrics`, and the control channels. This is
+  aether's job (kept small - an auth gate and a permission recipe), not an application concern.
+- **Application users and roles** - login, RBAC, "who may acknowledge this". This is the **domain's**
+  job, above aether. aether offers only the edge plumbing to project an application's own auth onto a
+  subject scope (see §12b), never a user or role model of its own.
+
+In one line: **aether owns the client-side infra plumbing and the control of itself; it does not own
+application identity or roles.**
+
+---
+
 ## 12. Catalog of building blocks (besides the thrall)
 
 **Almost for free (a thin wrapper over NATS), implemented today:**
