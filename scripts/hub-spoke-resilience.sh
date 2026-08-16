@@ -99,6 +99,18 @@ poll_reach() { # <url> <name> <want> [timeout_s]
   done
 }
 
+# poll_gone ceka, az call na <url>/<name> ZACNE selhavat (thrall se sam ukoncil).
+poll_gone() { # <url> <name> [timeout_s]
+  local url="$1" name="$2" limit="${3:-10}" waited=0
+  while "$aether" call --url "$url" --app demo --timeout 2s "$name" get >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    if [ "$waited" -ge "$limit" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 hub="nats://127.0.0.1:7390"
 spa="nats://127.0.0.1:7392"
 spb="nats://127.0.0.1:7393"
@@ -161,6 +173,23 @@ else
   echo "  FAIL  centrala se nezotavila (counterA nedosazitelna po restartu hubu): $(aeq "$hub" counterA)"
   failures=$((failures + 1))
 fi
+
+# --- 2) PAD LORDA SAJTY JE OHRANICENY ---------------------------------------
+echo "==> 2) FENCING: pad lorda sajty A je ohraniceny (AE-031 lord-liveness)"
+check "pred: sajta A obsluhuje counterA" 3 "$(aeq "$spa" counterA)"
+
+echo "  -- SIGKILL lorda sajty A (NATS sajty A bezi dal) --"
+kill -9 "$spa_lord" 2>/dev/null || true
+
+if poll_gone "$spa" counterA 10; then
+  echo "  PASS  counterA se sam ukoncil po smrti sveho lorda (lease self-exit)"
+else
+  echo "  FAIL  counterA odpovida i po smrti lorda (fencing selhal): $(aeq "$spa" counterA)"
+  failures=$((failures + 1))
+fi
+
+check "centrala dosahne na sajtu B (nedotcena)" 5 "$(aeq "$hub" counterB)"
+check "sajta B obsluhuje lokalne (nedotcena)"    5 "$(aeq "$spb" counterB)"
 
 # --- verdikt -----------------------------------------------------------------
 echo
