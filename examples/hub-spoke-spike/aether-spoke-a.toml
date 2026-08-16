@@ -1,0 +1,14 @@
+# SPOKE-A uzel - sajta A. Lord se pripoji na lokalni SPOKE-A NATS (:7392,
+# account SITE_A pres no_auth_user) a supervizuje thrall counterA (counter binar,
+# jmeno z AETHER_NAME injektovaneho lordem). Spousti se: aether up -f aether-spoke-a.toml.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7392"
+
+[[thrall]]
+name    = "counterA"
+cmd     = "./bin/counter"
+restart = "permanent"
