@@ -1,0 +1,13 @@
+# SPOKE-B uzel - sajta B. Symetricke k aether-spoke-a.toml: lokalni SPOKE-B NATS
+# (:7393, account SITE_B), thrall counterB. Spousti se: aether up -f aether-spoke-b.toml.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "external"
+url  = "nats://127.0.0.1:7393"
+
+[[thrall]]
+name    = "counterB"
+cmd     = "./bin/counter"
+restart = "permanent"
