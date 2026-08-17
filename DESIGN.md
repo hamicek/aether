@@ -741,6 +741,18 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   the lord is dead or partitioned and cannot kill the orphan itself. Wired into both the GenServer
   and FSM start paths in all three SDKs. Proven by `TestSoakSingletonOrphanFencing` (kills only the
   lord process, leaving the probe orphaned, and asserts it reaps itself).
+
+  **Honest bar: liveness overlap, not write-exclusivity.** This bounds the window in which two
+  instances are *alive* to the lock TTL - and that is exactly what the soak measures (a count of
+  live processes). It is **not** a strict single-writer guarantee, and a lease plus
+  self-termination can never be (Kleppmann's fencing argument): between the lease expiring - a new
+  holder starting - and the old, e.g. GC-paused, instance *noticing* and self-exiting, the old
+  instance can still issue a write. The guarantee is "at most one live instance, overlap <= TTL",
+  not "exactly one writer". Strict single-writer against a resource requires a **fencing token
+  enforced at that resource**: aether already issues one (the epoch, injected as
+  `AETHER_SINGLETON_EPOCH`) - send it with every write and have the resource reject a lower epoch,
+  so a stale writer is fenced even before it self-terminates. Exposing the epoch to application
+  code ergonomically is a separate, deliberately-deferred enhancement.
 - ~~**Lord-liveness fencing for all thralls**~~ - *implemented (AE-031).* AE-013's "no thrall
   survives its lord" invariant held only for a graceful shutdown, where the lord actively kills its
   children's process groups (`cmd.Cancel` -> group SIGKILL). An external SIGKILL/crash of the lord

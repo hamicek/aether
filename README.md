@@ -37,7 +37,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
-| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock, one instance per cluster + failover |
+| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock + failover: **at most one _live_ instance** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 
@@ -317,9 +317,15 @@ manifest sets `event_log = true`.
 name = "account"
 cmd  = "../../bin/account"
 event_log = true
-# event_log_max_msgs = 100000   # optional bounds on retention
+# event_log_max_msgs = 100000   # optional retention bounds - see the caveat below
 # event_log_max_age_ms = 604800000
 ```
+
+> **Retention vs rebuild.** `Rebuild` folds the *whole* log, and there is no snapshot or
+> compaction (yet). So a retention bound silently truncates the rebuilt state once it purges old
+> events - safe for an audit-only log, wrong as a rebuild source. The lord logs a warning at
+> startup when `event_log` is combined with a bound; leave the log unbounded if you rebuild from
+> it.
 
 A thrall `Append`s domain events as it handles messages, and `Rebuild`s its state from the log
 in `init` (works for both the GenServer and the FSM behaviour, since both have an `init`):
@@ -338,12 +344,33 @@ HandleCast: map[string]thrall.CastFn[account]{
 },
 ```
 
-Replay is ordered and complete (single-writer = append order). Because the mailbox is
-at-least-once, **the fold and handlers must be idempotent** (an event may be replayed). With a
-persistent JetStream (`store_dir` or external), the rebuilt state survives stopping and starting
-`aether up`. Mirrored in all three SDKs (`ctx.append` + `rebuild` in TS/Python). Snapshots and
-compaction are future work - the event log is bounded only by its configured retention. Runnable
+Replay is ordered, and complete as long as retention keeps the whole log (single-writer = append
+order). Because the mailbox is at-least-once, **the fold must be idempotent** (an event may be
+replayed). A *non-idempotent* event (a signed delta, not "set to X") needs more: pass a dedup key
+to `Append` - typically `ctx.MsgID`, the id of the message being handled - so a redelivered
+command does not write the event twice (within the stream's duplicate window). See the
+**command-key pattern** in [DESIGN §13c](./DESIGN.md). With a persistent JetStream (`store_dir` or
+external), the rebuilt state survives stopping and starting `aether up`. Mirrored in all three
+SDKs (`ctx.append` + `rebuild` in TS/Python). Snapshots and compaction are future work. Runnable
 demo: `examples/eventsourced/` (a bank account whose balance survives a restart).
+
+## Singleton fencing (liveness, not write-exclusivity)
+
+A `scope="singleton"` thrall holds a KV-CAS lock, and if it loses that lock (a new holder took it,
+or it cannot reach the KV past the lease) it **self-terminates**. That bounds the window in which
+two instances are *alive* to the lock TTL - which is what the soak suite measures, and what
+lord/orphan failover needs.
+
+It is **not** a strict single-writer guarantee. A lease plus self-termination can never be, per
+[Kleppmann's fencing argument](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html):
+between a lease expiring (a new holder starting) and the old, e.g. GC-paused, instance *noticing*
+and exiting, the old instance can still issue a write. The guarantee is "**at most one live
+instance, overlap ≤ lock TTL**", not "exactly one writer".
+
+If you need strict single-writer against a resource (a PLC, a driver, a DB), enforce a **fencing
+token** at that resource: the lord already stamps a monotonic epoch into the lock and injects it
+as `AETHER_SINGLETON_EPOCH`; send it with every write and have the resource reject a lower epoch,
+so a stale writer is fenced out even if it has not yet self-terminated.
 
 ## Observability
 
@@ -523,7 +550,8 @@ scenario for `default`/`overnight`). The suite measures:
 - **Chaos** - random thralls are `SIGKILL`ed under load; bar: recovery per strategy < 3s, with durable
   delivery lossless through the kills (checked server-side by the stream draining to zero).
 - **Singleton failover** - two lord nodes (OS processes) race for a singleton; the holder's node is
-  killed repeatedly; bar: failover < 5s and never more than one live instance (fencing).
+  killed repeatedly; bar: failover < 5s and never more than one live instance (fencing - a
+  *liveness* bound, not write-exclusivity; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
 - **Graceful drain** - a durable thrall is drained mid-stream and restarted; bar: no work lost.
 
 It ends with a structured report and a **non-zero exit on any bar breach**.
