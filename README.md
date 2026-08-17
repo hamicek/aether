@@ -5,6 +5,11 @@
 A polyglot distributed actor/OTP runtime over NATS. A **lord** (supervisor) spawns
 **thralls** (genservers) as OS processes and lets them communicate in the **ether** (NATS).
 
+If you know OTP, that is all you need: the **lord** is a **supervisor**, a **thrall** is a
+**GenServer** (or a `gen_statem` / `gen_event` behaviour), and the **ether** is the message
+transport. The names are flavor; the model is plain supervision-and-genservers - here over NATS
+and across languages.
+
 The goal: an SDK that makes it very easy to write thralls and run a lord. Not BEAM-scale
 (millions of processes), but tens of processes that communicate reliably - in any language
 and with real OS-process isolation.
