@@ -72,7 +72,10 @@ func move(sign int) thrall.CastFn[account] {
 			return acc, err
 		}
 		event := delta{Delta: sign * d.Delta}
-		if err := ctx.Append(event); err != nil { // persist first (the log is the truth)
+		// Command-key: key the append on the message id so a redelivered cast (same envelope)
+		// does not double-count. A non-idempotent event like a signed delta needs this - the
+		// fold alone cannot tell a replayed event from a genuine second one.
+		if err := ctx.Append(event, thrall.DedupKey(ctx.MsgID)); err != nil { // persist first (the log is the truth)
 			return acc, err
 		}
 		acc.Balance += event.Delta

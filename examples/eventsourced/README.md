@@ -66,3 +66,24 @@ Stop `aether up` (Ctrl-C) and start it again, then read the balance:
 The balance is the same after the restart even though nothing snapshotted the in-memory state -
 it was reconstructed by replaying the appended events. (Deleting `./.aether-store` wipes the
 persisted log, so the next start rebuilds from an empty log back to 0.)
+
+## Command-key (dedup)
+
+Each handler appends with a dedup key derived from the message id
+(`ctx.MsgID` / `ctx.msgId` / `ctx.msg_id`):
+
+```go
+ctx.Append(event, thrall.DedupKey(ctx.MsgID))
+```
+
+A signed delta is **not** idempotent - if the same cast is delivered twice (the mailbox is
+at-least-once), a plain append would count it twice, and the fold cannot tell a replayed event
+from a genuine second deposit. Keying the append on the message id makes the redelivery collapse
+to a single event: two appends with the same `Nats-Msg-Id` land as one.
+
+This dedup holds **within the stream's duplicate window** (2 min by default, set via
+`event_log_dedup_window_ms`), not forever - it guards against real-time retry/redelivery, not
+against replaying the log days later. It also keys on the message id, so it deduplicates the same
+message, not two logically identical commands a client sends as two separate casts (those are two
+commands, each with its own id). For client-driven idempotence, pass a domain idempotency key as
+the dedup key instead. See DESIGN.md, "Command-key: dedup on the event log".

@@ -18,7 +18,10 @@ const move =
   (sign: number) =>
   async (payload: unknown, balance: number, ctx: Ctx): Promise<number> => {
     const delta = (payload as Delta).delta * sign;
-    await ctx.append({ delta }); // persist first - the log is the truth
+    // Command-key: key the append on the message id so a redelivered cast (same envelope) does
+    // not double-count - a signed delta is not idempotent, so the fold alone cannot tell a
+    // replayed event from a genuine second one.
+    await ctx.append({ delta }, { dedupKey: ctx.msgId }); // persist first - the log is the truth
     const next = balance + delta;
     ctx.log.info("balance changed", { delta, balance: next });
     return next;
