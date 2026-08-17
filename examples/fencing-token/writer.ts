@@ -20,16 +20,33 @@ type Stored = { value: string; epoch: number };
 const enc = (s: Stored): Uint8Array => new TextEncoder().encode(JSON.stringify(s));
 const dec = (b: Uint8Array): Stored => JSON.parse(new TextDecoder().decode(b)) as Stored;
 
-// writeFenced is the resource-side guard: accept only if epoch >= the epoch already stored
-// (monotonic), so a stale writer (a lower epoch) is rejected. Returns whether it stored.
+// writeFenced is the resource-side guard, done as an atomic compare-and-set (KV create on an
+// empty key, update against the read revision otherwise) so it holds even under CONCURRENT
+// writers - the case the fencing token defends against. It stores only if epoch >= the epoch
+// already stored (monotonic), re-reading and re-checking if another writer raced in between; a
+// stale writer (a lower epoch) is rejected. A plain read-then-write would let a stale write slip
+// past between the read and the write, defeating the fence.
 async function writeFenced(kv: KV, value: string, epoch: number): Promise<boolean> {
-  const cur = await kv.get(resourceKey);
-  if (cur) {
-    const prev = dec(cur.value);
-    if (epoch < prev.epoch) return false; // fenced: a newer epoch has already written here
+  const rec = enc({ value, epoch });
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await kv.get(resourceKey);
+    if (!cur) {
+      try {
+        await kv.create(resourceKey, rec);
+        return true;
+      } catch {
+        continue; // lost the create race; re-read and re-check
+      }
+    }
+    if (epoch < dec(cur.value).epoch) return false; // fenced
+    try {
+      await kv.update(resourceKey, rec, cur.revision);
+      return true;
+    } catch {
+      // lost the update race (another writer committed first); re-read and re-check
+    }
   }
-  await kv.put(resourceKey, enc({ value, epoch }));
-  return true;
+  throw new Error("write contended after retries");
 }
 
 let kv: KV;
@@ -54,7 +71,7 @@ const writer = defThrall<Record<string, never>>({
     // write-stale simulates a fenced-out old instance writing with an older epoch; rejected.
     "write-stale": async (payload, state, ctx: Ctx) => {
       const value = (payload as { value: string }).value;
-      const stale = ctx.singletonEpoch - 1;
+      const stale = Math.max(0, ctx.singletonEpoch - 1); // one below the live epoch
       const stored = await writeFenced(kv, value, stale);
       return [{ stored, epoch: stale }, state];
     },

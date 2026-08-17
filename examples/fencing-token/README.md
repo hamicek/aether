@@ -62,6 +62,11 @@ fenced-out *old* instance would do - it writes with an older epoch (`N-1`) - and
 is the guarantee singleton fencing alone does not give: it does not depend on the old instance
 having noticed it lost the lock.
 
+The guard here (`writeFenced`) is an **atomic compare-and-set** - it uses the KV's create/update
+revision so the epoch check and the write commit together, holding even if two instances write
+concurrently (the case the fence exists for). A plain read-then-write would let a stale write slip
+in between the read and the write, quietly defeating the fence.
+
 **Honesty:** aether only *issues* the epoch. Exclusivity is enforced by the resource's guard (the
 `writeFenced` check in this example), not by the runtime. Two `write`s with the same live epoch
 both succeed - the epoch fences *older* writers, it is not a mutex.

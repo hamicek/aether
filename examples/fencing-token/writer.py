@@ -12,7 +12,7 @@ only bounds liveness overlap (DESIGN 14); this is strict single-writer against a
 
 import json
 
-from nats.js.errors import KeyNotFoundError
+from nats.js.errors import KeyNotFoundError, KeyWrongLastSequenceError
 
 from aether import def_thrall, run
 
@@ -21,17 +21,29 @@ RESOURCE_KEY = "reading"
 
 
 async def _write_fenced(kv, value, epoch):
-    """Resource-side guard: accept only if epoch >= the epoch already stored (monotonic), so a
-    stale writer (a lower epoch) is rejected. Returns whether it stored."""
-    try:
-        cur = await kv.get(RESOURCE_KEY)
-        prev = json.loads(bytes(cur.value))
-        if epoch < prev["epoch"]:
+    """Resource-side guard, done as an atomic compare-and-set (KV create on an empty key, update
+    against the read revision otherwise) so it holds even under CONCURRENT writers - the case the
+    fencing token defends against. Store only if epoch >= the epoch already stored (monotonic),
+    re-reading and re-checking if another writer raced in between; a stale writer (a lower epoch)
+    is rejected. A plain read-then-write would let a stale write slip past between read and write."""
+    rec = json.dumps({"value": value, "epoch": epoch}).encode()
+    for _ in range(5):
+        try:
+            cur = await kv.get(RESOURCE_KEY)
+        except KeyNotFoundError:
+            try:
+                await kv.create(RESOURCE_KEY, rec)
+                return True
+            except KeyWrongLastSequenceError:
+                continue  # lost the create race; re-read and re-check
+        if epoch < json.loads(bytes(cur.value))["epoch"]:
             return False  # fenced: a newer epoch has already written here
-    except KeyNotFoundError:
-        pass
-    await kv.put(RESOURCE_KEY, json.dumps({"value": value, "epoch": epoch}).encode())
-    return True
+        try:
+            await kv.update(RESOURCE_KEY, rec, last=cur.revision)
+            return True
+        except KeyWrongLastSequenceError:
+            pass  # lost the update race (another writer committed first); re-read and re-check
+    raise RuntimeError("write contended after retries")
 
 
 def make_writer():
@@ -49,7 +61,7 @@ def make_writer():
 
     async def _write_stale(payload, s, ctx):
         # Simulate a fenced-out old instance writing with an older epoch; rejected.
-        stale = ctx.singleton_epoch - 1
+        stale = max(0, ctx.singleton_epoch - 1)  # one below the live epoch
         stored = await _write_fenced(state["kv"], payload["value"], stale)
         return ({"stored": stored, "epoch": stale}, s)
 

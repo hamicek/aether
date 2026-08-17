@@ -13,6 +13,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -30,20 +31,35 @@ type stored struct {
 	Epoch uint64 `json:"epoch"`
 }
 
-// writeFenced is the resource-side guard: it accepts the write only if epoch >= the epoch already
-// stored (monotonic), so a stale writer (a lower epoch) is rejected. Returns whether it stored.
+// writeFenced is the resource-side guard, done as an atomic compare-and-set (KV Create on an
+// empty key, Update against the read revision otherwise) so it holds even under CONCURRENT
+// writers - the case the fencing token defends against. It stores only if epoch >= the epoch
+// already stored (monotonic), re-reading and re-checking if another writer raced in between; a
+// stale writer (a lower epoch) is rejected. A plain read-then-write would let a stale write slip
+// past between the read and the write, defeating the fence.
 func writeFenced(kv nats.KeyValue, value string, epoch uint64) (bool, error) {
-	if cur, err := kv.Get(resourceKey); err == nil {
+	rec, _ := json.Marshal(stored{Value: value, Epoch: epoch})
+	for attempt := 0; attempt < 5; attempt++ {
+		entry, err := kv.Get(resourceKey)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			if _, cerr := kv.Create(resourceKey, rec); cerr == nil {
+				return true, nil
+			}
+			continue // lost the create race; re-read and re-check
+		}
+		if err != nil {
+			return false, err
+		}
 		var prev stored
-		if err := json.Unmarshal(cur.Value(), &prev); err == nil && epoch < prev.Epoch {
+		if err := json.Unmarshal(entry.Value(), &prev); err == nil && epoch < prev.Epoch {
 			return false, nil // fenced: a newer epoch has already written here
 		}
+		if _, uerr := kv.Update(resourceKey, rec, entry.Revision()); uerr == nil {
+			return true, nil
+		}
+		// lost the update race (another writer committed first); re-read and re-check
 	}
-	rec, _ := json.Marshal(stored{Value: value, Epoch: epoch})
-	if _, err := kv.Put(resourceKey, rec); err != nil {
-		return false, err
-	}
-	return true, nil
+	return false, fmt.Errorf("write contended after retries")
 }
 
 func main() {
@@ -76,7 +92,10 @@ func main() {
 			"write-stale": func(payload json.RawMessage, s struct{}, ctx *thrall.Ctx) (any, struct{}, error) {
 				var in struct{ Value string `json:"value"` }
 				_ = json.Unmarshal(payload, &in)
-				stale := ctx.SingletonEpoch - 1
+				stale := ctx.SingletonEpoch // one below the live epoch, guarding uint64 underflow
+				if stale > 0 {
+					stale--
+				}
 				ok, err := writeFenced(kv, in.Value, stale)
 				return map[string]any{"stored": ok, "epoch": stale}, s, err
 			},
