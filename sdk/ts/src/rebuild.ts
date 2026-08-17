@@ -10,11 +10,22 @@ import type { Ctx } from "./thrall";
 
 const jc = JSONCodec();
 
+// AppendOpts configures a single append; dedupKey deduplicates the event within the event-log
+// stream's duplicate window (two appends with the same key land as one message, via Nats-Msg-Id).
+export type AppendOpts = { dedupKey?: string };
+
 // appendEvent persists a domain event to a thrall's event log (a JetStream publish that waits
-// for the stream ack, so it is durable). Wired onto ctx.append by start()/startFSM().
-export async function appendEvent(nc: NatsConnection, app: string, name: string, event: unknown): Promise<void> {
+// for the stream ack, so it is durable). Wired onto ctx.append by start()/startFSM(). Pass
+// opts.dedupKey to deduplicate the event within the stream's duplicate window.
+export async function appendEvent(
+  nc: NatsConnection,
+  app: string,
+  name: string,
+  event: unknown,
+  opts?: AppendOpts,
+): Promise<void> {
   const js = nc.jetstream();
-  await js.publish(subjects.eventLog(app, name), jc.encode(event));
+  await js.publish(subjects.eventLog(app, name), jc.encode(event), opts?.dedupKey ? { msgID: opts.dedupKey } : undefined);
 }
 
 // rebuild reconstructs state by replaying the event log in order from the beginning. Call it

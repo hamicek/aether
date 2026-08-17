@@ -34,7 +34,10 @@ def _move(sign):
 
     async def handler(payload, balance, ctx):
         delta = payload["delta"] * sign
-        await ctx.append({"delta": delta})  # persist first - the log is the truth
+        # Command-key: key the append on the message id so a redelivered cast (same envelope)
+        # does not double-count - a signed delta is not idempotent, so the fold alone cannot
+        # tell a replayed event from a genuine second one.
+        await ctx.append({"delta": delta}, dedup_key=ctx.msg_id)  # persist first - the log is the truth
         nxt = balance + delta
         ctx.log.info("balance changed", delta=delta, balance=nxt)
         return nxt

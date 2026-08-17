@@ -14,3 +14,7 @@ cmd  = "../../bin/account"
 restart = "permanent"
 scope   = "local"
 event_log = true
+# Duplicate window for the event log's Nats-Msg-Id dedup (used by the command-key pattern in the
+# handlers). 0 / omitted uses the 2 min default; raise it to cover slower retries. Applied when
+# the stream is first created - on an existing store (./.aether-store) delete it to take effect.
+# event_log_dedup_window_ms = 600000

@@ -631,6 +631,33 @@ deliberately future work. Whether the rebuilt state survives a *machine* restart
 same JetStream persistence as the mailbox (`store_dir` or external). This replaces the cancelled
 in-memory state-snapshot approach.
 
+**Command-key: dedup on the event log.** "The fold must be idempotent" covers replay, but it does
+*not* make a **non-idempotent event** safe against duplicate *delivery*. A signed delta ("add
++10") is the canonical case: if the mailbox delivers the same cast twice (it is at-least-once) or
+a handler retries, a plain `Append` writes the event twice and the balance is wrong - the fold
+cannot tell a replayed event from a genuine second one. `Append` therefore takes an optional
+**dedup key** (`DedupKey` / `{ dedupKey }` / `dedup_key`) that it sends as the JetStream
+`Nats-Msg-Id` header; two appends with the same key collapse to one record. The SDK exposes the
+handled message's id as `ctx.MsgID` (`ctx.msgId` / `ctx.msg_id`), so the **command-key pattern**
+is to key the append on it:
+
+```go
+ctx.Append(event, thrall.DedupKey(ctx.MsgID))
+```
+
+Two honest limits, both inherent to JetStream dedup rather than worked around:
+
+- **The window, not forever.** Dedup holds within the stream's *duplicate window*
+  (`event_log_dedup_window_ms`, 2 min by default, set explicitly by the lord). It guards
+  real-time retry and redelivery, not a replay of the same id days later. Raise the window to
+  cover slower retries, at the cost of a larger dedup index. The window is fixed at stream
+  creation, like the retention bounds: changing it on an already-provisioned stream is a no-op
+  until the stream is recreated.
+- **The id, not the intent.** Keying on `ctx.MsgID` deduplicates *the same message*. Two
+  logically identical commands a client sends as two separate casts have two ids and are two
+  events - correctly, since the runtime cannot know they were meant to be one. For client-driven
+  idempotence, derive the key from a domain idempotency key the client supplies instead.
+
 ---
 
 ## 13b. Observability (telemetry about the runtime itself)

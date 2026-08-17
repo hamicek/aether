@@ -315,11 +315,16 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	if _, err := js.StreamInfo(stream); err == nil {
 		return nil
 	}
+	dedupWindowMs := ch.spec.EventLogDedupWindowMs
+	if dedupWindowMs <= 0 {
+		dedupWindowMs = wire.DefaultEventLogDedupWindowMs
+	}
 	cfg := &nats.StreamConfig{
-		Name:      stream,
-		Subjects:  []string{subject},
-		Retention: nats.LimitsPolicy, // retain (replayable), unlike the WorkQueue mailbox
-		Storage:   nats.FileStorage,
+		Name:       stream,
+		Subjects:   []string{subject},
+		Retention:  nats.LimitsPolicy, // retain (replayable), unlike the WorkQueue mailbox
+		Storage:    nats.FileStorage,
+		Duplicates: time.Duration(dedupWindowMs) * time.Millisecond, // Nats-Msg-Id dedup window
 	}
 	if ch.spec.EventLogMaxMsgs > 0 {
 		cfg.MaxMsgs = ch.spec.EventLogMaxMsgs

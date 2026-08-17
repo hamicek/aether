@@ -70,6 +70,8 @@ func (l *Lord) spawnChild(spec wire.SpawnSpec) (string, error) {
 			Scope:    "local",
 			Durable:  spec.Durable,
 			EventLog: spec.EventLog,
+
+			EventLogDedupWindowMs: spec.EventLogDedupWindowMs,
 		},
 		natsURL:      l.ether.URL(),
 		app:          l.manifest.App,

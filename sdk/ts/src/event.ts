@@ -134,9 +134,10 @@ export async function startEvent(def: EventManagerDef): Promise<void> {
     app: env.app,
     log,
     trace: "",
+    msgId: "", // gen_event is fan-out notification, not command handling; no per-event id is threaded
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
-    append: (event) => appendEvent(nc, env.app, name, event),
+    append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };

@@ -109,6 +109,31 @@ func cast(r *fsmRunner[int], op string) {
 	r.dispatch(Event{Op: op, Kind: wire.KindCast}, "", nil, wire.Envelope{V: 1, Kind: wire.KindCast, Op: op})
 }
 
+// TestFSMExposesMsgID proves the FSM dispatch exposes the originating envelope's id as
+// ctx.MsgID (so an FSM handler can use the command-key dedup pattern), and that a timeout event
+// - which has no originating envelope - leaves it empty. Mirrors the TS/Python FSM behaviour.
+func TestFSMExposesMsgID(t *testing.T) {
+	var seen string
+	def := timeoutMachine(time.Hour) // long timeout: it never fires on its own during the test
+	def.States["waiting"].On["ping"] = Reaction[int]{Fn: func(_ Event, d int, ctx *Ctx) (Outcome[int], error) {
+		seen = ctx.MsgID
+		return Outcome[int]{Next: "active", Data: d}, nil
+	}}
+	r := newRunner(def)
+
+	req := wire.Envelope{V: 1, ID: "cmd-1", Kind: wire.KindCast, Op: "ping"}
+	r.dispatch(Event{Op: "ping", Kind: wire.KindCast}, "", nil, req)
+	if seen != "cmd-1" {
+		t.Errorf("ctx.MsgID in handler = %q, want %q", seen, "cmd-1")
+	}
+
+	// A timeout event carries no originating envelope -> MsgID must be empty, not stale.
+	r.dispatch(Event{Op: "tick", Kind: "timeout"}, "", nil, wire.Envelope{})
+	if r.ctx.MsgID != "" {
+		t.Errorf("ctx.MsgID after timeout = %q, want empty", r.ctx.MsgID)
+	}
+}
+
 func TestFSMStartsInInitialState(t *testing.T) {
 	r := newRunner(turnstile())
 	if got, _ := r.snapshot(); got != "locked" {

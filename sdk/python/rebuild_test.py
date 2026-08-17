@@ -75,6 +75,23 @@ class RebuildTest(unittest.IsolatedAsyncioTestCase):
         got = await aether.rebuild(self._ctx("seq"), [], lambda ev, acc: acc + [ev["n"]])
         self.assertEqual(got, [0, 1, 2, 3, 4])
 
+    async def test_append_dedup_key(self):
+        # Same dedup_key twice -> one record; a different key -> a second record.
+        js = self.nc.jetstream()
+        await js.add_stream(
+            name=aether._stream_evt("es", "dedup"),
+            subjects=[aether._sub_evt("es", "dedup")],
+            retention=RetentionPolicy.LIMITS,
+            storage=StorageType.MEMORY,
+            duplicate_window=60,  # seconds, as the lord provisions explicitly
+        )
+        ctx = self._ctx("dedup")
+        await ctx.append({"delta": 10}, dedup_key="cmd-1")
+        await ctx.append({"delta": 10}, dedup_key="cmd-1")
+        await ctx.append({"delta": 20}, dedup_key="cmd-2")
+        si = await js.stream_info(aether._stream_evt("es", "dedup"))
+        self.assertEqual(si.state.messages, 2)
+
     async def test_rebuild_bounded_log(self):
         # A stream that keeps only the last 2 events: rebuild folds the retained tail, fast.
         js = self.nc.jetstream()

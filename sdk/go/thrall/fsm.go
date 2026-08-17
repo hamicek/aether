@@ -250,6 +250,7 @@ func (m *fsmRunner[D]) dispatch(ev Event, trace string, respond func(wire.Envelo
 // dispatchLocked runs one event against the current state. Caller holds mu.
 func (m *fsmRunner[D]) dispatchLocked(ev Event, trace string, respond func(wire.Envelope), req wire.Envelope) {
 	m.ctx.Trace = orNewTrace(trace)
+	m.ctx.MsgID = req.ID // empty for a timeout event (no originating envelope); mirrors the TS/Python FSM
 	m.log.Debug("fsm event", slog.String("state", m.cur), slog.String("op", ev.Op), slog.String("kind", ev.Kind), slog.String("trace", m.ctx.Trace))
 
 	// Reserved introspection op: answer the current state, never a transition.

@@ -97,6 +97,10 @@ type ThrallSpec struct {
 	EventLog         bool  `toml:"event_log"`
 	EventLogMaxMsgs  int64 `toml:"event_log_max_msgs"`   // 0 = unbounded (message count)
 	EventLogMaxAgeMs int64 `toml:"event_log_max_age_ms"` // 0 = unbounded (age)
+	// EventLogDedupWindowMs bounds how long JetStream remembers a Nats-Msg-Id for dedup. 0 uses
+	// wire.DefaultEventLogDedupWindowMs. Raise it if command-key idempotence must survive slow
+	// retries (the trade-off is a larger dedup index).
+	EventLogDedupWindowMs int64 `toml:"event_log_dedup_window_ms"`
 }
 
 // LoadManifest reads, parses, fills in the defaults and validates aether.toml.
