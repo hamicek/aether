@@ -144,6 +144,7 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     respond: ((reply: Envelope) => void) | undefined,
   ): Promise<void> => {
     ctx.trace = orNewTrace(ev.kind === "timeout" ? undefined : req?.trace);
+    ctx.msgId = req?.id ?? "";
     log.debug("fsm event", { state: current, op: ev.op, kind: ev.kind, trace: ctx.trace });
 
     if (ev.kind === "call" && ev.op === FSM_STATE_OP) {
@@ -233,9 +234,10 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
     app: env.app,
     log,
     trace: "",
+    msgId: "",
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
-    append: (event) => appendEvent(nc, env.app, name, event),
+    append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };

@@ -86,6 +86,23 @@ test.skipIf(!hasServer)("rebuild preserves append order", async () => {
   expect(got).toEqual([0, 1, 2, 3, 4]);
 });
 
+test.skipIf(!hasServer)("append with a dedup key deduplicates within the duplicate window", async () => {
+  const jsm = await nc!.jetstreamManager();
+  await jsm.streams.add({
+    name: subjects.eventLogStream(app, "dedup"),
+    subjects: [subjects.eventLog(app, "dedup")],
+    retention: RetentionPolicy.Limits,
+    storage: StorageType.Memory,
+    duplicate_window: 60 * 1_000_000_000, // 60s in ns, as the lord provisions explicitly
+  });
+  // Same key twice -> one record; a different key -> a second record.
+  await appendEvent(nc!, app, "dedup", { delta: 10 }, { dedupKey: "cmd-1" });
+  await appendEvent(nc!, app, "dedup", { delta: 10 }, { dedupKey: "cmd-1" });
+  await appendEvent(nc!, app, "dedup", { delta: 20 }, { dedupKey: "cmd-2" });
+  const info = await jsm.streams.info(subjects.eventLogStream(app, "dedup"));
+  expect(info.state.messages).toBe(2);
+});
+
 test.skipIf(!hasServer)("rebuild of a bounded (purged) log folds only the retained tail, fast", async () => {
   const jsm = await nc!.jetstreamManager();
   await jsm.streams.add({

@@ -4,7 +4,7 @@ import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
 import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
 import { newLogger, type Logger } from "./log";
-import { appendEvent } from "./rebuild";
+import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
 import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
 
@@ -34,11 +34,16 @@ export interface Ctx {
   // trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
   // propagate it to downstream messages so one operation can be followed across processes.
   trace: string;
+  // msgId is the id of the message currently being handled (the envelope's id). Unlike trace
+  // (which spans a whole operation), it is unique per message, so a handler can pass it as the
+  // append dedup key to make a redelivered command idempotent - see the command-key pattern.
+  msgId: string;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
   cast: (target: string, op: string, payload?: unknown) => void;
   // append persists a domain event to this thrall's event log (opt-in event_log). Rebuild
-  // replays it in init. Mirrors the Go SDK ctx.Append.
-  append: (event: unknown) => Promise<void>;
+  // replays it in init. Mirrors the Go SDK ctx.Append. Pass dedupKey to deduplicate the event
+  // within the stream's duplicate window (Nats-Msg-Id).
+  append: (event: unknown, opts?: AppendOpts) => Promise<void>;
   // Dynamic supervisor: ask the lord to spawn/stop a child at runtime. Mirrors the Go
   // SDK ctx.StartChild/StopChild; the lord supervises a dynamic child one_for_one,
   // outside any manifest group strategy.
@@ -74,9 +79,10 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     app: env.app,
     log,
     trace: "",
+    msgId: "",
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
-    append: (event) => appendEvent(nc, env.app, name, event),
+    append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
@@ -116,6 +122,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     const start = beginJob();
     return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
+      ctx.msgId = e.id ?? "";
       log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCall?.[e.op ?? ""];
@@ -140,6 +147,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     const start = beginJob();
     return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
+      ctx.msgId = e.id ?? "";
       log.debug("handling cast", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCast?.[e.op ?? ""];
