@@ -368,9 +368,11 @@ and exiting, the old instance can still issue a write. The guarantee is "**at mo
 instance, overlap ≤ lock TTL**", not "exactly one writer".
 
 If you need strict single-writer against a resource (a PLC, a driver, a DB), enforce a **fencing
-token** at that resource: the lord already stamps a monotonic epoch into the lock and injects it
-as `AETHER_SINGLETON_EPOCH`; send it with every write and have the resource reject a lower epoch,
-so a stale writer is fenced out even if it has not yet self-terminated.
+token** at that resource: the lord stamps a monotonic epoch into the lock, and a handler reads it
+as `ctx.SingletonEpoch` (`ctx.singletonEpoch` / `ctx.singleton_epoch`, 0 for a non-singleton).
+Send it with every write and have the resource reject a lower epoch, so a stale writer is fenced
+out even if it has not yet self-terminated. Runnable demo in all three languages:
+[`examples/fencing-token/`](./examples/fencing-token/).
 
 ## Observability
 
