@@ -16,6 +16,9 @@ type SpawnSpec struct {
 	Restart  string `json:"restart,omitempty"`   // permanent | transient | temporary (default permanent)
 	Durable  bool   `json:"durable,omitempty"`   // true -> casts go through JetStream
 	EventLog bool   `json:"event_log,omitempty"` // true -> provision an event-sourcing log for Append/Rebuild
+	// EventLogDedupWindowMs sets the event-log stream's duplicate window (0 = default). Within it,
+	// two Appends carrying the same Nats-Msg-Id land as one message.
+	EventLogDedupWindowMs int64 `json:"event_log_dedup_window_ms,omitempty"`
 }
 
 // StopSpec is the request payload to stop a child at runtime.

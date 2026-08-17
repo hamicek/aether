@@ -28,6 +28,17 @@ func EventLog(app, name string) string { return fmt.Sprintf("aether.%s.%s.evt", 
 // EventLogStream = name of the retention JetStream stream backing a thrall's event log.
 func EventLogStream(app, name string) string { return fmt.Sprintf("aether_%s_%s_evt", app, name) }
 
+// DedupHeader is the JetStream message header an Append carries to deduplicate an event within
+// the event-log stream's duplicate window. Two Appends with the same value land as one message.
+// This is the single source of truth for the dedup contract mirrored by the Go/TS/Python SDKs
+// (Go nats.MsgId, TS msgID, Python Nats-Msg-Id header all set this same header).
+const DedupHeader = "Nats-Msg-Id"
+
+// DefaultEventLogDedupWindowMs is the event-log stream's duplicate window when the manifest does
+// not set one. It matches the JetStream default (2 min) but is applied explicitly so the window
+// is a deliberate, inspectable choice rather than an implicit server default.
+const DefaultEventLogDedupWindowMs = 2 * 60 * 1000
+
 // Supervision channels (lord <-> thrall): aether._lord.<name>.<verb>
 func Ctl(name string) string       { return fmt.Sprintf("aether._lord.%s.ctl", name) }
 func Heartbeat(name string) string { return fmt.Sprintf("aether._lord.%s.hb", name) }
