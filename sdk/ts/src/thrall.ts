@@ -6,7 +6,7 @@ import { useConnection, startChild, stopChild, call, cast, orNewTrace, type Spaw
 import { newLogger, type Logger } from "./log";
 import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
-import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
+import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -38,6 +38,11 @@ export interface Ctx {
   // (which spans a whole operation), it is unique per message, so a handler can pass it as the
   // append dedup key to make a redelivered command idempotent - see the command-key pattern.
   msgId: string;
+  // singletonEpoch is this thrall's fencing epoch when it is a singleton (0 otherwise), constant
+  // for the process lifetime. Singleton fencing only bounds liveness overlap, not write access; for
+  // strict single-writer against an external resource, send this epoch with every write and have the
+  // resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
+  singletonEpoch: number;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
   cast: (target: string, op: string, payload?: unknown) => void;
   // append persists a domain event to this thrall's event log (opt-in event_log). Rebuild
@@ -80,6 +85,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     log,
     trace: "",
     msgId: "",
+    singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),

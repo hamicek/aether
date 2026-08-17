@@ -87,6 +87,20 @@ test("fenceConfigFromEnv reads the injected token", () => {
   delete process.env.AETHER_SINGLETON_KEY;
 });
 
+test("ctx.singletonEpoch expression: epoch from env, 0 without", () => {
+  // This is exactly what the ctx literals set for ctx.singletonEpoch.
+  expect(fenceConfigFromEnv()?.epoch ?? 0).toBe(0);
+
+  process.env.AETHER_SINGLETON_BUCKET = "aether_singletons";
+  process.env.AETHER_SINGLETON_KEY = "svc";
+  process.env.AETHER_SINGLETON_EPOCH = "7";
+  expect(fenceConfigFromEnv()?.epoch ?? 0).toBe(7);
+
+  delete process.env.AETHER_SINGLETON_BUCKET;
+  delete process.env.AETHER_SINGLETON_KEY;
+  delete process.env.AETHER_SINGLETON_EPOCH;
+});
+
 test("lordFenceConfigFromEnv reads the injected lord-liveness token", () => {
   expect(lordFenceConfigFromEnv()).toBeNull(); // no env -> a thrall outside a lord, no fencing
 

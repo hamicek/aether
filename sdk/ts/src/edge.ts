@@ -15,7 +15,7 @@ import { open, readEnv } from "./connection";
 import { useConnection, call, cast, startChild, stopChild } from "./client";
 import { newLogger } from "./log";
 import { appendEvent } from "./rebuild";
-import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
+import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
 import { startHeartbeat, type Ctx } from "./thrall";
 
 // EdgeDef defines an edge thrall: a run-loop that owns the socket and an optional graceful-stop hook.
@@ -62,6 +62,7 @@ export async function startEdge(def: EdgeDef): Promise<void> {
     log,
     trace: "",
     msgId: "", // the edge is an HTTP ingress, not a command handler; no per-message id is threaded
+    singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
