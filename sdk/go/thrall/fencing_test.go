@@ -45,6 +45,19 @@ func embeddedNATS(t *testing.T) (*nats.Conn, *natsserver.Server) {
 	return nc, srv
 }
 
+// TestSingletonEpochFromEnv proves ctx.SingletonEpoch is read from the lord-injected env for a
+// singleton (both AETHER_SINGLETON_* present) and is 0 for a non-singleton (no env).
+func TestSingletonEpochFromEnv(t *testing.T) {
+	if got := singletonEpochFromEnv(); got != 0 {
+		t.Errorf("no fencing env: epoch = %d, want 0", got)
+	}
+	t.Setenv("AETHER_SINGLETON_KEY", "demo")
+	t.Setenv("AETHER_SINGLETON_EPOCH", "42")
+	if got := singletonEpochFromEnv(); got != 42 {
+		t.Errorf("with fencing env: epoch = %d, want 42", got)
+	}
+}
+
 // runFencing starts the fencing loop with a valid held lock and returns a channel that
 // receives the loss reason (nil onLost side effect replaced by the channel) and a stop func.
 func runFencing(t *testing.T, nc *nats.Conn) (mgr *singleton.Manager, lock *singleton.Lock, lost chan string, stop chan struct{}) {

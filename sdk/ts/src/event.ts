@@ -15,7 +15,7 @@ import { open, readEnv } from "./connection";
 import { useConnection, call, cast, startChild, stopChild, orNewTrace } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent } from "./rebuild";
-import { startFencingIfSingleton, startLordLivenessFencing } from "./fencing";
+import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
 import { subscribeData, subscribeVerb, consumeDurableCast, startHeartbeat, errReply, type Ctx } from "./thrall";
 
 // EventMsg is one input to the manager: an op and its payload. (Events are async casts; there is
@@ -135,6 +135,7 @@ export async function startEvent(def: EventManagerDef): Promise<void> {
     log,
     trace: "",
     msgId: "", // gen_event is fan-out notification, not command handling; no per-event id is threaded
+    singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),

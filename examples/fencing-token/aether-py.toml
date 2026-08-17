@@ -1,0 +1,14 @@
+# Write-side fencing token demo in Python. Same behaviour as the Go (aether.toml) and TypeScript
+# (aether-ts.toml) variants - a singleton writer stamps ctx.singleton_epoch on each write and the
+# resource (a KV bucket) rejects a lower epoch.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "writer"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python writer.py"
+restart = "permanent"
+scope   = "singleton"

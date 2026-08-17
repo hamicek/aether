@@ -29,6 +29,12 @@
         "@hamicek/aether": "workspace:*",
       },
     },
+    "examples/fencing-token": {
+      "name": "fencing-token-example",
+      "dependencies": {
+        "@hamicek/aether": "workspace:*",
+      },
+    },
     "examples/fsm": {
       "name": "fsm-example",
       "dependencies": {
@@ -116,6 +122,8 @@
     "fast-uri": ["fast-uri@3.1.5", "", {}, "sha512-gHwA1O9LDIcKunMKhObS/HimwtehO1nPUECKAu5TpKgaO19fcWEl4bliWe1jWxVFvIXztJjjQ4L8XQ1EU9f7Jw=="],
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
+
+    "fencing-token-example": ["fencing-token-example@workspace:examples/fencing-token"],
 
     "fsm-example": ["fsm-example@workspace:examples/fsm"],
 

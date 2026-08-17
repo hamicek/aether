@@ -13,6 +13,7 @@ function testCtx(): Ctx {
     log: newLogger({ component: "test" }, { level: "error", format: "json", write: () => {} }),
     trace: "",
     msgId: "",
+    singletonEpoch: 0,
     call: (() => Promise.resolve(undefined)) as Ctx["call"],
     cast: () => {},
     append: async () => {},

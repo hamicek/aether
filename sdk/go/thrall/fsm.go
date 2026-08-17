@@ -118,7 +118,7 @@ func StartFSM[D any](def FSM[D]) error {
 	}
 	sharedConn = nc
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
-	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
 	data, err := def.Init(ctx)
 	if err != nil {

@@ -40,6 +40,17 @@ class EnvConfigTest(unittest.TestCase):
         del os.environ["AETHER_SINGLETON_BUCKET"]
         del os.environ["AETHER_SINGLETON_KEY"]
 
+    def test_ctx_singleton_epoch_expression(self):
+        # This is exactly what the Ctx constructions set for ctx.singleton_epoch.
+        self.assertEqual((aether._fence_config_from_env() or {}).get("epoch", 0), 0)
+        os.environ["AETHER_SINGLETON_BUCKET"] = BUCKET
+        os.environ["AETHER_SINGLETON_KEY"] = "svc"
+        os.environ["AETHER_SINGLETON_EPOCH"] = "7"
+        self.assertEqual((aether._fence_config_from_env() or {}).get("epoch", 0), 7)
+        del os.environ["AETHER_SINGLETON_BUCKET"]
+        del os.environ["AETHER_SINGLETON_KEY"]
+        del os.environ["AETHER_SINGLETON_EPOCH"]
+
     def test_reads_lord_liveness_token(self):
         self.assertIsNone(aether._lord_fence_config_from_env())  # no env -> no fencing
         os.environ["AETHER_LORD_BUCKET"] = "aether_lords"
