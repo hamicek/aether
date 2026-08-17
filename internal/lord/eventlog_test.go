@@ -90,6 +90,80 @@ func TestEventLogDedupWindowConfigured(t *testing.T) {
 	}
 }
 
+// TestEventLogDedupWindowClampedToMaxAge proves a max_age shorter than the dedup window does not
+// crash provisioning (JetStream rejects a duplicate window larger than MaxAge): the window is
+// clamped to MaxAge. A max_age at/above the window leaves the window unchanged.
+func TestEventLogDedupWindowClampedToMaxAge(t *testing.T) {
+	t.Run("short max_age clamps the default window", func(t *testing.T) {
+		eth := startEmbedded(t)
+		m := &Manifest{App: "esc", Strategy: "one_for_one", Thralls: []ThrallSpec{
+			{Name: "acct", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogMaxAgeMs: 30_000},
+		}}
+		l, err := New(m, eth)
+		if err != nil {
+			t.Fatalf("lord.New: %v", err)
+		}
+		if err := l.provisionStreams(); err != nil {
+			t.Fatalf("provisionStreams must not fail on a short max_age: %v", err)
+		}
+		js, _ := eth.Conn().JetStream()
+		si, err := js.StreamInfo(wire.EventLogStream("esc", "acct"))
+		if err != nil {
+			t.Fatalf("event log stream not provisioned: %v", err)
+		}
+		if want := 30_000 * time.Millisecond; si.Config.Duplicates != want {
+			t.Errorf("Duplicates = %v, want clamped to max_age %v", si.Config.Duplicates, want)
+		}
+		if si.Config.Duplicates > si.Config.MaxAge {
+			t.Errorf("Duplicates %v > MaxAge %v (JetStream would reject this)", si.Config.Duplicates, si.Config.MaxAge)
+		}
+	})
+
+	t.Run("explicit window above max_age is clamped too", func(t *testing.T) {
+		eth := startEmbedded(t)
+		m := &Manifest{App: "esc2", Strategy: "one_for_one", Thralls: []ThrallSpec{
+			{Name: "acct", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogDedupWindowMs: 600_000, EventLogMaxAgeMs: 60_000},
+		}}
+		l, err := New(m, eth)
+		if err != nil {
+			t.Fatalf("lord.New: %v", err)
+		}
+		if err := l.provisionStreams(); err != nil {
+			t.Fatalf("provisionStreams: %v", err)
+		}
+		js, _ := eth.Conn().JetStream()
+		si, err := js.StreamInfo(wire.EventLogStream("esc2", "acct"))
+		if err != nil {
+			t.Fatalf("event log stream not provisioned: %v", err)
+		}
+		if want := 60_000 * time.Millisecond; si.Config.Duplicates != want {
+			t.Errorf("Duplicates = %v, want clamped to max_age %v", si.Config.Duplicates, want)
+		}
+	})
+
+	t.Run("max_age at or above the window leaves it unchanged", func(t *testing.T) {
+		eth := startEmbedded(t)
+		m := &Manifest{App: "esc3", Strategy: "one_for_one", Thralls: []ThrallSpec{
+			{Name: "acct", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogDedupWindowMs: 60_000, EventLogMaxAgeMs: 600_000},
+		}}
+		l, err := New(m, eth)
+		if err != nil {
+			t.Fatalf("lord.New: %v", err)
+		}
+		if err := l.provisionStreams(); err != nil {
+			t.Fatalf("provisionStreams: %v", err)
+		}
+		js, _ := eth.Conn().JetStream()
+		si, err := js.StreamInfo(wire.EventLogStream("esc3", "acct"))
+		if err != nil {
+			t.Fatalf("event log stream not provisioned: %v", err)
+		}
+		if want := 60_000 * time.Millisecond; si.Config.Duplicates != want {
+			t.Errorf("Duplicates = %v, want unchanged %v", si.Config.Duplicates, want)
+		}
+	})
+}
+
 // TestEventLogBoundedRetentionWarns proves the lord warns at provisioning when an event_log
 // thrall has a retention bound (a truncated log silently breaks Rebuild, as there is no
 // snapshot), and stays silent when the log is unbounded or event_log is off.
