@@ -1,11 +1,11 @@
-// Gateway thrall na centrale (HUB) - dukaz cross-node komunikace v hub-spoke
-// topologii (AE-051 spike). Bezi pod lordem na hubu (app "demo") a na `check`
-// zavola counterA (sajta A) a counterB (sajta B) pres bezny ctx.Call.
+// Gateway thrall on the center (HUB) - proof of cross-node communication in the
+// hub-spoke topology (AE-051 spike). It runs under the lord on the hub (app "demo")
+// and on `check` calls counterA (site A) and counterB (site B) via a plain ctx.Call.
 //
-// Klicove zjisteni, ktere tim spike dokazuje: ctx.Call funguje cross-node
-// transparentne, protoze uzly sdili app namespace ("demo") a lisi se jen
-// jmenem thralla. SDK o leaf nodes ani accountech nic nevi - smerovani a
-// izolaci resi vyhradne NATS vrstva (import HUB<-SITE_A/SITE_B).
+// The key finding this spike proves: ctx.Call works cross-node transparently,
+// because the nodes share the app namespace ("demo") and differ only by thrall
+// name. The SDK knows nothing about leaf nodes or accounts - routing and
+// isolation are handled entirely by the NATS layer (import HUB<-SITE_A/SITE_B).
 package main
 
 import (
@@ -25,9 +25,9 @@ func main() {
 		Init: func(_ *thrall.Ctx) (struct{}, error) { return struct{}{}, nil },
 
 		HandleCall: map[string]thrall.CallFn[struct{}]{
-			// check precte aktualni stav obou sajt cross-node a vrati ho jako
-			// {"counterA": N, "counterB": M}. Skript spiku na tom stavi tvrzeni
-			// o distribuci (centrala vidi realny stav obou sajt).
+			// check reads the current state of both sites cross-node and returns it
+			// as {"counterA": N, "counterB": M}. The spike script builds the
+			// distribution assertion on it (the center sees the real state of both sites).
 			"check": func(_ json.RawMessage, state struct{}, ctx *thrall.Ctx) (any, struct{}, error) {
 				a, err := readCounter(ctx, "counterA")
 				if err != nil {
@@ -51,7 +51,7 @@ func main() {
 	}
 }
 
-// readCounter zavola `get` na dane sajte a rozbali celociselny stav.
+// readCounter calls `get` on the given site and unpacks the integer state.
 func readCounter(ctx *thrall.Ctx, name string) (int, error) {
 	reply, err := ctx.Call(name, "get", nil, callTimeout)
 	if err != nil {

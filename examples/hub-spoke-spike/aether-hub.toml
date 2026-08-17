@@ -1,6 +1,6 @@
-# HUB uzel - centrala. Lord se pripoji na lokalni HUB NATS (:7390, account HUB
-# pres no_auth_user) a supervizuje gateway thrall. Gateway na `check` vola obe
-# sajty cross-node. Spousti se: aether up -f aether-hub.toml (ze spike rootu).
+# HUB node - the center. The lord connects to the local HUB NATS (:7390, account HUB
+# via no_auth_user) and supervises the gateway thrall. On `check` the gateway calls
+# both sites cross-node. Run with: aether up -f aether-hub.toml (from the spike root).
 app = "demo"
 strategy = "one_for_one"
 

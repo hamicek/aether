@@ -1,6 +1,6 @@
-# SPOKE-A uzel - sajta A. Lord se pripoji na lokalni SPOKE-A NATS (:7392,
-# account SITE_A pres no_auth_user) a supervizuje thrall counterA (counter binar,
-# jmeno z AETHER_NAME injektovaneho lordem). Spousti se: aether up -f aether-spoke-a.toml.
+# SPOKE-A node - site A. The lord connects to the local SPOKE-A NATS (:7392,
+# account SITE_A via no_auth_user) and supervises the counterA thrall (counter binary,
+# name from AETHER_NAME injected by the lord). Run with: aether up -f aether-spoke-a.toml.
 app = "demo"
 strategy = "one_for_one"
 

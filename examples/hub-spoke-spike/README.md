@@ -22,7 +22,7 @@ lords, seeds the site counters, asserts distribution and isolation, and tears ev
 down. `hub-spoke-resilience.sh` reuses the same topology and injects failure: it asserts
 that a site keeps serving while the hub is down and recovers on reconnect, and that a
 site lord's death is fenced to its own node. Exit 0 means every assertion passed. Both
-require `nats-server` on PATH (see the repo CLAUDE.md, "External NATS pro dev").
+require `nats-server` on PATH - install any recent build (https://docs.nats.io/running-a-nats-service/introduction/installation).
 
 ## Layout
 

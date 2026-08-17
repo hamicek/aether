@@ -1,11 +1,11 @@
-// probe - maly odposlouchavaci nastroj pro POZITIVNI dukaz izolace sajt
-// (AE-051 spike). Pripoji se na dany NATS uzel (neautentizovane -> account
-// daneho serveru pres no_auth_user), odebira subjekt po zadanou dobu a vypise
-// pocet prijatych zprav jako "received=N".
+// probe - a small listening tool for POSITIVE proof of site isolation
+// (AE-051 spike). It connects to the given NATS node (unauthenticated -> the
+// server's account via no_auth_user), subscribes to a subject for a given
+// duration and prints the number of received messages as "received=N".
 //
-// Pouziti ve skriptu: probe bezici na spoke-A a odebirajici counterB.> musi
-// prijmout 0 zprav, zatimco na spoke-B tece provoz - tim je izolace dolozena
-// pozitivne (account nedorucil cizi provoz), ne jen absenci odpovedi.
+// Usage in the script: a probe running on spoke-A subscribed to counterB.> must
+// receive 0 messages, while traffic flows on spoke-B - this proves isolation
+// positively (the account did not deliver foreign traffic), not just an absence of a reply.
 package main
 
 import (
@@ -19,9 +19,9 @@ import (
 )
 
 func main() {
-	url := flag.String("url", "", "NATS uzel (nats://host:port)")
-	subject := flag.String("subject", "", "subjekt k odposlechu (muze byt wildcard)")
-	secs := flag.Float64("secs", 2, "doba odposlechu v sekundach")
+	url := flag.String("url", "", "NATS node (nats://host:port)")
+	subject := flag.String("subject", "", "subject to listen on (may be a wildcard)")
+	secs := flag.Float64("secs", 2, "listen duration in seconds")
 	flag.Parse()
 
 	if *url == "" || *subject == "" {

@@ -1,5 +1,5 @@
-# SPOKE-B uzel - sajta B. Symetricke k aether-spoke-a.toml: lokalni SPOKE-B NATS
-# (:7393, account SITE_B), thrall counterB. Spousti se: aether up -f aether-spoke-b.toml.
+# SPOKE-B node - site B. Symmetric to aether-spoke-a.toml: local SPOKE-B NATS
+# (:7393, account SITE_B), counterB thrall. Run with: aether up -f aether-spoke-b.toml.
 app = "demo"
 strategy = "one_for_one"
 
