@@ -392,6 +392,11 @@ class Ctx:
     # (which spans a whole operation), it is unique per message, so a handler can pass it as
     # append's dedup_key to make a redelivered command idempotent - see the command-key pattern.
     msg_id: str = ""
+    # singleton_epoch is this thrall's fencing epoch when it is a singleton (0 otherwise), constant
+    # for the process lifetime. Singleton fencing only bounds liveness overlap, not write access;
+    # for strict single-writer against an external resource, send this epoch with every write and
+    # have the resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
+    singleton_epoch: int = 0
 
     async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0) -> Any:
         """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
@@ -479,7 +484,7 @@ async def start(defn: ThrallDef) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name), singleton_epoch=(_fence_config_from_env() or {}).get("epoch", 0))
     state = await _maybe(defn.init(ctx))
 
     stop = asyncio.Event()
@@ -793,7 +798,7 @@ async def start_fsm(defn: FSM) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name), singleton_epoch=(_fence_config_from_env() or {}).get("epoch", 0))
     data = await _maybe(defn.init(ctx))
     m = _Machine(defn, ctx, data, ctx.log)
     m.arm_initial()
@@ -976,7 +981,7 @@ async def start_event(defn: EventManager) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name), singleton_epoch=(_fence_config_from_env() or {}).get("epoch", 0))
     states: dict = {}
     for hname, h in defn.handlers.items():
         states[hname] = await _maybe(h.init(ctx)) if h.init is not None else None
@@ -1167,7 +1172,7 @@ async def start_edge(defn: EdgeDef) -> None:
     nkey_seed = os.environ.get("AETHER_NATS_NKEY_SEED")
 
     nc = await nats.connect(url, **_connect_kwargs(name, ca, nkey_seed))
-    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name))
+    ctx = Ctx(nats=nc, name=name, app=app, log=new_logger(component="thrall", app=app, name=name), singleton_epoch=(_fence_config_from_env() or {}).get("epoch", 0))
 
     if defn.init is not None:
         await _maybe(defn.init(ctx))
