@@ -1,11 +1,14 @@
 package lord
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/wire"
 )
 
@@ -84,6 +87,47 @@ func TestEventLogDedupWindowConfigured(t *testing.T) {
 	}
 	if want := 600_000 * time.Millisecond; si.Config.Duplicates != want {
 		t.Errorf("Duplicates = %v, want configured %v", si.Config.Duplicates, want)
+	}
+}
+
+// TestEventLogBoundedRetentionWarns proves the lord warns at provisioning when an event_log
+// thrall has a retention bound (a truncated log silently breaks Rebuild, as there is no
+// snapshot), and stays silent when the log is unbounded or event_log is off.
+func TestEventLogBoundedRetentionWarns(t *testing.T) {
+	const warnMarker = "bounded retention"
+	cases := []struct {
+		name     string
+		spec     ThrallSpec
+		wantWarn bool
+	}{
+		{"max_msgs bound warns", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogMaxMsgs: 1000}, true},
+		// max_age must exceed the dedup window (default 2 min) or AddStream rejects the stream; see
+		// the inbox follow-up on clamping the dedup window to max_age.
+		{"max_age bound warns", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogMaxAgeMs: 300_000}, true},
+		{"unbounded event log is silent", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true}, false},
+		{"no event log is silent", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLogMaxMsgs: 1000}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eth := startEmbedded(t)
+			m := &Manifest{App: "es", Strategy: "one_for_one", Thralls: []ThrallSpec{tc.spec}}
+			l, err := New(m, eth)
+			if err != nil {
+				t.Fatalf("lord.New: %v", err)
+			}
+			var buf bytes.Buffer
+			l.log = obs.NewWithWriter(&buf)
+			if err := l.provisionStreams(); err != nil {
+				t.Fatalf("provisionStreams: %v", err)
+			}
+			got := strings.Contains(buf.String(), warnMarker)
+			if got != tc.wantWarn {
+				t.Errorf("warn present = %v, want %v; log:\n%s", got, tc.wantWarn, buf.String())
+			}
+			if tc.wantWarn && !strings.Contains(buf.String(), "level=WARN") {
+				t.Errorf("expected a WARN-level line; log:\n%s", buf.String())
+			}
+		})
 	}
 }
 
