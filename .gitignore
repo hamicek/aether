@@ -28,3 +28,6 @@ __pycache__/
 graphify-out/
 
 resources/
+
+# lokalni dev notes pro Claude Code, mimo public repo
+CLAUDE.md
