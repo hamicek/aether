@@ -306,6 +306,16 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	if !ch.spec.EventLog {
 		return nil
 	}
+	// Bounded retention on a replayed event log is a silent-corruption footgun: Rebuild folds the
+	// WHOLE log, but there is no snapshot/compaction (DESIGN 13c), so once retention purges old
+	// events the rebuilt state is incomplete - with no error. It is legitimate for an audit-only
+	// log, so this is a loud warning, not a hard failure (the runtime cannot know the intent).
+	if ch.spec.EventLogMaxMsgs > 0 || ch.spec.EventLogMaxAgeMs > 0 {
+		l.log.Warn("event log has bounded retention - rebuild will be incomplete once it purges (no snapshot/compaction); safe only for an audit-only log",
+			slog.String("name", ch.spec.Name),
+			slog.Int64("max_msgs", ch.spec.EventLogMaxMsgs),
+			slog.Int64("max_age_ms", ch.spec.EventLogMaxAgeMs))
+	}
 	js, err := l.ether.Conn().JetStream()
 	if err != nil {
 		return err
