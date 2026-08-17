@@ -1,0 +1,14 @@
+# Write-side fencing token demo (Go). The writer is a singleton, so the lord stamps a fencing
+# epoch into its KV lock and injects it as AETHER_SINGLETON_EPOCH -> ctx.SingletonEpoch. The
+# writer sends that epoch with every write to a resource (a KV bucket) that rejects a lower one.
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "writer"
+cmd  = "../../bin/writer"
+restart = "permanent"
+scope   = "singleton"

@@ -1,0 +1,3 @@
+# Python dependencies for the write-side fencing token example (writer.py).
+# Pinned so a fresh venv matches what the example was verified against.
+nats-py==2.15.0

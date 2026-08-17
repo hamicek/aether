@@ -1,0 +1,7 @@
+{
+  "name": "fencing-token-example",
+  "private": true,
+  "dependencies": {
+    "@hamicek/aether": "workspace:*"
+  }
+}
