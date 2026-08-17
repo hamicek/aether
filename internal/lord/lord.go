@@ -329,6 +329,16 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	if dedupWindowMs <= 0 {
 		dedupWindowMs = wire.DefaultEventLogDedupWindowMs
 	}
+	// JetStream rejects a stream whose duplicate window exceeds its MaxAge, so a short
+	// event_log_max_age_ms (below the dedup window, default or explicit) would otherwise fail
+	// AddStream and crash `aether up`. Clamp the window to MaxAge; dedup still holds within it.
+	if ch.spec.EventLogMaxAgeMs > 0 && dedupWindowMs > ch.spec.EventLogMaxAgeMs {
+		l.log.Info("clamping event log dedup window to max_age",
+			slog.String("name", ch.spec.Name),
+			slog.Int64("dedup_window_ms", dedupWindowMs),
+			slog.Int64("max_age_ms", ch.spec.EventLogMaxAgeMs))
+		dedupWindowMs = ch.spec.EventLogMaxAgeMs
+	}
 	cfg := &nats.StreamConfig{
 		Name:       stream,
 		Subjects:   []string{subject},
