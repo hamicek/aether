@@ -83,7 +83,8 @@ to a single event: two appends with the same `Nats-Msg-Id` land as one.
 
 This dedup holds **within the stream's duplicate window** (2 min by default, set via
 `event_log_dedup_window_ms`), not forever - it guards against real-time retry/redelivery, not
-against replaying the log days later. It also keys on the message id, so it deduplicates the same
+against replaying the log days later. The window is applied when the stream is first created; on
+a persisted store (`./.aether-store`) raising it takes effect only after the store is recreated. It also keys on the message id, so it deduplicates the same
 message, not two logically identical commands a client sends as two separate casts (those are two
 commands, each with its own id). For client-driven idempotence, pass a domain idempotency key as
 the dedup key instead. See DESIGN.md, "Command-key: dedup on the event log".

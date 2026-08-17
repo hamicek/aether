@@ -30,8 +30,8 @@ func EventLogStream(app, name string) string { return fmt.Sprintf("aether_%s_%s_
 
 // DedupHeader is the JetStream message header an Append carries to deduplicate an event within
 // the event-log stream's duplicate window. Two Appends with the same value land as one message.
-// This is the single source of truth for the dedup contract mirrored by the Go/TS/Python SDKs
-// (Go nats.MsgId, TS msgID, Python Nats-Msg-Id header all set this same header).
+// It documents the dedup contract the SDKs mirror through their native APIs (Go nats.MsgId, TS
+// msgID, Python an explicit Nats-Msg-Id header), which all resolve to this same header name.
 const DedupHeader = "Nats-Msg-Id"
 
 // DefaultEventLogDedupWindowMs is the event-log stream's duplicate window when the manifest does

@@ -650,7 +650,9 @@ Two honest limits, both inherent to JetStream dedup rather than worked around:
 - **The window, not forever.** Dedup holds within the stream's *duplicate window*
   (`event_log_dedup_window_ms`, 2 min by default, set explicitly by the lord). It guards
   real-time retry and redelivery, not a replay of the same id days later. Raise the window to
-  cover slower retries, at the cost of a larger dedup index.
+  cover slower retries, at the cost of a larger dedup index. The window is fixed at stream
+  creation, like the retention bounds: changing it on an already-provisioned stream is a no-op
+  until the stream is recreated.
 - **The id, not the intent.** Keying on `ctx.MsgID` deduplicates *the same message*. Two
   logically identical commands a client sends as two separate casts have two ids and are two
   events - correctly, since the runtime cannot know they were meant to be one. For client-driven
