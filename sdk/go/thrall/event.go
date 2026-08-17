@@ -84,7 +84,7 @@ func StartEvent(def EventManager) error {
 	}
 	sharedConn = nc
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
-	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
 	// Each handler gets its own initial state, held parallel to def.Handlers.
 	states := make([]any, len(def.Handlers))

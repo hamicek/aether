@@ -71,6 +71,20 @@ type Ctx struct {
 	// per message, so a handler can pass it as Append's dedup key to make a redelivered command
 	// idempotent - see DedupKey and the command-key pattern in DESIGN.md.
 	MsgID string
+	// SingletonEpoch is this thrall's fencing epoch when it is a singleton (0 otherwise), constant
+	// for the process lifetime. Singleton fencing only bounds LIVENESS overlap, not write access;
+	// for strict single-writer against an external resource, send this epoch with every write and
+	// have the resource reject a lower one - see the write-side fencing token pattern in DESIGN.md.
+	SingletonEpoch uint64
+}
+
+// singletonEpochFromEnv reads the fencing epoch the lord injected for a singleton thrall (0 for a
+// non-singleton, which carries no fencing env). Exposed on Ctx.SingletonEpoch.
+func singletonEpochFromEnv() uint64 {
+	if cfg, ok := fencing.ConfigFromEnv("AETHER_SINGLETON_EPOCH", "AETHER_SINGLETON_KEY"); ok {
+		return cfg.Epoch
+	}
+	return 0
 }
 
 // Handler shapes hold the GenServer semantics:
@@ -137,7 +151,7 @@ func Start[S any](def Def[S]) error {
 	}
 	sharedConn = nc
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
-	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
 	state, err := def.Init(ctx)
 	if err != nil {

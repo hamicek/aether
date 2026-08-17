@@ -70,7 +70,7 @@ func StartEdge(def EdgeDef) error {
 	}
 	sharedConn = nc
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
-	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log}
+	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
 	if def.Init != nil {
 		if err := def.Init(ctx); err != nil {
