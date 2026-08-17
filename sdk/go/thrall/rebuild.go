@@ -18,8 +18,13 @@ import (
 
 // Append persists a domain event to this thrall's event log (a JetStream publish that waits for
 // the stream's ack, so the event is durable). Requires the thrall to have opted into an event
-// log (manifest event_log = true), so the lord has provisioned the retention stream.
-func (c *Ctx) Append(event any) error {
+// log (manifest event_log = true), so the lord has provisioned the retention stream. Pass
+// DedupKey to deduplicate the event within the stream's duplicate window.
+func (c *Ctx) Append(event any, opts ...AppendOpt) error {
+	var o appendOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
 	js, err := c.NATS.JetStream()
 	if err != nil {
 		return err
@@ -28,10 +33,29 @@ func (c *Ctx) Append(event any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := js.Publish(wire.EventLog(c.App, c.Name), data); err != nil {
+	var pubOpts []nats.PubOpt
+	if o.dedupKey != "" {
+		pubOpts = append(pubOpts, nats.MsgId(o.dedupKey))
+	}
+	if _, err := js.Publish(wire.EventLog(c.App, c.Name), data, pubOpts...); err != nil {
 		return fmt.Errorf("append to event log: %w", err)
 	}
 	return nil
+}
+
+// AppendOpt configures a single Append (functional-options pattern), e.g. DedupKey.
+type AppendOpt func(*appendOpts)
+
+type appendOpts struct {
+	dedupKey string
+}
+
+// DedupKey makes an Append idempotent within the event-log stream's duplicate window: two
+// Appends carrying the same key land as a single message (via the Nats-Msg-Id header). Derive
+// the key from the command so a redelivered command does not double-write - e.g. ctx.MsgID for
+// the same-message case, or a domain idempotency key. See the command-key pattern in DESIGN.md.
+func DedupKey(key string) AppendOpt {
+	return func(o *appendOpts) { o.dedupKey = key }
 }
 
 // Rebuild reconstructs a thrall's state by replaying its event log in order from the beginning.

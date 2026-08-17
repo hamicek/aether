@@ -66,6 +66,11 @@ type Ctx struct {
 	// before each handler runs; Ctx.Call/Ctx.Cast propagate it to downstream messages so one
 	// operation can be followed across processes. Handlers may include it in their own logs.
 	Trace string
+	// MsgID is the id of the message currently being handled (the envelope's id). The SDK sets
+	// it before each handler runs. Unlike Trace (which spans a whole operation), MsgID is unique
+	// per message, so a handler can pass it as Append's dedup key to make a redelivered command
+	// idempotent - see DedupKey and the command-key pattern in DESIGN.md.
+	MsgID string
 }
 
 // Handler shapes hold the GenServer semantics:
@@ -153,6 +158,7 @@ func Start[S any](def Def[S]) error {
 		mu.Lock()
 		defer mu.Unlock()
 		ctx.Trace = orNewTrace(e.Trace)
+		ctx.MsgID = e.ID
 		log.Debug("handling call", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCall[e.Op]
 		if !ok {
@@ -178,6 +184,7 @@ func Start[S any](def Def[S]) error {
 		mu.Lock()
 		defer mu.Unlock()
 		ctx.Trace = orNewTrace(e.Trace)
+		ctx.MsgID = e.ID
 		log.Debug("handling cast", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCast[e.Op]
 		if !ok {
