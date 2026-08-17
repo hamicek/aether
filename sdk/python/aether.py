@@ -295,6 +295,11 @@ def _stream_evt(app: str, name: str) -> str:
     return f"aether_{app}_{name}_evt"
 
 
+# The JetStream header an append carries to deduplicate an event within the event-log stream's
+# duplicate window. Mirrors internal/wire DedupHeader (Go nats.MsgId / TS msgID set the same one).
+_DEDUP_HEADER = "Nats-Msg-Id"
+
+
 def _encode(e: dict) -> bytes:
     return json.dumps(e).encode()
 
@@ -383,6 +388,10 @@ class Ctx:
     # trace is the correlation id of the message currently being handled; ctx.call/ctx.cast
     # propagate it to downstream messages so one operation can be followed across processes.
     trace: str = ""
+    # msg_id is the id of the message currently being handled (the envelope's id). Unlike trace
+    # (which spans a whole operation), it is unique per message, so a handler can pass it as
+    # append's dedup_key to make a redelivered command idempotent - see the command-key pattern.
+    msg_id: str = ""
 
     async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0) -> Any:
         """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
@@ -404,12 +413,14 @@ class Ctx:
              "ts": int(time.time() * 1000)}
         await self.nats.publish(_sub_cast(self.app, target), _encode(e))
 
-    async def append(self, event: Any) -> None:
+    async def append(self, event: Any, dedup_key: str | None = None) -> None:
         """Persist a domain event to this thrall's event log (a JetStream publish that waits for
         the stream ack). Requires the thrall to have opted into an event log (event_log = true).
-        rebuild() replays it in init. Mirrors the Go SDK ctx.Append."""
+        rebuild() replays it in init. Mirrors the Go SDK ctx.Append. Pass dedup_key to deduplicate
+        the event within the stream's duplicate window (via the Nats-Msg-Id header)."""
         js = self.nats.jetstream()
-        await js.publish(_sub_evt(self.app, self.name), _encode(event))
+        headers = {_DEDUP_HEADER: dedup_key} if dedup_key else None
+        await js.publish(_sub_evt(self.app, self.name), _encode(event), headers=headers)
 
     async def start_child(self, spec: SpawnSpec, timeout: float = 5.0) -> str:
         # Ask the lord to spawn a new thrall at runtime - a child not in the manifest.
@@ -481,6 +492,7 @@ async def start(defn: ThrallDef) -> None:
         try:
             async with lock:
                 ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_call.get(e.get("op"))
                 if handler is None:
@@ -500,6 +512,7 @@ async def start(defn: ThrallDef) -> None:
         try:
             async with lock:
                 ctx.trace = _or_new_trace(e.get("trace") or "")
+                ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_cast.get(e.get("op"))
                 if handler is not None:
@@ -688,6 +701,7 @@ class _Machine:
 
     async def _dispatch(self, ev: Event, req, respond) -> None:
         self.ctx.trace = _or_new_trace("" if ev.kind == "timeout" else ((req or {}).get("trace") or ""))
+        self.ctx.msg_id = (req or {}).get("id") or ""
         self.log.debug("fsm event", state=self.cur, op=ev.op, kind=ev.kind, trace=self.ctx.trace)
 
         if ev.kind == "call" and ev.op == _FSM_STATE_OP:
