@@ -101,7 +101,19 @@ type ThrallSpec struct {
 	// wire.DefaultEventLogDedupWindowMs. Raise it if command-key idempotence must survive slow
 	// retries (the trade-off is a larger dedup index).
 	EventLogDedupWindowMs int64 `toml:"event_log_dedup_window_ms"`
+
+	// Fencing opts the thrall out of lord-liveness fencing when set to false (a *bool so an unset
+	// field defaults to on). By default every thrall self-terminates when it can no longer verify
+	// its lord's KV lease (AE-031); on a shared external bus a KV hiccup then reaps the whole tree.
+	// Set fencing = false for a thrall whose orphan is harmless (a stateless / read-only poller) so
+	// a bus blip does not take it down - at the cost that it MAY outlive its lord. It does not
+	// affect singleton fencing (a singleton still self-exits on losing its lock).
+	Fencing *bool `toml:"fencing"`
 }
+
+// fencingEnabled reports whether the thrall takes part in lord-liveness fencing (the default). An
+// unset field (nil) means on; only an explicit fencing = false opts out.
+func fencingEnabled(spec ThrallSpec) bool { return spec.Fencing == nil || *spec.Fencing }
 
 // LoadManifest reads, parses, fills in the defaults and validates aether.toml.
 func LoadManifest(path string) (*Manifest, error) {

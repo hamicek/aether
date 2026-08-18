@@ -94,9 +94,12 @@ func (c *child) env() []string {
 			"AETHER_SINGLETON_EPOCH="+strconv.FormatUint(c.singletonEpoch, 10),
 		)
 	}
-	// Lord-liveness fencing token: present for EVERY thrall the lord spawns, so the thrall can
-	// verify its lord is still alive against the KV lease and self-terminate if it is gone.
-	if c.lordEpoch > 0 {
+	// Lord-liveness fencing token: present for every thrall the lord spawns UNLESS it opts out
+	// (fencing = false), so the thrall verifies its lord is still alive against the KV lease and
+	// self-terminates if it is gone. Opting out (for a harmless orphan on a shared bus) simply
+	// withholds the token - the SDK's fencing loop is a no-op without it. Singleton fencing is
+	// separate (above) and unaffected.
+	if c.lordEpoch > 0 && fencingEnabled(c.spec) {
 		env = append(env,
 			"AETHER_LORD_BUCKET="+lordlease.Bucket,
 			"AETHER_LORD_KEY="+c.lordKey,
