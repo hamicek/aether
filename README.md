@@ -10,12 +10,17 @@ If you know OTP, that is all you need: the **lord** is a **supervisor**, a **thr
 transport. The names are flavor; the model is plain supervision-and-genservers - here over NATS
 and across languages.
 
-The goal: an SDK that makes it very easy to write thralls and run a lord. Not BEAM-scale
-(millions of processes), but tens of processes that communicate reliably - in any language
-and with real OS-process isolation.
+The goal: an SDK that makes it very easy to write thralls and run a lord. aether is
+**OTP-inspired, not OTP**: real OTP (Erlang/BEAM) runs *millions* of lightweight processes inside
+one VM, in one language; aether runs *tens* of **OS processes**, in any language. It trades that
+scale for real OS-process isolation and polyglot freedom - if you need millions of cheap in-VM
+actors, reach for BEAM; if you want a handful of reliable processes in Go/TS/Python with OTP-style
+supervision, that is aether.
 
 Full design: [DESIGN.md](./DESIGN.md). License: [MIT](./LICENSE). Contributing:
 [CONTRIBUTING.md](./CONTRIBUTING.md). Roadmap and deliberately deferred work: [ROADMAP.md](./ROADMAP.md).
+
+This README tracks `main`; for tagged, versioned changes see [Releases](https://github.com/hamicek/aether/releases) (latest **v0.3.0**).
 
 ## Glossary
 
@@ -75,6 +80,12 @@ examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
 examples/eventbus/    event-manager (gen_event) behaviour demo - one event, many handlers
 examples/eventsourced/ event-sourced rebuild demo - state that survives a restart
 examples/dynamic-topology/ dynamic children re-established by their owner after a lord restart
+examples/webserver/   built-in HTTP edge (ingress) - routes mapped to a thrall op, no code
+examples/webserver-custom/ custom edge via the SDK helper (StartEdge), alongside the ingress
+examples/live-dashboard/ live push to the browser over SSE, subject-scoped per client
+examples/tracing/     trace propagation across call/cast hops
+examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a resource
+examples/hub-spoke-spike/ multi-node hub + isolated sites (leaf nodes) - see Multi-node below
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 ```
 
@@ -390,6 +401,23 @@ as `ctx.SingletonEpoch` (`ctx.singletonEpoch` / `ctx.singleton_epoch`, 0 for a n
 Send it with every write and have the resource reject a lower epoch, so a stale writer is fenced
 out even if it has not yet self-terminated. Runnable demo in all three languages:
 [`examples/fencing-token/`](./examples/fencing-token/).
+
+## Multi-node and isolation
+
+One lord runs one app on one NATS node - that boundary is deliberate (see [Singleton
+fencing](#singleton-fencing-liveness-not-write-exclusivity): one lord per app is enforced). To run
+across many machines or sites, you do **not** point many lords at one bus; you give each node its
+own lord, its own app, and its own NATS **leaf node with its own account**. A central hub connects
+the leaves and imports only the **data plane** (`aether.<app>.<name>.*`); each site's supervision
+and KV fencing (`aether._lord.*`) stay **node-local** and invisible to the others. So sites that
+must not see each other simply do not - isolation is a property of the NATS topology, not something
+the lord enforces per message.
+
+This keeps the model coherent: the lord stays a single-node supervisor, cross-node reach is a
+NATS-layer concern, and a "global" single instance is the one node that owns that responsibility -
+not a lock several lords contend for (which does not work; see the fencing section). Full design:
+[DESIGN.md §11b](./DESIGN.md). Runnable spike: [`examples/hub-spoke-spike/`](./examples/hub-spoke-spike/)
+(a hub + two isolated sites, asserting cross-node reach and negative isolation).
 
 ## Observability
 
