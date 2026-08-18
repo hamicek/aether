@@ -133,3 +133,66 @@ func TestVerifyGoneWhenLeaseExpires(t *testing.T) {
 	}
 	t.Fatal("lease did not expire after the lord stopped renewing")
 }
+
+// TestLiveHolderDetectsRenewingLord: an actively-renewed lease is reported live, with the holder -
+// the case where a second lord for the app must refuse to start.
+func TestLiveHolderDetectsRenewingLord(t *testing.T) {
+	m, _ := embeddedManager(t)
+	lease, err := m.Establish("demo", "lord-a")
+	if err != nil {
+		t.Fatalf("establish: %v", err)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				_ = lease.Renew()
+			}
+		}
+	}()
+	holder, err := m.LiveHolder("demo", 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("LiveHolder: %v", err)
+	}
+	if holder != "lord-a" {
+		t.Errorf("a renewing lease should be live with holder %q, got %q", "lord-a", holder)
+	}
+}
+
+// TestLiveHolderIgnoresDeadPredecessor: an existing but un-renewed lease (a crashed predecessor,
+// key not yet TTL-expired) is reported not-live, so a restart may take it over.
+func TestLiveHolderIgnoresDeadPredecessor(t *testing.T) {
+	m, _ := embeddedManager(t)
+	if _, err := m.Establish("demo", "lord-a"); err != nil {
+		t.Fatalf("establish: %v", err)
+	}
+	holder, err := m.LiveHolder("demo", 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("LiveHolder: %v", err)
+	}
+	if holder != "" {
+		t.Errorf("an un-renewed lease must be reported not-live (takeover ok), got holder %q", holder)
+	}
+}
+
+// TestLiveHolderNoLease: no lease key -> not-live, without waiting out the window.
+func TestLiveHolderNoLease(t *testing.T) {
+	m, _ := embeddedManager(t)
+	start := time.Now()
+	holder, err := m.LiveHolder("demo", 5*time.Second)
+	if err != nil {
+		t.Fatalf("LiveHolder: %v", err)
+	}
+	if holder != "" {
+		t.Errorf("no lease should be not-live, got holder %q", holder)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("no-lease check must return at once, took %s", elapsed)
+	}
+}

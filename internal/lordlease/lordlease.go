@@ -82,6 +82,45 @@ func (m *Manager) Establish(key, holder string) (*Lease, error) {
 	return &Lease{kv: m.kv, key: key, holder: holder, epoch: rev}, nil
 }
 
+// LiveHolder reports whether another lord is *actively holding* the lease for key, so a second
+// lord for one app can refuse to start instead of stomping the lease and crash-looping (one lord
+// per app). It cannot key off the holder id - that is unique per process, so a legitimate restart
+// of the same lord looks like a different holder while the old, not-yet-expired lease lingers.
+// Instead it tells a live competitor from a dead predecessor by whether the lease is being
+// renewed: it reads the revision, waits one renewal window, and reads again. An advanced revision
+// means someone is renewing (alive) - it returns that holder; an unchanged revision or a vanished
+// key means the previous holder is dead and this lord may take over - it returns "". A KV read
+// error is returned so the caller can decide (typically: log and proceed, since Establish will
+// fail loudly if the bus is truly down). When no lease exists it returns "" at once, no wait.
+func (m *Manager) LiveHolder(key string, window time.Duration) (holder string, err error) {
+	entry, err := m.kv.Get(key)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return "", nil // no lord holds this app
+	}
+	if err != nil {
+		return "", err
+	}
+	var r record
+	if err := json.Unmarshal(entry.Value(), &r); err != nil {
+		return "", err
+	}
+	rev1 := entry.Revision()
+
+	time.Sleep(window)
+
+	entry, err = m.kv.Get(key)
+	if errors.Is(err, nats.ErrKeyNotFound) {
+		return "", nil // expired during the wait -> the holder is gone
+	}
+	if err != nil {
+		return "", err
+	}
+	if entry.Revision() > rev1 {
+		return r.Holder, nil // the lease advanced -> a lord is renewing it (alive)
+	}
+	return "", nil // unchanged -> not being renewed, the previous holder is dead
+}
+
 // Epoch returns the fencing token of this lease, injected into every thrall the lord spawns.
 func (l *Lease) Epoch() uint64 { return l.epoch }
 
