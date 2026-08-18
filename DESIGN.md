@@ -784,8 +784,11 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   `fencing = false`, opts a thrall out of lord-liveness fencing for exactly the case where the blast
   radius is not worth it - a stateless / read-only thrall (e.g. a poller that only publishes) whose
   orphan is harmless. It then does *not* self-terminate on a lost lease, at the cost that it **may
-  outlive its lord**, so it is only for thralls that carry no ownership; singleton fencing is a
-  separate mechanism and stays on. (2) *One lord per app* is assumed, not
+  outlive its lord**, so it is only for thralls that carry no ownership. It really applies to
+  `local` thralls: singleton fencing is a separate mechanism and stays on, and because the lord
+  (not the thrall) renews the singleton lock, a `fencing = false` singleton is still reaped when
+  its lord dies - the lock stops being renewed, expires, and the singleton's own fencing acts on
+  it. (2) *One lord per app* is assumed, not
   enforced: the lease key is the app. Running two lords for one app is a misconfiguration, and under
   AE-031 it is a *worse* one than before - both write the same key with different epochs, so each
   lord's thralls see the other's epoch and mutually reap into a crash-loop, where previously they
