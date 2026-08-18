@@ -322,9 +322,7 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	}
 	stream := wire.EventLogStream(l.manifest.App, ch.spec.Name)
 	subject := wire.EventLog(l.manifest.App, ch.spec.Name)
-	if _, err := js.StreamInfo(stream); err == nil {
-		return nil
-	}
+
 	dedupWindowMs := ch.spec.EventLogDedupWindowMs
 	if dedupWindowMs <= 0 {
 		dedupWindowMs = wire.DefaultEventLogDedupWindowMs
@@ -352,11 +350,43 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	if ch.spec.EventLogMaxAgeMs > 0 {
 		cfg.MaxAge = time.Duration(ch.spec.EventLogMaxAgeMs) * time.Millisecond
 	}
+
+	// If the stream already exists, do NOT silently keep the old config: a retention bound or the
+	// dedup window is fixed at stream creation, so changing it in the manifest is otherwise a silent
+	// no-op and the lord runs on the stale value. Fail fast on a drift instead, naming what differs.
+	// Only fields the operator explicitly set are compared, so upgrading a stream the operator never
+	// bounded (they asked for nothing specific) does not trip this.
+	if si, err := js.StreamInfo(stream); err == nil {
+		if drift := eventLogConfigDrift(ch.spec, cfg, si.Config); drift != "" {
+			return fmt.Errorf("event log stream %q config drift (%s); the stream config is fixed at creation - delete the store or revert the manifest to apply", stream, drift)
+		}
+		return nil
+	}
+
 	if _, err := js.AddStream(cfg); err != nil {
 		return err
 	}
 	l.log.Info("event log provisioned", slog.String("stream", stream), slog.String("subject", subject))
 	return nil
+}
+
+// eventLogConfigDrift reports, for the retention/dedup fields the manifest explicitly set, where
+// the desired config differs from an already-existing stream (empty string = no drift). Only
+// explicitly-set fields (non-zero in the spec) are compared: an upgrade of a stream the operator
+// never bounded asked for nothing specific there, so it is not flagged. The dedup window is
+// compared post-clamp (cfg.Duplicates already reflects the MaxAge clamp).
+func eventLogConfigDrift(spec ThrallSpec, desired *nats.StreamConfig, existing nats.StreamConfig) string {
+	var diffs []string
+	if spec.EventLogMaxMsgs > 0 && existing.MaxMsgs != desired.MaxMsgs {
+		diffs = append(diffs, fmt.Sprintf("max_msgs existing=%d manifest=%d", existing.MaxMsgs, desired.MaxMsgs))
+	}
+	if spec.EventLogMaxAgeMs > 0 && existing.MaxAge != desired.MaxAge {
+		diffs = append(diffs, fmt.Sprintf("max_age existing=%s manifest=%s", existing.MaxAge, desired.MaxAge))
+	}
+	if spec.EventLogDedupWindowMs > 0 && existing.Duplicates != desired.Duplicates {
+		diffs = append(diffs, fmt.Sprintf("dedup_window existing=%s manifest=%s", existing.Duplicates, desired.Duplicates))
+	}
+	return strings.Join(diffs, "; ")
 }
 
 // provisionStream idempotently creates the durable mailbox stream for one child. Used
