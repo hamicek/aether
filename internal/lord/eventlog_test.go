@@ -90,6 +90,94 @@ func TestEventLogDedupWindowConfigured(t *testing.T) {
 	}
 }
 
+// eventLogSpec builds an event_log thrall spec with the given (0 = unset) retention/dedup fields.
+func eventLogSpec(maxMsgs, maxAgeMs, dedupMs int64) ThrallSpec {
+	return ThrallSpec{
+		Name: "acct", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true,
+		EventLogMaxMsgs: maxMsgs, EventLogMaxAgeMs: maxAgeMs, EventLogDedupWindowMs: dedupMs,
+	}
+}
+
+// TestEventLogConfigDriftFailsFast proves the lord refuses to start when an operator-set retention
+// bound or dedup window differs from an already-existing stream (a manifest change that would
+// otherwise be a silent no-op), while re-provisioning the same config and leaving a field unset do
+// not trip it.
+func TestEventLogConfigDriftFailsFast(t *testing.T) {
+	t.Run("changed explicit max_msgs drifts", func(t *testing.T) {
+		eth := startEmbedded(t)
+		provision := func(spec ThrallSpec) error {
+			l, err := New(&Manifest{App: "esd", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return l.provisionStreams()
+		}
+		if err := provision(eventLogSpec(1000, 0, 0)); err != nil {
+			t.Fatalf("first provision: %v", err)
+		}
+		err := provision(eventLogSpec(500, 0, 0))
+		if err == nil || !strings.Contains(err.Error(), "config drift") || !strings.Contains(err.Error(), "max_msgs") {
+			t.Fatalf("expected a max_msgs config-drift error, got: %v", err)
+		}
+	})
+
+	t.Run("same config does not drift", func(t *testing.T) {
+		eth := startEmbedded(t)
+		provision := func(spec ThrallSpec) error {
+			l, err := New(&Manifest{App: "esd2", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return l.provisionStreams()
+		}
+		if err := provision(eventLogSpec(1000, 0, 600_000)); err != nil {
+			t.Fatalf("first provision: %v", err)
+		}
+		if err := provision(eventLogSpec(1000, 0, 600_000)); err != nil {
+			t.Errorf("re-provisioning the same config must not drift: %v", err)
+		}
+	})
+
+	t.Run("removing a bound drifts", func(t *testing.T) {
+		eth := startEmbedded(t)
+		provision := func(spec ThrallSpec) error {
+			l, err := New(&Manifest{App: "esd3", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return l.provisionStreams()
+		}
+		if err := provision(eventLogSpec(1000, 0, 0)); err != nil {
+			t.Fatalf("first provision: %v", err)
+		}
+		// Removing the bound (manifest -> unbounded while the stream stays bounded) is a real change
+		// that will not apply, so it must drift too - not only adding/tightening a bound.
+		err := provision(eventLogSpec(0, 0, 0))
+		if err == nil || !strings.Contains(err.Error(), "config drift") || !strings.Contains(err.Error(), "max_msgs") {
+			t.Fatalf("removing a bound should drift, got: %v", err)
+		}
+	})
+
+	t.Run("never-bounded stream does not drift", func(t *testing.T) {
+		eth := startEmbedded(t)
+		provision := func(spec ThrallSpec) error {
+			l, err := New(&Manifest{App: "esd4", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return l.provisionStreams()
+		}
+		// The operator never bounds the log (unbounded on both sides) and never sets a dedup window:
+		// nothing to reconcile, so an upgrade of such a stream must start cleanly.
+		if err := provision(eventLogSpec(0, 0, 0)); err != nil {
+			t.Fatalf("first provision: %v", err)
+		}
+		if err := provision(eventLogSpec(0, 0, 0)); err != nil {
+			t.Errorf("a never-bounded stream must not drift: %v", err)
+		}
+	})
+}
+
 // TestEventLogDedupWindowClampedToMaxAge proves a max_age shorter than the dedup window does not
 // crash provisioning (JetStream rejects a duplicate window larger than MaxAge): the window is
 // clamped to MaxAge. A max_age at/above the window leaves the window unchanged.
