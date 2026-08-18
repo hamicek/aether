@@ -232,6 +232,11 @@ func (l *Lord) Start(ctx context.Context) error {
 	// themselves - a crash-loop, not HA. Cross-node single-instance is via leaf isolation (§11b),
 	// not lords racing on one bus. A stale lease from a dead predecessor is fine to take over; a
 	// KV read error is non-fatal here (Establish below fails loudly if the bus is truly down).
+	//
+	// Best-effort: this catches the realistic case (a second lord started while the first is
+	// already running). Two lords started within the same window - before either establishes -
+	// both see no lease and both proceed, degrading to the pre-enforce mutual-reap (no worse than
+	// before). A race-free guard would need a CAS-acquire lease with fencing, out of scope here.
 	if holder, err := l.lordLease.LiveHolder(l.manifest.App, lordLeaseTakeoverWait); err != nil {
 		l.log.Warn("could not check for an existing lord lease; proceeding", slog.String("err", err.Error()))
 	} else if holder != "" {

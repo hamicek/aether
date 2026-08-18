@@ -63,7 +63,7 @@ internal/
   lord/               supervisor: manifest, supervisor loop, restart strategies,
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
-  singleton/          distributed lock over KV (Create/CAS + TTL failover)
+  singleton/          distributed lock over KV (Create/CAS) - one instance within the app
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
@@ -506,7 +506,7 @@ thrall name comes from the manifest):
 - `aether-external.toml` - against a standalone NATS cluster (7390)
 - `aether-external-durable.toml` - durable mailbox on the external cluster (stream + KV off-runtime)
 - `aether-observability.toml` - polyglot demo with the `/metrics` endpoint enabled
-- `aether-singleton.toml` - singleton scope with distributed-lock failover (external cluster)
+- `aether-singleton.toml` - singleton scope: one instance within the app, via a KV-CAS lock (external NATS)
 - `aether-one-for-all.toml` - the one_for_all supervision strategy
 - `aether-rest-for-one.toml` - the rest_for_one supervision strategy
 - `aether-secure-external.toml` - external cluster over TLS with nkey auth
@@ -568,9 +568,11 @@ scenario for `default`/`overnight`). The suite measures:
   after warm-up. (On a run too short to warm up, the deltas are reported but not enforced.)
 - **Chaos** - random thralls are `SIGKILL`ed under load; bar: recovery per strategy < 3s, with durable
   delivery lossless through the kills (checked server-side by the stream draining to zero).
-- **Singleton failover** - two lord nodes (OS processes) race for a singleton; the holder's node is
-  killed repeatedly; bar: failover < 5s and never more than one live instance (fencing - a
-  *liveness* bound, not write-exclusivity; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
+- **Orphan reaping** - a lord is `SIGKILL`ed, orphaning its thralls; bar: each orphan self-reaps
+  within the lease once it can no longer verify the lord (fencing - a *liveness* bound, not
+  write-exclusivity; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
+  (The former two-lords-race-a-singleton bar is retired: one lord per app is now enforced, and that
+  topology never provided failover - the loser's instance mutually reaps.)
 - **Graceful drain** - a durable thrall is drained mid-stream and restarted; bar: no work lost.
 
 It ends with a structured report and a **non-zero exit on any bar breach**.

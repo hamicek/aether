@@ -92,6 +92,11 @@ func (m *Manager) Establish(key, holder string) (*Lease, error) {
 // key means the previous holder is dead and this lord may take over - it returns "". A KV read
 // error is returned so the caller can decide (typically: log and proceed, since Establish will
 // fail loudly if the bus is truly down). When no lease exists it returns "" at once, no wait.
+//
+// Best-effort: the signal is "the revision advanced", i.e. at least one renewal Put *succeeded*
+// within the window - not merely that a tick was due. If the holder's single in-window renewal
+// happens to fail transiently, a live lord can be read as dead. This matches the caller's
+// best-effort one-lord-per-app guard; it is not a distributed lock.
 func (m *Manager) LiveHolder(key string, window time.Duration) (holder string, err error) {
 	entry, err := m.kv.Get(key)
 	if errors.Is(err, nats.ErrKeyNotFound) {
