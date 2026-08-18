@@ -226,7 +226,14 @@ cmd  = "bun run ./counter.ts"
 restart = "permanent"                    # | transient | temporary
 scope   = "local"                        # | singleton
 durable = false                          # true -> cast over JetStream
+# fencing = false                        # opt out of lord-liveness fencing (see below)
 ```
+
+By default every thrall self-terminates when it can no longer verify its lord's lease, so no
+thrall outlives its lord. On a shared external bus a KV hiccup then reaps the whole tree. Set
+`fencing = false` on a thrall whose orphan is harmless (a stateless / read-only poller) so a bus
+blip does not take it down - it then **may** outlive its lord, so use it only for thralls that own
+nothing. Singleton fencing (one instance per cluster) is separate and stays on.
 
 ## HTTP edge (ingress)
 

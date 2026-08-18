@@ -780,7 +780,12 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   *detection* latency, not the recovery: while the outage lasts, `permanent` thralls reap, restart,
   re-fence and reap again - a crash-loop for the duration - so the KV must be as available as the app
   needs to be. The grace is deliberately asymmetric: a genuinely-expired key (lord truly gone) reaps
-  immediately, an unreachable KV is tolerated for the lease. (2) *One lord per app* is assumed, not
+  immediately, an unreachable KV is tolerated for the lease. A per-thrall escape hatch,
+  `fencing = false`, opts a thrall out of lord-liveness fencing for exactly the case where the blast
+  radius is not worth it - a stateless / read-only thrall (e.g. a poller that only publishes) whose
+  orphan is harmless. It then does *not* self-terminate on a lost lease, at the cost that it **may
+  outlive its lord**, so it is only for thralls that carry no ownership; singleton fencing is a
+  separate mechanism and stays on. (2) *One lord per app* is assumed, not
   enforced: the lease key is the app. Running two lords for one app is a misconfiguration, and under
   AE-031 it is a *worse* one than before - both write the same key with different epochs, so each
   lord's thralls see the other's epoch and mutually reap into a crash-loop, where previously they
