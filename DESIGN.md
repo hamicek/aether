@@ -425,12 +425,15 @@ application identity or roles.**
 - **Registry** -> NATS **KV** `name -> {node, pid, status}`. Cluster-wide with no extra work.
 - **Lifecycle stream** -> `aether._lord.events` (spawned/ready/down/restarting/...), surfaced by the
   CLI `events`.
-- **Singleton / global thrall** (the equivalent of Erlang `:global`). In a single node it is trivial;
-  in a cluster the lord runs on several hosts and two could start the same `counter` -> two instances
-  of the same state = a silent catastrophe. The solution: a **distributed lock over NATS KV with CAS**
-  (compare-and-swap on the revision) - whoever acquires the key `singleton/<name>` may start; the
-  others wait and take over on failure (failover). That is why the manifest has
-  `scope = "local" | "singleton"`.
+- **Singleton / global thrall** (the equivalent of Erlang `:global`). `scope = "singleton"` runs the
+  thrall as **exactly one instance for the app** - no replicas - guarded by a **distributed lock over
+  NATS KV with CAS** (compare-and-swap on the revision): the lord acquires the key `singleton/<name>`
+  before spawning. Within a lord's app this guarantees a single instance; the lock is also a guard
+  against a stray second lord, though that is now refused at startup anyway (**one lord per app**,
+  §14). This is single-instance *within an app*, not a pool of lords on one bus racing and failing
+  over a shared lock - that scenario mutually reaps under lord-liveness fencing (§14). Cross-node
+  single-instance is a deployment concern, solved by leaf-node isolation (§11b: one lord per node,
+  its own app). The manifest has `scope = "local" | "singleton"`.
 - **DynamicSupervisor** - starting and stopping thralls at runtime, not only from the manifest, via
   `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go SDK). Needed for "a driver per connection", a
   worker per request, or a workflow instance. The SDK sends a `ctl` request to the lord's inbound
@@ -651,8 +654,9 @@ Two honest limits, both inherent to JetStream dedup rather than worked around:
   (`event_log_dedup_window_ms`, 2 min by default, set explicitly by the lord). It guards
   real-time retry and redelivery, not a replay of the same id days later. Raise the window to
   cover slower retries, at the cost of a larger dedup index. The window is fixed at stream
-  creation, like the retention bounds: changing it on an already-provisioned stream is a no-op
-  until the stream is recreated.
+  creation, like the retention bounds; the lord does not update an existing stream, so changing it
+  in the manifest against an already-provisioned stream is **rejected at startup** (a config drift
+  the lord names and fails on) rather than silently ignored - recreate the stream to apply it.
 - **The id, not the intent.** Keying on `ctx.MsgID` deduplicates *the same message*. Two
   logically identical commands a client sends as two separate casts have two ids and are two
   events - correctly, since the runtime cannot know they were meant to be one. For client-driven
@@ -788,12 +792,15 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   `local` thralls: singleton fencing is a separate mechanism and stays on, and because the lord
   (not the thrall) renews the singleton lock, a `fencing = false` singleton is still reaped when
   its lord dies - the lock stops being renewed, expires, and the singleton's own fencing acts on
-  it. (2) *One lord per app* is assumed, not
-  enforced: the lease key is the app. Running two lords for one app is a misconfiguration, and under
-  AE-031 it is a *worse* one than before - both write the same key with different epochs, so each
-  lord's thralls see the other's epoch and mutually reap into a crash-loop, where previously they
-  would merely have coexisted as harmless duplicates. A single writer must be ensured operationally
-  (distinct apps per lord, or singletons for cross-node single-instance).
+  it. (2) *One lord per app*, now **enforced at startup**: the lease key is the app, so two lords
+  for one app would both write it with different epochs, each lord's thralls would see the other's
+  epoch and reap themselves into a crash-loop (this is not HA failover - the singleton instance
+  self-terminates on the superseded epoch). So a starting lord first checks the app's lease: if
+  another lord is *actively renewing* it, the new lord refuses to start with a clear error rather
+  than stomp it. A live competitor is told apart from a dead predecessor (a lingering lease after a
+  crash) by whether the lease is being renewed, not by holder id - a legitimate restart takes the
+  lease over. Cross-node single-instance is achieved by leaf-node isolation (§11b: one lord per
+  node, its own app), not by lords racing for a shared lock on one bus.
 - **`temporary` semantics inside group strategies** - its interaction with `one_for_all` /
   `rest_for_one` is not fully specified.
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via

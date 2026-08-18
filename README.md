@@ -42,7 +42,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
-| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock + failover: **at most one _live_ instance** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
+| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 
@@ -233,7 +233,12 @@ By default every thrall self-terminates when it can no longer verify its lord's 
 thrall outlives its lord. On a shared external bus a KV hiccup then reaps the whole tree. Set
 `fencing = false` on a thrall whose orphan is harmless (a stateless / read-only poller) so a bus
 blip does not take it down - it then **may** outlive its lord, so use it only for thralls that own
-nothing. Singleton fencing (one instance per cluster) is separate and stays on.
+nothing. Singleton fencing (one instance within the app) is separate and stays on.
+
+**One lord per app** is enforced: a second lord starting for an app another lord is already
+running refuses to start (rather than stomp its lease and crash-loop the tree). Run one lord per
+app; for many isolated sites, give each its own node and app (leaf-node isolation), not two lords
+racing on one bus.
 
 ## HTTP edge (ingress)
 
