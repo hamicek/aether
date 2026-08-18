@@ -1,6 +1,6 @@
 {
   "name": "@hamicek/aether",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "SDK for building thralls (genservers) in the ether (NATS) - lord/thrall runtime",
   "type": "module",
   "module": "./src/index.ts",
