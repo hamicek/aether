@@ -82,3 +82,45 @@ func TestChildEnvNonSingletonHasNoFencing(t *testing.T) {
 		}
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
+
+// TestChildEnvLordFencingDefault: a thrall without an explicit fencing field carries the
+// lord-liveness token (fencing is on by default).
+func TestChildEnvLordFencingDefault(t *testing.T) {
+	c := &child{spec: ThrallSpec{Name: "w", Cmd: "run"}, app: "a", lordKey: "a", lordEpoch: 7}
+	if got, ok := envValue(c.env(), "AETHER_LORD_EPOCH"); !ok || got != "7" {
+		t.Errorf("a default thrall must carry lord-liveness fencing: AETHER_LORD_EPOCH=%q present=%v", got, ok)
+	}
+}
+
+// TestChildEnvFencingOptOut: fencing = false withholds the lord-liveness token (so the SDK's
+// fencing loop is a no-op and the thrall does not self-exit on a lost lease), but singleton
+// fencing is a separate mechanism and stays.
+func TestChildEnvFencingOptOut(t *testing.T) {
+	c := &child{
+		spec:           ThrallSpec{Name: "poller", Cmd: "run", Fencing: boolPtr(false)},
+		app:            "a",
+		lordKey:        "a",
+		lordEpoch:      7,
+		singletonKey:   "poller",
+		singletonEpoch: 42,
+	}
+	env := c.env()
+	for _, k := range []string{"AETHER_LORD_BUCKET", "AETHER_LORD_KEY", "AETHER_LORD_EPOCH"} {
+		if _, ok := envValue(env, k); ok {
+			t.Errorf("fencing = false must withhold %s", k)
+		}
+	}
+	if _, ok := envValue(env, "AETHER_SINGLETON_EPOCH"); !ok {
+		t.Error("fencing = false must not disable singleton fencing (a separate mechanism)")
+	}
+}
+
+// TestChildEnvFencingExplicitTrue: fencing = true is the same as the default (token present).
+func TestChildEnvFencingExplicitTrue(t *testing.T) {
+	c := &child{spec: ThrallSpec{Name: "w", Cmd: "run", Fencing: boolPtr(true)}, app: "a", lordKey: "a", lordEpoch: 7}
+	if _, ok := envValue(c.env(), "AETHER_LORD_EPOCH"); !ok {
+		t.Error("fencing = true must carry lord-liveness fencing")
+	}
+}

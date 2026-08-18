@@ -9,16 +9,20 @@ remain before it is production-grade. They are listed here so the trade-offs are
 **Delivered:** thrall-level fencing for singletons and lord-liveness fencing for every thrall -
 a thrall self-terminates when it loses its KV lock or its lord's lease, so no thrall outlives its
 lord even on an external SIGKILL; the fencing epoch is exposed as `ctx.SingletonEpoch` for
-write-side fencing tokens (see [DESIGN.md §14](./DESIGN.md) and `examples/fencing-token/`).
+write-side fencing tokens (see [DESIGN.md §14](./DESIGN.md) and `examples/fencing-token/`). A
+per-thrall `fencing = false` opts a harmless orphan (a stateless / read-only poller) out of
+lord-liveness fencing, so a shared-bus hiccup does not reap the whole tree.
 
 Still open:
 
 - **`temporary` restart policy inside group strategies.** `temporary` is honoured under
   `one_for_one`, but its interaction with `one_for_all` / `rest_for_one` group restarts is not
   yet fully specified.
-- **Fencing opt-out / single-lord enforcement.** Lord-liveness fencing has no per-thrall opt-out
-  (a read-only orphan still self-exits on a KV blip), and "one lord per app" is assumed, not
-  enforced at startup - see the trade-offs in [DESIGN.md §14](./DESIGN.md).
+- **Single-lord enforcement.** "One lord per app" is assumed, not enforced at startup; a naive
+  refusal conflicts with the singleton-failover model (two lords per app racing for a lock), so
+  it needs a per-lord-instance lease rather than the per-app one - see [DESIGN.md §14](./DESIGN.md).
+- **Dynamic-child fencing opt-out.** `fencing = false` applies to manifest thralls; a dynamic
+  child (`StartChild`) is always fenced (the spawn API carries no opt-out yet).
 
 ## State and durability
 
