@@ -138,7 +138,7 @@ func TestEventLogConfigDriftFailsFast(t *testing.T) {
 		}
 	})
 
-	t.Run("unset field is not compared", func(t *testing.T) {
+	t.Run("removing a bound drifts", func(t *testing.T) {
 		eth := startEmbedded(t)
 		provision := func(spec ThrallSpec) error {
 			l, err := New(&Manifest{App: "esd3", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
@@ -150,10 +150,30 @@ func TestEventLogConfigDriftFailsFast(t *testing.T) {
 		if err := provision(eventLogSpec(1000, 0, 0)); err != nil {
 			t.Fatalf("first provision: %v", err)
 		}
-		// The second manifest leaves max_msgs unset (0): the operator asked for nothing specific,
-		// so the existing stream's 1000 must not be flagged as drift.
+		// Removing the bound (manifest -> unbounded while the stream stays bounded) is a real change
+		// that will not apply, so it must drift too - not only adding/tightening a bound.
+		err := provision(eventLogSpec(0, 0, 0))
+		if err == nil || !strings.Contains(err.Error(), "config drift") || !strings.Contains(err.Error(), "max_msgs") {
+			t.Fatalf("removing a bound should drift, got: %v", err)
+		}
+	})
+
+	t.Run("never-bounded stream does not drift", func(t *testing.T) {
+		eth := startEmbedded(t)
+		provision := func(spec ThrallSpec) error {
+			l, err := New(&Manifest{App: "esd4", Strategy: "one_for_one", Thralls: []ThrallSpec{spec}}, eth)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			return l.provisionStreams()
+		}
+		// The operator never bounds the log (unbounded on both sides) and never sets a dedup window:
+		// nothing to reconcile, so an upgrade of such a stream must start cleanly.
 		if err := provision(eventLogSpec(0, 0, 0)); err != nil {
-			t.Errorf("an unset field must not drift: %v", err)
+			t.Fatalf("first provision: %v", err)
+		}
+		if err := provision(eventLogSpec(0, 0, 0)); err != nil {
+			t.Errorf("a never-bounded stream must not drift: %v", err)
 		}
 	})
 }

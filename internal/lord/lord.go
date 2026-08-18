@@ -351,14 +351,14 @@ func (l *Lord) provisionEventLog(ch *child) error {
 		cfg.MaxAge = time.Duration(ch.spec.EventLogMaxAgeMs) * time.Millisecond
 	}
 
-	// If the stream already exists, do NOT silently keep the old config: a retention bound or the
-	// dedup window is fixed at stream creation, so changing it in the manifest is otherwise a silent
-	// no-op and the lord runs on the stale value. Fail fast on a drift instead, naming what differs.
-	// Only fields the operator explicitly set are compared, so upgrading a stream the operator never
-	// bounded (they asked for nothing specific) does not trip this.
+	// If the stream already exists, do NOT silently keep the old config: the lord does not update
+	// an existing stream, so a manifest change to a retention bound or the dedup window is otherwise
+	// a silent no-op and the lord runs on the stale value. Fail fast on a drift instead, naming what
+	// differs, and let the operator reconcile deliberately - shrinking retention drops the oldest
+	// events, which for an event log ARE the rebuild history, so this is not something to apply blind.
 	if si, err := js.StreamInfo(stream); err == nil {
 		if drift := eventLogConfigDrift(ch.spec, cfg, si.Config); drift != "" {
-			return fmt.Errorf("event log stream %q config drift (%s); the stream config is fixed at creation - delete the store or revert the manifest to apply", stream, drift)
+			return fmt.Errorf("event log stream %q config drift (%s); the lord does not change an existing stream automatically - revert the manifest, or edit the stream deliberately (note: shrinking retention drops the oldest events, which are the rebuild history)", stream, drift)
 		}
 		return nil
 	}
@@ -370,23 +370,46 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	return nil
 }
 
-// eventLogConfigDrift reports, for the retention/dedup fields the manifest explicitly set, where
-// the desired config differs from an already-existing stream (empty string = no drift). Only
-// explicitly-set fields (non-zero in the spec) are compared: an upgrade of a stream the operator
-// never bounded asked for nothing specific there, so it is not flagged. The dedup window is
-// compared post-clamp (cfg.Duplicates already reflects the MaxAge clamp).
+// eventLogConfigDrift reports where the desired event-log stream config differs from an existing
+// one (empty string = no drift). MaxMsgs and MaxAge are compared ALWAYS, normalizing "unbounded",
+// so removing a bound (manifest -> unbounded while the stream stays bounded) is caught too, not
+// only adding or tightening one; a stream the operator never bounded is unbounded on both sides
+// and does not drift. The dedup window is compared only when the operator explicitly set it,
+// because the lord always defaults it, so a legacy stream (created before dedup, Duplicates=0) or
+// one where no window was set would otherwise drift on every start. The dedup value is compared
+// post-clamp (cfg.Duplicates already reflects the MaxAge clamp).
 func eventLogConfigDrift(spec ThrallSpec, desired *nats.StreamConfig, existing nats.StreamConfig) string {
 	var diffs []string
-	if spec.EventLogMaxMsgs > 0 && existing.MaxMsgs != desired.MaxMsgs {
-		diffs = append(diffs, fmt.Sprintf("max_msgs existing=%d manifest=%d", existing.MaxMsgs, desired.MaxMsgs))
+	// Rendering each bound to a canonical string ("unbounded" for <=0, else the value) normalizes
+	// JetStream's unbounded encodings (MaxMsgs stored as -1, MaxAge as 0) and doubles as the message.
+	if boundMsgs(existing.MaxMsgs) != boundMsgs(desired.MaxMsgs) {
+		diffs = append(diffs, "max_msgs existing="+boundMsgs(existing.MaxMsgs)+" manifest="+boundMsgs(desired.MaxMsgs))
 	}
-	if spec.EventLogMaxAgeMs > 0 && existing.MaxAge != desired.MaxAge {
-		diffs = append(diffs, fmt.Sprintf("max_age existing=%s manifest=%s", existing.MaxAge, desired.MaxAge))
+	if boundAge(existing.MaxAge) != boundAge(desired.MaxAge) {
+		diffs = append(diffs, "max_age existing="+boundAge(existing.MaxAge)+" manifest="+boundAge(desired.MaxAge))
 	}
 	if spec.EventLogDedupWindowMs > 0 && existing.Duplicates != desired.Duplicates {
 		diffs = append(diffs, fmt.Sprintf("dedup_window existing=%s manifest=%s", existing.Duplicates, desired.Duplicates))
 	}
 	return strings.Join(diffs, "; ")
+}
+
+// boundMsgs / boundAge render a retention bound to a canonical string: "unbounded" for a
+// non-positive value (JetStream stores an unbounded MaxMsgs as -1 and an unbounded MaxAge as 0),
+// else the value. Comparing the rendered strings both normalizes those encodings and reads well
+// in the drift message.
+func boundMsgs(n int64) string {
+	if n <= 0 {
+		return "unbounded"
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+func boundAge(d time.Duration) string {
+	if d <= 0 {
+		return "unbounded"
+	}
+	return d.String()
 }
 
 // provisionStream idempotently creates the durable mailbox stream for one child. Used
