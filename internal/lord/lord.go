@@ -34,6 +34,10 @@ const (
 	// of the (configurable, possibly disabled) heartbeat reaper: the lease must be renewed
 	// unconditionally, or every thrall would falsely fence itself when heartbeats are off.
 	lordLeaseRenew = 1 * time.Second
+	// lordLeaseTakeoverWait is how long the lord watches an existing lease at startup before
+	// deciding whether it is being renewed (a live competing lord to refuse) or stale (a dead
+	// predecessor it may take over). It exceeds lordLeaseRenew so at least one renewal tick lands.
+	lordLeaseTakeoverWait = lordLeaseRenew + 500*time.Millisecond
 
 	// backlogPollInterval is how often the lord samples durable consumer backlogs.
 	backlogPollInterval = 2 * time.Second
@@ -220,6 +224,23 @@ func (l *Lord) Start(ctx context.Context) error {
 
 	if err := l.provisionStreams(); err != nil {
 		return err
+	}
+
+	// One lord per app: if another lord is already actively renewing the liveness lease for this
+	// app, refuse to start rather than stomp its lease. Two lords for one app write the same
+	// per-app lease with different epochs, so each lord's thralls see the other's epoch and reap
+	// themselves - a crash-loop, not HA. Cross-node single-instance is via leaf isolation (§11b),
+	// not lords racing on one bus. A stale lease from a dead predecessor is fine to take over; a
+	// KV read error is non-fatal here (Establish below fails loudly if the bus is truly down).
+	//
+	// Best-effort: this catches the realistic case (a second lord started while the first is
+	// already running). Two lords started within the same window - before either establishes -
+	// both see no lease and both proceed, degrading to the pre-enforce mutual-reap (no worse than
+	// before). A race-free guard would need a CAS-acquire lease with fencing, out of scope here.
+	if holder, err := l.lordLease.LiveHolder(l.manifest.App, lordLeaseTakeoverWait); err != nil {
+		l.log.Warn("could not check for an existing lord lease; proceeding", slog.String("err", err.Error()))
+	} else if holder != "" {
+		return fmt.Errorf("another lord (%q) already holds the liveness lease for app %q - one lord per app; refusing to start", holder, l.manifest.App)
 	}
 
 	// Establish this lord's liveness lease before any thrall starts, so a thrall's first

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -263,53 +264,60 @@ func TestOneForAllRestart(t *testing.T) {
 	})
 }
 
-func TestSingletonFencing(t *testing.T) {
+// TestSecondLordRefusesForSameApp: one lord per app is enforced. A second lord for an app whose
+// lord-liveness lease another lord is actively renewing refuses to start, rather than stomp the
+// lease and reap each other's thralls into a crash-loop (the old TestSingletonFencing started two
+// same-app lords and only looked like it worked - the singleton instance actually self-terminated
+// on the superseded epoch, which the test missed by counting starts, not liveness). Cross-node
+// single-instance is via leaf isolation (DESIGN §11b), not lords racing on one bus.
+func TestSecondLordRefusesForSameApp(t *testing.T) {
 	const app = "itest"
 	eth1 := startEmbedded(t)
+	startLord(t, eth1, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
 
-	// A second lord against the SAME NATS, connected as an external client.
 	eth2, err := ether.Start(context.Background(), ether.Config{Mode: "external", URL: eth1.URL()})
 	if err != nil {
 		t.Fatalf("second ether: %v", err)
 	}
 	t.Cleanup(eth2.Stop)
+	l2, err := New(manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")), eth2)
+	if err != nil {
+		t.Fatalf("second lord New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := l2.Start(ctx); err == nil || !strings.Contains(err.Error(), "one lord per app") {
+		t.Fatalf("a second lord for the same app should refuse, got: %v", err)
+	}
+}
 
-	// Count how many singleton instances actually boot, and how many lords win the lock.
-	var started, acquired int32
-	if _, err := eth1.Conn().Subscribe("test.probe.started", func(*nats.Msg) {
+// TestSingletonUnderSingleLordStaysAlive: under one lord a singleton starts AND stays alive - the
+// liveness the old two-lord test never checked. With no competing lord there is no superseded
+// lord-liveness epoch, so the instance does not self-exit; started stays 1 (no reap+restart) and
+// the instance still answers a call.
+func TestSingletonUnderSingleLordStaysAlive(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+
+	var started int32
+	if _, err := eth.Conn().Subscribe("test.probe.started", func(*nats.Msg) {
 		atomic.AddInt32(&started, 1)
 	}); err != nil {
 		t.Fatalf("subscribe started: %v", err)
 	}
-	if _, err := eth1.Conn().Subscribe(wire.Events, func(m *nats.Msg) {
-		var ev struct {
-			Event string `json:"event"`
-			Name  string `json:"name"`
-		}
-		if json.Unmarshal(m.Data, &ev) == nil && ev.Event == "lock_acquired" && ev.Name == "counter-single" {
-			atomic.AddInt32(&acquired, 1)
-		}
-	}); err != nil {
-		t.Fatalf("subscribe events: %v", err)
-	}
-	_ = eth1.Conn().Flush()
+	_ = eth.Conn().Flush()
 
-	startLord(t, eth1, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
-	startLord(t, eth2, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
-
-	// One instance must come up (whichever lord wins the distributed KV lock).
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("counter-single", "permanent", "singleton")))
 	waitFor(t, 5*time.Second, "singleton instance to start", func() bool {
 		return atomic.LoadInt32(&started) >= 1
 	})
 
-	// Prove the negative: the other lord is fenced out. Bounded grace, since asserting that a
-	// second instance never appears is inherently a wait for absence.
-	time.Sleep(1 * time.Second)
-
+	// Past a couple of lord-liveness verify ticks (TTL/3): if it were going to reap, it would have.
+	time.Sleep(2 * time.Second)
 	if n := atomic.LoadInt32(&started); n != 1 {
-		t.Fatalf("singleton fencing: expected exactly 1 instance, got %d", n)
+		t.Fatalf("expected exactly 1 start (no reap+restart), got %d", n)
 	}
-	if n := atomic.LoadInt32(&acquired); n != 1 {
-		t.Fatalf("singleton fencing: expected exactly 1 lock acquisition, got %d", n)
+	if _, ok := tryCallInt(eth.Conn(), app, "counter-single", "get"); !ok {
+		t.Fatal("the singleton must still be alive, but a call got no responders")
 	}
 }

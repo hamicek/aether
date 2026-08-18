@@ -145,6 +145,13 @@ func failoverRounds(d time.Duration) int {
 // TestSoakSingletonFailover repeatedly kills the lord node holding the singleton and
 // checks a new instance takes over within the bar, with never two live at once.
 func TestSoakSingletonFailover(t *testing.T) {
+	// This test runs two lord hosts for one app and expects cross-lord singleton failover. That
+	// topology is now refused at startup (one lord per app, AE-062) - and never actually worked:
+	// the second lord supersedes the per-app lord-liveness epoch and the singleton self-terminates
+	// (DESIGN 14). Reworking or removing this for the single-lord / leaf-isolation model is a
+	// follow-up; skipping so it does not fail on the enforced refusal.
+	t.Skip("two lords per app is now refused (AE-062); singleton soak needs a single-lord rework")
+
 	cfg := resolveSoakConfig(t)
 	t.Logf("soak singleton: profile=%s duration=%s seed=%d", cfg.profile, cfg.duration, cfg.seed)
 
@@ -279,6 +286,10 @@ func lordHostAncestor(pid int, hosts []int) int {
 // live instances never persist. Without fencing the orphan would run forever and this test
 // would fail (the standby lord starts a second instance after the lock expires).
 func TestSoakSingletonOrphanFencing(t *testing.T) {
+	// Same reason as TestSoakSingletonFailover: two lord hosts for one app is now refused at
+	// startup (AE-062). Needs a single-lord / leaf-isolation rework - follow-up.
+	t.Skip("two lords per app is now refused (AE-062); singleton soak needs a single-lord rework")
+
 	const app = "orphan"
 	eth := startEmbedded(t)
 	nc := eth.Conn()

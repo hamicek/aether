@@ -42,7 +42,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
-| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock + failover: **at most one _live_ instance** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
+| **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 
@@ -63,7 +63,7 @@ internal/
   lord/               supervisor: manifest, supervisor loop, restart strategies,
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
-  singleton/          distributed lock over KV (Create/CAS + TTL failover)
+  singleton/          distributed lock over KV (Create/CAS) - one instance within the app
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
@@ -233,7 +233,12 @@ By default every thrall self-terminates when it can no longer verify its lord's 
 thrall outlives its lord. On a shared external bus a KV hiccup then reaps the whole tree. Set
 `fencing = false` on a thrall whose orphan is harmless (a stateless / read-only poller) so a bus
 blip does not take it down - it then **may** outlive its lord, so use it only for thralls that own
-nothing. Singleton fencing (one instance per cluster) is separate and stays on.
+nothing. Singleton fencing (one instance within the app) is separate and stays on.
+
+**One lord per app** is enforced: a second lord starting for an app another lord is already
+running refuses to start (rather than stomp its lease and crash-loop the tree). Run one lord per
+app; for many isolated sites, give each its own node and app (leaf-node isolation), not two lords
+racing on one bus.
 
 ## HTTP edge (ingress)
 
@@ -501,7 +506,7 @@ thrall name comes from the manifest):
 - `aether-external.toml` - against a standalone NATS cluster (7390)
 - `aether-external-durable.toml` - durable mailbox on the external cluster (stream + KV off-runtime)
 - `aether-observability.toml` - polyglot demo with the `/metrics` endpoint enabled
-- `aether-singleton.toml` - singleton scope with distributed-lock failover (external cluster)
+- `aether-singleton.toml` - singleton scope: one instance within the app, via a KV-CAS lock (external NATS)
 - `aether-one-for-all.toml` - the one_for_all supervision strategy
 - `aether-rest-for-one.toml` - the rest_for_one supervision strategy
 - `aether-secure-external.toml` - external cluster over TLS with nkey auth
@@ -563,9 +568,11 @@ scenario for `default`/`overnight`). The suite measures:
   after warm-up. (On a run too short to warm up, the deltas are reported but not enforced.)
 - **Chaos** - random thralls are `SIGKILL`ed under load; bar: recovery per strategy < 3s, with durable
   delivery lossless through the kills (checked server-side by the stream draining to zero).
-- **Singleton failover** - two lord nodes (OS processes) race for a singleton; the holder's node is
-  killed repeatedly; bar: failover < 5s and never more than one live instance (fencing - a
-  *liveness* bound, not write-exclusivity; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
+- **Orphan reaping** - a lord is `SIGKILL`ed, orphaning its thralls; bar: each orphan self-reaps
+  within the lease once it can no longer verify the lord (fencing - a *liveness* bound, not
+  write-exclusivity; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
+  (The former two-lords-race-a-singleton bar is retired: one lord per app is now enforced, and that
+  topology never provided failover - the loser's instance mutually reaps.)
 - **Graceful drain** - a durable thrall is drained mid-stream and restarted; bar: no work lost.
 
 It ends with a structured report and a **non-zero exit on any bar breach**.
