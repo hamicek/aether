@@ -6,22 +6,38 @@ remain before it is production-grade. They are listed here so the trade-offs are
 
 ## Supervision semantics
 
+**Delivered:** thrall-level fencing for singletons and lord-liveness fencing for every thrall -
+a thrall self-terminates when it loses its KV lock or its lord's lease, so no thrall outlives its
+lord even on an external SIGKILL; the fencing epoch is exposed as `ctx.SingletonEpoch` for
+write-side fencing tokens (see [DESIGN.md §14](./DESIGN.md) and `examples/fencing-token/`).
+
+Still open:
+
 - **`temporary` restart policy inside group strategies.** `temporary` is honoured under
   `one_for_one`, but its interaction with `one_for_all` / `rest_for_one` group restarts is not
   yet fully specified.
+- **Fencing opt-out / single-lord enforcement.** Lord-liveness fencing has no per-thrall opt-out
+  (a read-only orphan still self-exits on a KV blip), and "one lord per app" is assumed, not
+  enforced at startup - see the trade-offs in [DESIGN.md §14](./DESIGN.md).
 
 ## State and durability
 
 **Delivered:** state that must survive a restart is made durable by **event-sourcing**
 (`event_log = true` + `Append`/`Rebuild`) - the thrall replays its retention event log in `init`
 to rebuild state, rather than snapshotting the in-memory image; see [DESIGN.md §13c](./DESIGN.md)
-and `examples/eventsourced/`. The mailbox survives a restart when JetStream storage is persistent
-(embedded `store_dir` or external NATS; [DESIGN.md §13](./DESIGN.md)).
+and `examples/eventsourced/`. A **command-key** dedup key on `Append` (via `Nats-Msg-Id`, keyed on
+`ctx.MsgID`) makes a redelivered non-idempotent event safe, and the lord warns when `event_log` is
+combined with a retention bound that would truncate a rebuild. The mailbox survives a restart when
+JetStream storage is persistent (embedded `store_dir` or external NATS; [DESIGN.md §13](./DESIGN.md)).
 
 Still open:
 
 - **Snapshots / compaction.** The event log is bounded only by its configured retention; a state
   snapshot + replay-since (so rebuild does not read full history) is future work.
+- **Stream-config reconcile.** Retention bounds and the dedup window are fixed at stream creation;
+  changing them in the manifest on an already-provisioned stream is silently a no-op. Comparing the
+  desired config against the existing stream and failing fast on an un-appliable diff would close
+  that (and related) silent config drift.
 
 ## Observability and operations
 
