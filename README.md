@@ -566,6 +566,8 @@ It ends with a structured report and a **non-zero exit on any bar breach**.
 ## Deliberately deferred
 
 The runtime has conscious gaps, tracked in [ROADMAP.md](./ROADMAP.md): liveness beyond heartbeats
-(`$SYS` events), full thrall-level fencing for orphaned singletons, `temporary` semantics inside
-group strategies, thrall state persistence (today durability covers the mailbox, not the state - see
-[Durability](#durability)), and chaos/failover coverage on top of the soak suite for high-reliability use.
+(`$SYS` events), `temporary` semantics inside group strategies, thrall state persistence
+(today durability covers the mailbox, not the state - see [Durability](#durability); event-sourced
+rebuild covers the rest), and chaos/failover coverage on top of the soak suite for high-reliability
+use. Thrall-level fencing for orphaned singletons - once listed here - is **done** (both singleton
+and lord-liveness fencing; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
