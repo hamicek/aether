@@ -404,8 +404,8 @@ out even if it has not yet self-terminated. Runnable demo in all three languages
 
 ## Multi-node and isolation
 
-One lord runs one app on one NATS node - that boundary is deliberate (see [Singleton
-fencing](#singleton-fencing-liveness-not-write-exclusivity): one lord per app is enforced). To run
+One lord runs one app on one NATS node - that boundary is deliberate ([one lord per
+app](#manifest-example) is enforced at startup). To run
 across many machines or sites, you do **not** point many lords at one bus; you give each node its
 own lord, its own app, and its own NATS **leaf node with its own account**. A central hub connects
 the leaves and imports only the **data plane** (`aether.<app>.<name>.*`); each site's supervision
@@ -608,8 +608,7 @@ It ends with a structured report and a **non-zero exit on any bar breach**.
 ## Deliberately deferred
 
 The runtime has conscious gaps, tracked in [ROADMAP.md](./ROADMAP.md): liveness beyond heartbeats
-(`$SYS` events), `temporary` semantics inside group strategies, thrall state persistence
+(`$SYS` events), `temporary` semantics inside group strategies, and thrall state persistence
 (today durability covers the mailbox, not the state - see [Durability](#durability); event-sourced
-rebuild covers the rest), and chaos/failover coverage on top of the soak suite for high-reliability
-use. Thrall-level fencing for orphaned singletons - once listed here - is **done** (both singleton
+rebuild covers the rest). Thrall-level fencing for orphaned singletons - once listed here - is **done** (both singleton
 and lord-liveness fencing; see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity)).
