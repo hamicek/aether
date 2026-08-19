@@ -329,10 +329,12 @@ func (l *Lord) provisionEventLog(ch *child) error {
 	}
 	// Bounded retention on a replayed event log is a silent-corruption footgun: Rebuild folds the
 	// WHOLE log, but there is no snapshot/compaction (DESIGN 13c), so once retention purges old
-	// events the rebuilt state is incomplete - with no error. It is legitimate for an audit-only
-	// log, so this is a loud warning, not a hard failure (the runtime cannot know the intent).
-	if ch.spec.EventLogMaxMsgs > 0 || ch.spec.EventLogMaxAgeMs > 0 {
-		l.log.Warn("event log has bounded retention - rebuild will be incomplete once it purges (no snapshot/compaction); safe only for an audit-only log",
+	// events the rebuilt state is incomplete - with no error. Without a declared intent the runtime
+	// cannot know if the log is rebuilt from, so this is a warning. A thrall that declares
+	// event_log_use = "rebuild" would have failed validation with a bound; event_log_use = "audit"
+	// says a bound is fine and silences this. Only the undeclared case warns.
+	if (ch.spec.EventLogMaxMsgs > 0 || ch.spec.EventLogMaxAgeMs > 0) && ch.spec.EventLogUse != "audit" {
+		l.log.Warn("event log has bounded retention - rebuild will be incomplete once it purges (no snapshot/compaction); declare event_log_use = \"rebuild\" (then a bound is rejected) or \"audit\" (a bound is fine)",
 			slog.String("name", ch.spec.Name),
 			slog.Int64("max_msgs", ch.spec.EventLogMaxMsgs),
 			slog.Int64("max_age_ms", ch.spec.EventLogMaxAgeMs))

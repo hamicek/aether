@@ -345,15 +345,18 @@ manifest sets `event_log = true`.
 name = "account"
 cmd  = "../../bin/account"
 event_log = true
-# event_log_max_msgs = 100000   # optional retention bounds - see the caveat below
+event_log_use = "rebuild"       # or "audit"; declares what the log is for - see the caveat below
+# event_log_max_msgs = 100000   # optional retention bounds - rejected with "rebuild"
 # event_log_max_age_ms = 604800000
 ```
 
 > **Retention vs rebuild.** `Rebuild` folds the *whole* log, and there is no snapshot or
 > compaction (yet). So a retention bound silently truncates the rebuilt state once it purges old
-> events - safe for an audit-only log, wrong as a rebuild source. The lord logs a warning at
-> startup when `event_log` is combined with a bound; leave the log unbounded if you rebuild from
-> it.
+> events - safe for an audit-only log, wrong as a rebuild source. Declare the intent with
+> `event_log_use`: `"rebuild"` + a bound is a **config error** (`aether up` fails, telling you to
+> drop the bound or switch to `"audit"`); `"audit"` + a bound is fine and silent; leaving it unset
+> keeps the old behaviour - a bound just logs a startup warning. Leave the log unbounded if you
+> rebuild from it.
 
 A thrall `Append`s domain events as it handles messages, and `Rebuild`s its state from the log
 in `init` (works for both the GenServer and the FSM behaviour, since both have an `init`):

@@ -16,3 +16,4 @@ cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python account.py"
 restart = "permanent"
 scope   = "local"
 event_log = true
+event_log_use = "rebuild"   # the balance is rebuilt from this log; a retention bound is rejected

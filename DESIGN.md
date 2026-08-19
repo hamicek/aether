@@ -637,6 +637,20 @@ deliberately future work. Whether the rebuilt state survives a *machine* restart
 same JetStream persistence as the mailbox (`store_dir` or external). This replaces the cancelled
 in-memory state-snapshot approach.
 
+**Retention vs rebuild - a declared intent, not a warning nobody reads.** A retention bound on a
+log you *rebuild* from is silent corruption: `Rebuild` folds the *whole* log, but once retention
+purges the oldest events the projection is incomplete with no error (there is no snapshot). The
+runtime cannot infer whether a bounded log is a rebuild source or an audit trail, so the manifest
+lets the operator say so with `event_log_use`:
+
+- `event_log_use = "rebuild"` + a retention bound = a **config error**, rejected at manifest load
+  (`aether up` fails, names the field, tells you to drop the bound or switch to `"audit"`). The
+  footgun becomes an invariant.
+- `event_log_use = "audit"` + a bound = fine, and the AE-055 startup warning is **suppressed** (the
+  operator has declared rebuild is not in play).
+- unset = **today's behaviour**: a bound still logs the startup warning, nothing fails. Backward
+  compatible - no existing manifest changes meaning.
+
 **Command-key: dedup on the event log.** "The fold must be idempotent" covers replay, but it does
 *not* make a **non-idempotent event** safe against duplicate *delivery*. A signed delta ("add
 +10") is the canonical case: if the mailbox delivers the same cast twice (it is at-least-once) or
