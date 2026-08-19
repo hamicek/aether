@@ -200,6 +200,112 @@ route."GET v" = { thrall = "c", op = "v" }
 	}
 }
 
+// TestManifestEventLogUseValidation covers the retention-intent field (AE-063): "rebuild" with a
+// retention bound is a fail-fast config error, "audit" makes a bound legitimate, an unset intent
+// keeps today's behaviour, and the field is meaningless without event_log.
+func TestManifestEventLogUseValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string // substring the error must contain (empty = expect success)
+	}{
+		{
+			name: "rebuild without a bound is ok",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_use = "rebuild"
+`,
+		},
+		{
+			name: "rebuild with max_msgs is rejected",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_use = "rebuild"
+event_log_max_msgs = 1000
+`,
+			wantErr: "truncates the rebuild",
+		},
+		{
+			name: "rebuild with max_age is rejected",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_use = "rebuild"
+event_log_max_age_ms = 60000
+`,
+			wantErr: "truncates the rebuild",
+		},
+		{
+			name: "audit with a bound is ok",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_use = "audit"
+event_log_max_msgs = 1000
+`,
+		},
+		{
+			name: "unset with a bound is ok at load (warns at runtime)",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_max_msgs = 1000
+`,
+		},
+		{
+			name: "invalid value is rejected",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log = true
+event_log_use = "replay"
+`,
+			wantErr: "is invalid",
+		},
+		{
+			name: "use without event_log is rejected",
+			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+event_log_use = "audit"
+`,
+			wantErr: "requires event_log = true",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadManifest(writeManifest(t, tc.body))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 // writeFile writes body to name inside dir (helper for schema-alongside-manifest tests).
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()

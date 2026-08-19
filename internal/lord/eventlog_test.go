@@ -268,6 +268,8 @@ func TestEventLogBoundedRetentionWarns(t *testing.T) {
 		{"max_age bound warns", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogMaxAgeMs: 300_000}, true},
 		{"unbounded event log is silent", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true}, false},
 		{"no event log is silent", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLogMaxMsgs: 1000}, false},
+		// AE-063: a declared audit intent says a bound is legitimate, so the warning is suppressed.
+		{"audit bound is silent", ThrallSpec{Name: "a", Cmd: "true", Restart: "permanent", Scope: "local", EventLog: true, EventLogMaxMsgs: 1000, EventLogUse: "audit"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

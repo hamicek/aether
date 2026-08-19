@@ -16,3 +16,4 @@ cmd  = "bun run ./account.ts"
 restart = "permanent"
 scope   = "local"
 event_log = true
+event_log_use = "rebuild"   # the balance is rebuilt from this log; a retention bound is rejected

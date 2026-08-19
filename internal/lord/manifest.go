@@ -109,6 +109,12 @@ type ThrallSpec struct {
 	// a bus blip does not take it down - at the cost that it MAY outlive its lord. It does not
 	// affect singleton fencing (a singleton still self-exits on losing its lock).
 	Fencing *bool `toml:"fencing"`
+
+	// EventLogUse declares what the event log is for, so the lord can turn the retention footgun
+	// (a bound truncates a replayed log - there is no snapshot) from a warning into an invariant:
+	// "rebuild" + a retention bound is a config error (fail-fast); "audit" + a bound is fine (no
+	// warning). Unset keeps today's warning. Values: "" | "rebuild" | "audit".
+	EventLogUse string `toml:"event_log_use"`
 }
 
 // fencingEnabled reports whether the thrall takes part in lord-liveness fencing (the default). An
@@ -202,6 +208,20 @@ func (m *Manifest) validate() error {
 			return fmt.Errorf("duplicate name %q (already used by %s)", t.Name, where)
 		}
 		seen[t.Name] = "thrall"
+
+		// event_log_use declares intent so a retention bound on a rebuild log is a config error,
+		// not a silent-corruption warning nobody reads.
+		switch t.EventLogUse {
+		case "", "rebuild", "audit":
+		default:
+			return fmt.Errorf("thrall %q: event_log_use = %q is invalid (use \"rebuild\" or \"audit\")", t.Name, t.EventLogUse)
+		}
+		if t.EventLogUse != "" && !t.EventLog {
+			return fmt.Errorf("thrall %q: event_log_use requires event_log = true", t.Name)
+		}
+		if t.EventLogUse == "rebuild" && (t.EventLogMaxMsgs > 0 || t.EventLogMaxAgeMs > 0) {
+			return fmt.Errorf("thrall %q: event_log_use = \"rebuild\" with a retention bound (event_log_max_msgs / event_log_max_age_ms) truncates the rebuild - there is no snapshot; drop the bound, or set event_log_use = \"audit\" if the log is not a rebuild source", t.Name)
+		}
 	}
 	addrs := make(map[string]string) // addr -> edge server that bound it first
 	for _, e := range m.Edge.HTTP {
