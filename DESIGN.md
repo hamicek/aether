@@ -427,13 +427,16 @@ application identity or roles.**
   CLI `events`.
 - **Singleton / global thrall** (the equivalent of Erlang `:global`). `scope = "singleton"` runs the
   thrall as **exactly one instance for the app** - no replicas - guarded by a **distributed lock over
-  NATS KV with CAS** (compare-and-swap on the revision): the lord acquires the key `singleton/<name>`
-  before spawning. Within a lord's app this guarantees a single instance; the lock is also a guard
-  against a stray second lord, though that is now refused at startup anyway (**one lord per app**,
-  §14). This is single-instance *within an app*, not a pool of lords on one bus racing and failing
-  over a shared lock - that scenario mutually reaps under lord-liveness fencing (§14). Cross-node
-  single-instance is a deployment concern, solved by leaf-node isolation (§11b: one lord per node,
-  its own app). The manifest has `scope = "local" | "singleton"`.
+  NATS KV with CAS** (the lord acquires the key `singleton/<name>` before spawning). Its original job
+  - arbitrating between lords on several hosts racing to start the same instance - is gone: one lord
+  per app is now enforced (§14), and lord-liveness fencing already reaps an orphan within the lease.
+  What the lock still adds over `scope = "local"` is a **tighter handoff across a lord restart**: a
+  replacement lord waits for the old, named lock to release before it spawns, whereas a `local`
+  thrall re-spawns immediately and would overlap the dying orphan for up to the lease. That value is
+  narrow (the lock is per-name and held across a lord change) and largely subsumed by lord-liveness
+  fencing - kept, not relied on for clustering. This is single-instance *within an app*, not a pool
+  of lords racing a shared lock across a cluster; cross-node single-instance is a deployment concern
+  solved by leaf-node isolation (§11b). The manifest has `scope = "local" | "singleton"`.
 - **DynamicSupervisor** - starting and stopping thralls at runtime, not only from the manifest, via
   `ctx.StartChild(spec)` / `ctx.StopChild(name)` (Go SDK). Needed for "a driver per connection", a
   worker per request, or a workflow instance. The SDK sends a `ctl` request to the lord's inbound
