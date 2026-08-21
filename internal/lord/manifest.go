@@ -197,6 +197,11 @@ func (m *Manifest) applyDefaults() {
 // applyDefaults, so defaulted fields (route kind, thrall scope) are already in place. A returned
 // error fails `aether up` loudly, the same as an unparseable manifest.
 func (m *Manifest) validate() error {
+	// The [nats] section owns its own validity (mode enum, leaf constraints); the ether package
+	// is the single place that knows it, so we delegate rather than duplicate the rules here.
+	if err := m.Nats.Validate(); err != nil {
+		return err
+	}
 	// Names must be unique across thralls and edge servers - they share the supervision namespace
 	// (registry key, control subject, fencing) and a collision would cross their wires.
 	seen := make(map[string]string) // name -> where it was first defined

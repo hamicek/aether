@@ -23,6 +23,26 @@ type Config struct {
 	StoreDir string `toml:"store_dir"`
 	TLS      TLS    `toml:"tls"`  // client-side transport security (external mode)
 	Auth     Auth   `toml:"auth"` // client authentication (external mode)
+	// Leaf, when present, makes the embedded server a leaf node of a central hub
+	// (the spoke side of a hub-spoke topology). Valid only for embedded mode; nil =
+	// a standalone embedded bus, as before.
+	Leaf *Leaf `toml:"leaf"`
+}
+
+// Leaf configures the embedded server as a NATS leaf node of a central hub. It binds
+// this node's bus into a per-site account on the hub and gives its JetStream a per-node
+// domain, closing the gap where an embedded bus could not be a spoke. aether owns only
+// this spoke-side intent - which hub, which site, which JS domain, which credential; the
+// hub side stays operator-authored NATS config (mode = "external").
+type Leaf struct {
+	Remote string `toml:"remote"` // the hub's leafnode listener, e.g. "nats-leaf://hub.internal:7422"
+	Site   string `toml:"site"`   // the account this node binds to = its isolation unit on the hub
+	Domain string `toml:"domain"` // JetStream domain, unique per node (else the leaf's and hub's streams collide)
+	// Credentials for the leaf link. User/Password suit a dev cluster (and may also be
+	// embedded directly in Remote); Nkey is the path to an nkey seed file for production.
+	User     string `toml:"user"`
+	Password string `toml:"password"`
+	Nkey     string `toml:"nkey"`
 }
 
 // TLS configures client-side transport security for an external bus. CA is the path
@@ -60,6 +80,33 @@ func ClientOptions(caPath, nkeySeed string) ([]nats.Option, error) {
 		opts = append(opts, opt)
 	}
 	return opts, nil
+}
+
+// Validate rejects a semantically broken [nats] config. It runs after the manifest applies
+// defaults (so an empty Mode has already become "embedded"), and is the single place the bus
+// config's validity lives - the manifest validation calls it. A leaf makes sense only for the
+// embedded spoke; the hub side is external, bring-your-own NATS config.
+func (c Config) Validate() error {
+	switch c.Mode {
+	case "", "embedded", "external":
+	default:
+		return fmt.Errorf("nats: mode must be \"embedded\" or \"external\", got %q", c.Mode)
+	}
+	if c.Leaf != nil {
+		if c.Mode == "external" {
+			return fmt.Errorf("nats.leaf requires mode = \"embedded\" (the hub side is external, bring-your-own NATS config)")
+		}
+		if c.Leaf.Remote == "" {
+			return fmt.Errorf("nats.leaf.remote is required (the hub's leafnode listener)")
+		}
+		if c.Leaf.Site == "" {
+			return fmt.Errorf("nats.leaf.site is required (the account this node binds to)")
+		}
+		if c.Leaf.Domain == "" {
+			return fmt.Errorf("nats.leaf.domain is required (JetStream domain, unique per node)")
+		}
+	}
+	return nil
 }
 
 // Ether holds the running bus and the system connection for the lord and registry.
