@@ -87,6 +87,7 @@ examples/tracing/     trace propagation across call/cast hops
 examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a resource
 examples/hub-spoke-spike/ multi-node hub + isolated sites (leaf nodes) - see Multi-node below
 scripts/soak.sh       run the soak/chaos suite (out of CI)
+scripts/durable-perf.sh durable cast drain throughput harness (out of CI) - examples/durable-perf/
 ```
 
 ## Subject convention
