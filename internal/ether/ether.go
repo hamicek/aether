@@ -105,8 +105,32 @@ func (c Config) Validate() error {
 		if c.Leaf.Domain == "" {
 			return fmt.Errorf("nats.leaf.domain is required (JetStream domain, unique per node)")
 		}
+		// site and domain are rendered verbatim into a generated NATS config, so they must be
+		// plain identifiers - a stray brace or space would corrupt the config, not just fail.
+		if !isConfigIdent(c.Leaf.Site) {
+			return fmt.Errorf("nats.leaf.site %q must be a plain identifier (letters, digits, _ or -)", c.Leaf.Site)
+		}
+		if !isConfigIdent(c.Leaf.Domain) {
+			return fmt.Errorf("nats.leaf.domain %q must be a plain identifier (letters, digits, _ or -)", c.Leaf.Domain)
+		}
 	}
 	return nil
+}
+
+// isConfigIdent reports whether s is a non-empty run of characters safe to render
+// verbatim into a NATS config file (an account name, a JetStream domain).
+func isConfigIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Ether holds the running bus and the system connection for the lord and registry.
@@ -119,11 +143,29 @@ type Ether struct {
 	ephemeral bool   // true -> storeDir is a temp dir we own and remove on Stop
 }
 
+// StartOption tunes how the bus is brought up. Options carry runtime context the [nats]
+// config alone does not - today the app name, which the leaf spoke exports as its data plane.
+type StartOption func(*startOptions)
+
+type startOptions struct {
+	app string // the manifest's app namespace; exported over the leaf as aether.<app>.>
+}
+
+// WithApp supplies the manifest's app name. It is required for an embedded leaf spoke (the
+// export subject aether.<app>.> is otherwise undefined) and ignored by the other modes.
+func WithApp(app string) StartOption {
+	return func(o *startOptions) { o.app = app }
+}
+
 // Start brings up an embedded NATS server (default), or connects to an external URL.
-func Start(ctx context.Context, cfg Config) (*Ether, error) {
+func Start(ctx context.Context, cfg Config, opts ...StartOption) (*Ether, error) {
+	var so startOptions
+	for _, opt := range opts {
+		opt(&so)
+	}
 	switch cfg.Mode {
 	case "", "embedded":
-		return startEmbedded(ctx, cfg)
+		return startEmbedded(ctx, cfg, so)
 	case "external":
 		return startExternal(ctx, cfg)
 	default:
@@ -149,7 +191,24 @@ func resolveStoreDir(cfg Config) (dir string, ephemeral bool, err error) {
 	return dir, true, nil
 }
 
-func startEmbedded(_ context.Context, cfg Config) (*Ether, error) {
+// embeddedOptions builds the NATS server options for the embedded bus. Without a leaf it is a
+// standalone single-account server (today's behaviour); with [nats.leaf] it is a spoke bound
+// into its site's account, exporting its app's data plane over a leaf link to the hub.
+func embeddedOptions(cfg Config, so startOptions, storeDir string) (*natsserver.Options, error) {
+	if cfg.Leaf != nil {
+		return leafOptions(cfg.Leaf, so.app, storeDir)
+	}
+	return &natsserver.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,       // -1 = pick a free port
+		JetStream: true,     // durable mailbox / KV registry
+		StoreDir:  storeDir, // JetStream storage
+		NoSigs:    true,     // our runtime handles signals; otherwise the server would call Shutdown()
+		//        a second time concurrently with our eth.Stop() -> panic "close of nil channel".
+	}, nil
+}
+
+func startEmbedded(_ context.Context, cfg Config, so startOptions) (*Ether, error) {
 	storeDir, ephemeral, err := resolveStoreDir(cfg)
 	if err != nil {
 		return nil, err
@@ -161,13 +220,10 @@ func startEmbedded(_ context.Context, cfg Config) (*Ether, error) {
 			os.RemoveAll(storeDir)
 		}
 	}
-	opts := &natsserver.Options{
-		Host:      "127.0.0.1",
-		Port:      -1,       // -1 = pick a free port
-		JetStream: true,     // durable mailbox / KV registry
-		StoreDir:  storeDir, // JetStream storage
-		NoSigs:    true,     // our runtime handles signals; otherwise the server would call Shutdown()
-		//        a second time concurrently with our eth.Stop() -> panic "close of nil channel".
+	opts, err := embeddedOptions(cfg, so, storeDir)
+	if err != nil {
+		cleanup()
+		return nil, err
 	}
 	srv, err := natsserver.NewServer(opts)
 	if err != nil {

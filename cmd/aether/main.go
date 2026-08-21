@@ -77,7 +77,7 @@ func up(argv []string) {
 
 	logger := obs.NewLogger().With(slog.String("component", "aether"), slog.String("app", m.App))
 
-	eth, err := ether.Start(ctx, m.Nats)
+	eth, err := ether.Start(ctx, m.Nats, ether.WithApp(m.App))
 	if err != nil {
 		log.Fatalf("ether: %v", err)
 	}
