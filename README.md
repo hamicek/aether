@@ -541,6 +541,66 @@ thrall name comes from the manifest):
 - `aether-one-for-all.toml` - the one_for_all supervision strategy
 - `aether-rest-for-one.toml` - the rest_for_one supervision strategy
 - `aether-secure-external.toml` - external cluster over TLS with nkey auth
+- `aether-docker.toml` - Go-only, embedded NATS; the manifest the Docker image runs by default
+- `aether-docker-external.toml` - Go-only against an external NATS (the `docker-compose.yml` demo)
+
+## Deployment (Docker)
+
+aether runs in a container: the runtime is a single Go binary, and thralls are just `cmd`. The
+repo ships a **Go image** (the runtime plus the Go counter thrall) and, below, a recipe for a
+polyglot image.
+
+```bash
+# build and run the canonical Go image (runs aether-docker.toml on an embedded NATS)
+docker build -t aether .
+docker run --rm --name aether aether
+
+# from another shell: drive the demo thrall
+docker exec aether /app/bin/aether ps
+docker exec aether /app/bin/aether call counter-go get     # -> 0
+docker exec aether /app/bin/aether cast counter-go inc
+docker exec aether /app/bin/aether call counter-go get     # -> 1
+
+docker stop aether     # SIGTERM -> the lord drains, the container exits 0 within Docker's window
+```
+
+Things the image already handles, and the knobs you may want:
+
+- **PID 1 reaping.** A thrall runs as `sh -c <cmd>` in its own process group; the lord only waits
+  on its direct children, so an orphaned grandchild reparents to PID 1. The image bakes
+  [`tini`](https://github.com/krallin/tini) as the entrypoint to reap it. If you build your own
+  image without tini, run it with `docker run --init`.
+- **Graceful shutdown.** The lord handles SIGINT/SIGTERM, so `docker stop` triggers a drain and the
+  container exits cleanly well inside Docker's default 10 s grace.
+- **Persistence.** The embedded JetStream is in-container by default. To keep durable mailboxes /
+  event logs across a container restart, set `store_dir` in the manifest and mount a volume there
+  (e.g. `-v aether-data:/app/data` with `store_dir = "/app/data"`).
+- **Metrics.** The RSS/CPU dashboard (`/metrics`) shells out to `ps`, which the image provides via
+  `procps`. On a slimmed-down base (distroless/scratch) those metrics degrade gracefully - a skipped
+  sample, not a crash - so drop `procps` if you want a smaller image and do not need per-thrall RSS/CPU.
+
+### Multi-node
+
+A lord does not spawn processes into other containers, so distribution is **one lord per
+container/node over a shared external NATS**, not many lords on one bus. `examples/counter/docker-compose.yml`
+shows the shape - a `nats` service (JetStream on a named volume) plus an `aether` service pointed at
+it:
+
+```bash
+cd examples/counter
+docker compose up --build      # nats + one aether lord (counter-go) over nats://nats:4222
+docker compose down            # keeps the js-data volume; add -v to wipe it
+```
+
+Scale by adding more `aether` services, each with its own slice of thralls.
+
+### Polyglot image (recipe)
+
+Because thralls are `cmd`, a TS/Python deployment builds its own image on top of the same idea:
+start from a base that carries the interpreters your thralls need (Go for the runtime, plus Bun
+and/or a Python venv), install the SDK dependencies, and point the entrypoint at
+`aether up -f <your-manifest>`. A ready-made polyglot Dockerfile is deliberately deferred until a
+real deployment needs it (tracked in the backlog); the Go image above is the supported default.
 
 ## Security
 

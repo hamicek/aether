@@ -80,6 +80,16 @@ process groups), and an embedded NATS with no external dependency.
 
 The elegance is real, but it is elegance of the *mechanism*, not the *semantics*.
 
+**Containerizing it.** The single-binary runtime drops cleanly into a container: build the `aether`
+binary plus the Go thrall binaries, run `aether up -f <manifest>`. Two process-model details carry
+over from above. The lord waits only on its *direct* children, but a thrall runs as `sh -c '<cmd>'`
+in its own process group (§12b, §13b), so an orphaned grandchild reparents to PID 1 - the image
+needs a real init (`tini`, or `docker run --init`) to reap it. And because the lord handles
+SIGINT/SIGTERM, `docker stop` triggers the same graceful drain as Ctrl-C. Distribution stays one
+lord per container/node over a shared external NATS (a lord does not spawn into other containers);
+the embedded broker is single-node. See the README "Deployment (Docker)" section for the image and
+a compose example.
+
 ---
 
 ## 4. Topology
