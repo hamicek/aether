@@ -299,6 +299,18 @@ func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Ms
 	}
 }
 
+// Durable consumer tuning. Fetching in batches amortizes the per-message server round-trip
+// (a Fetch(1) loop pays one round-trip per cast, which caps drain throughput). The batch is
+// processed and acked in arrival order, so FIFO holds in the happy path; AckWait bounds how
+// long the last message in a batch may sit unacked while earlier ones process, and
+// MaxAckPending (>= batch) bounds the in-flight unacked messages the server will hand out.
+const (
+	durableBatchSize     = 128
+	durableFetchMaxWait  = 500 * time.Millisecond // keep the stop signal responsive
+	durableAckWait       = 30 * time.Second
+	durableMaxAckPending = 512
+)
+
 // consumeDurableCast reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
@@ -309,7 +321,8 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 		return
 	}
 	sub, err := js.PullSubscribe(wire.Cast(app, name), name,
-		nats.BindStream(wire.Stream(app, name)), nats.DeliverAll())
+		nats.BindStream(wire.Stream(app, name)), nats.DeliverAll(),
+		nats.AckWait(durableAckWait), nats.MaxAckPending(durableMaxAckPending))
 	if err != nil {
 		log.Error("durable consumer setup failed", slog.Any("err", err))
 		return
@@ -320,13 +333,13 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 			return
 		default:
 		}
-		msgs, err := sub.Fetch(1, nats.MaxWait(500*time.Millisecond))
+		msgs, err := sub.Fetch(durableBatchSize, nats.MaxWait(durableFetchMaxWait))
 		if err != nil {
 			continue // timeout / no messages
 		}
 		for _, m := range msgs {
 			processCast(m.Data) // process ...
-			_ = m.Ack()         // ... and only then ack
+			_ = m.Ack()         // ... and only then ack (in arrival order -> FIFO)
 		}
 	}
 }
