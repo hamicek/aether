@@ -334,6 +334,43 @@ def _or_new_trace(trace: str) -> str:
     return trace if trace else _new_trace()
 
 
+# Durable consumer tuning (mirrors the Go/TS SDKs). Fetching a batch amortizes the per-message
+# server round-trip a fetch(1) loop pays per cast; the batch is processed and acked in arrival
+# order, so FIFO holds in the happy path. ack_wait bounds how long the last message in a batch
+# may sit unacked while earlier ones process; max_ack_pending (>= batch) bounds in-flight unacked.
+_DURABLE_BATCH = 128
+_DURABLE_FETCH_TIMEOUT = 1  # seconds; keeps the stop check responsive
+_DURABLE_ACK_WAIT = 30  # seconds
+_DURABLE_MAX_ACK_PENDING = 512
+
+
+async def _cast_pull_loop(nc, app: str, name: str, stop: asyncio.Event, on_cast: Callable[[dict], Any]) -> None:
+    """Drain casts from a durable JetStream consumer with explicit ack, in batches.
+
+    While the thrall is down, casts accumulate in the stream (the lord created it) and are
+    drained on its return. At-least-once -> on_cast must be idempotent.
+    """
+    js = nc.jetstream()
+    psub = await js.pull_subscribe(
+        _sub_cast(app, name),
+        durable=name,
+        stream=_stream(app, name),
+        config=ConsumerConfig(
+            deliver_policy=DeliverPolicy.ALL,
+            ack_wait=_DURABLE_ACK_WAIT,
+            max_ack_pending=_DURABLE_MAX_ACK_PENDING,
+        ),
+    )
+    while not stop.is_set():
+        try:
+            msgs = await psub.fetch(_DURABLE_BATCH, timeout=_DURABLE_FETCH_TIMEOUT)
+        except Exception:  # noqa: BLE001  (timeout / no messages)
+            continue
+        for m in msgs:
+            await on_cast(_decode(m.data))  # process ...
+            await m.ack()  #                  ... and only then ack (in arrival order -> FIFO)
+
+
 # Handler shapes hold the GenServer semantics:
 #   handle_call: (payload, state, ctx) -> (reply, new_state)
 #   handle_cast: (payload, state, ctx) -> new_state
@@ -543,24 +580,8 @@ async def start(defn: ThrallDef) -> None:
             async for _msg in info_sub.messages:
                 pass  # TODO handle_info
 
-        async def cast_pull_loop() -> None:
-            js = nc.jetstream()
-            psub = await js.pull_subscribe(
-                _sub_cast(app, name),
-                durable=name,
-                stream=_stream(app, name),
-                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
-            )
-            while not stop.is_set():
-                try:
-                    msgs = await psub.fetch(1, timeout=1)
-                except Exception:  # noqa: BLE001  (timeout / no messages)
-                    continue
-                for m in msgs:
-                    await process_cast(_decode(m.data))  # process ...
-                    await m.ack()  #                       ... and only then ack
-
-        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop)]
+        tasks.append(asyncio.create_task(_cast_pull_loop(nc, app, name, stop, process_cast)))
     else:
         # Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
         data_sub = await nc.subscribe(_sub_data(app, name))
@@ -828,24 +849,8 @@ async def start_fsm(defn: FSM) -> None:
             async for _msg in info_sub.messages:
                 pass  # info is out-of-band; not an FSM event yet
 
-        async def cast_pull_loop() -> None:
-            js = nc.jetstream()
-            psub = await js.pull_subscribe(
-                _sub_cast(app, name),
-                durable=name,
-                stream=_stream(app, name),
-                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
-            )
-            while not stop.is_set():
-                try:
-                    msgs = await psub.fetch(1, timeout=1)
-                except Exception:  # noqa: BLE001
-                    continue
-                for msg in msgs:
-                    await on_cast(_decode(msg.data))
-                    await msg.ack()
-
-        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop)]
+        tasks.append(asyncio.create_task(_cast_pull_loop(nc, app, name, stop, on_cast)))
     else:
         data_sub = await nc.subscribe(_sub_data(app, name))
 
@@ -1010,24 +1015,8 @@ async def start_event(defn: EventManager) -> None:
             async for _msg in info_sub.messages:
                 pass  # info is out-of-band; not an event yet
 
-        async def cast_pull_loop() -> None:
-            js = nc.jetstream()
-            psub = await js.pull_subscribe(
-                _sub_cast(app, name),
-                durable=name,
-                stream=_stream(app, name),
-                config=ConsumerConfig(deliver_policy=DeliverPolicy.ALL),
-            )
-            while not stop.is_set():
-                try:
-                    msgs = await psub.fetch(1, timeout=1)
-                except Exception:  # noqa: BLE001
-                    continue
-                for msg in msgs:
-                    await on_cast(_decode(msg.data))
-                    await msg.ack()
-
-        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop, cast_pull_loop)]
+        tasks += [asyncio.create_task(c()) for c in (call_loop, info_loop)]
+        tasks.append(asyncio.create_task(_cast_pull_loop(nc, app, name, stop, on_cast)))
     else:
         data_sub = await nc.subscribe(_sub_data(app, name))
 

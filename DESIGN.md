@@ -586,6 +586,19 @@ Durability is easy to over-read. Two things must be kept apart:
 So "durable" (the mailbox) always means *the message is not lost*, never *the state is
 remembered*; remembering state is the separate job of the event log.
 
+**How the mailbox drains.** Each SDK's durable consumer pulls casts from the stream in
+**batches** (Go/Python `Fetch(128)`, TS `consume()` batches internally), processes them
+through the serialized mailbox in arrival order, and acks each only after its handler
+returns. Batching amortizes the per-message server round-trip a one-at-a-time fetch pays,
+which is the difference between a few hundred and a few hundred thousand casts/s on the
+drain path (`examples/durable-perf`). Two consumer knobs bound the batch: `AckWait` (how
+long a delivered-but-unacked cast may sit before the server redelivers it) and
+`MaxAckPending` (in-flight unacked ceiling). **Ordering:** FIFO holds in the happy path -
+a single consumer receives casts in stream sequence and acks them in order. It is *not*
+guaranteed under redelivery: an `AckWait` timeout or a crash re-queues a cast, which can
+then arrive after later ones. That is the honest reading of at-least-once - **idempotent
+handlers, not ordering, are the correctness contract** (§13c).
+
 How long the mailbox survives then depends on **where JetStream stores it**, which is
 a deployment choice, not a thrall concern:
 
