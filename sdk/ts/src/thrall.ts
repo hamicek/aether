@@ -1,4 +1,4 @@
-import { AckPolicy, DeliverPolicy, type NatsConnection } from "nats";
+import { AckPolicy, DeliverPolicy, nanos, type NatsConnection } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
@@ -231,6 +231,15 @@ export function subscribeVerb(
   })();
 }
 
+// Durable consumer tuning (mirrors the Go/Python SDKs). Unlike those two, the TS SDK never
+// fetched one message at a time - consume() already pulls in batches internally - so there is
+// no batch size to set here; what was missing is the ack bounds. ack_wait bounds how long a
+// delivered-but-unacked message may sit before redelivery; max_ack_pending caps the in-flight
+// unacked messages the server hands the consumer. Both are consumer config, so they apply when
+// the durable consumer is first created (an existing one, survived a crash, keeps its config).
+const durableAckWaitMs = 30_000;
+const durableMaxAckPending = 512;
+
 // consumeDurableCast: reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
@@ -248,6 +257,8 @@ export async function consumeDurableCast(
       ack_policy: AckPolicy.Explicit,
       filter_subject: subjects.cast(app, name),
       deliver_policy: DeliverPolicy.All,
+      ack_wait: nanos(durableAckWaitMs),
+      max_ack_pending: durableMaxAckPending,
     });
   } catch {
     // the durable consumer already exists (survived the thrall crash) - just attach to it
@@ -257,7 +268,7 @@ export async function consumeDurableCast(
   const consumer = await js.consumers.get(stream, name);
   const messages = await consumer.consume();
   for await (const m of messages) {
-    await onCast(decode(m.data)); // process (serialized) ...
+    await onCast(decode(m.data)); // process (serialized, in arrival order -> FIFO) ...
     m.ack(); //                     ... and only then ack (at-least-once)
   }
 }
