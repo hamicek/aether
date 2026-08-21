@@ -1,0 +1,25 @@
+# Go-only manifest for the Docker image (AE-064). The image bakes the aether binary and the Go
+# counter thrall under /app/bin, so paths are absolute - this manifest is meant to run inside the
+# container (the ENTRYPOINT points at it), not from the examples/ directory.
+#
+# A single Go thrall on an embedded NATS: nothing here needs Bun or Python, so it runs in the small
+# Go-only image. Verify from another shell into the container (the CLI takes <name> <op>; the app
+# comes from the endpoint the running lord wrote):
+#   aether ps                     # counter-go is ready
+#   aether call counter-go get    # -> 0
+#   aether cast counter-go inc
+#   aether call counter-go get    # -> 1
+app = "demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+# Uncomment to persist the embedded JetStream across container restarts (mount a volume at /app/data):
+# store_dir = "/app/data"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "/app/bin/counter-go"
+restart = "permanent"
+scope   = "local"

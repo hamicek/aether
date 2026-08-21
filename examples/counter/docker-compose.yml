@@ -1,0 +1,36 @@
+# Multi-node shape for aether (AE-064): an external NATS server as the shared bus, with the aether
+# lord connecting to it instead of running an embedded one. Distribution is one lord per
+# container/node over this bus - scale by adding more `aether` services (each its own slice of
+# thralls), not more lords on one bus.
+#
+#   cd examples/counter
+#   docker compose up --build      # nats + one aether lord (counter-go)
+#   docker compose down            # keeps the js-data volume; add -v to wipe it
+#
+# The js-data named volume + JetStream `-sd /data` make durable state survive `docker compose down`
+# (without -v) and a `nats` container restart.
+
+services:
+  nats:
+    image: nats:2.10
+    command: ["-js", "-sd", "/data", "-a", "0.0.0.0", "-p", "4222"]
+    volumes:
+      - js-data:/data
+
+  aether:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      - nats
+    # If aether wins the start race and NATS is not listening yet, the lord exits and Docker
+    # restarts it until NATS is up - simpler and more portable than a healthcheck that would need
+    # an HTTP client the minimal nats image does not ship.
+    restart: on-failure
+    # tini (baked ENTRYPOINT) still reaps PID 1; only the manifest changes to the external one.
+    command: ["/app/bin/aether", "up", "-f", "/app/aether-docker-external.toml"]
+    volumes:
+      - ./aether-docker-external.toml:/app/aether-docker-external.toml:ro
+
+volumes:
+  js-data:

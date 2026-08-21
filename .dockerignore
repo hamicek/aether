@@ -1,0 +1,14 @@
+# Keep the build context small: the builder needs only Go sources + module manifests.
+.git
+bin/
+**/node_modules
+**/.venv
+**/dist
+*.log
+.aether-endpoint
+**/.aether-store
+**/data
+# Editor / OS cruft
+.DS_Store
+.idea
+.vscode

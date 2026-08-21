@@ -1,0 +1,20 @@
+# Go-only manifest for the docker-compose demo (AE-064): the lord connects to an EXTERNAL NATS
+# server (the `nats` service in docker-compose.yml) instead of an embedded one. This is the
+# multi-node shape - distribution is one lord per container/node over a shared external bus, not
+# many lords over one bus. The counter-go binary is baked into the image at /app/bin.
+#
+# Persistence lives on the NATS side here: the `nats` service runs JetStream with `-sd /data` on a
+# named volume, so durable state survives a container restart. (store_dir is only for embedded NATS.)
+app = "demo"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "external"
+url  = "nats://nats:4222"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "/app/bin/counter-go"
+restart = "permanent"
+scope   = "local"
