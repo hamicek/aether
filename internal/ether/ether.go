@@ -23,6 +23,26 @@ type Config struct {
 	StoreDir string `toml:"store_dir"`
 	TLS      TLS    `toml:"tls"`  // client-side transport security (external mode)
 	Auth     Auth   `toml:"auth"` // client authentication (external mode)
+	// Leaf, when present, makes the embedded server a leaf node of a central hub
+	// (the spoke side of a hub-spoke topology). Valid only for embedded mode; nil =
+	// a standalone embedded bus, as before.
+	Leaf *Leaf `toml:"leaf"`
+}
+
+// Leaf configures the embedded server as a NATS leaf node of a central hub. It binds
+// this node's bus into a per-site account on the hub and gives its JetStream a per-node
+// domain, closing the gap where an embedded bus could not be a spoke. aether owns only
+// this spoke-side intent - which hub, which site, which JS domain, which credential; the
+// hub side stays operator-authored NATS config (mode = "external").
+type Leaf struct {
+	Remote string `toml:"remote"` // the hub's leafnode listener, e.g. "nats-leaf://hub.internal:7422"
+	Site   string `toml:"site"`   // the account this node binds to = its isolation unit on the hub
+	Domain string `toml:"domain"` // JetStream domain, unique per node (else the leaf's and hub's streams collide)
+	// Credentials for the leaf link. User/Password suit a dev cluster (and may also be
+	// embedded directly in Remote); Nkey is the path to an nkey seed file for production.
+	User     string `toml:"user"`
+	Password string `toml:"password"`
+	Nkey     string `toml:"nkey"`
 }
 
 // TLS configures client-side transport security for an external bus. CA is the path
@@ -62,6 +82,77 @@ func ClientOptions(caPath, nkeySeed string) ([]nats.Option, error) {
 	return opts, nil
 }
 
+// Validate rejects a semantically broken [nats] config. It runs after the manifest applies
+// defaults (so an empty Mode has already become "embedded"), and is the single place the bus
+// config's validity lives - the manifest validation calls it. A leaf makes sense only for the
+// embedded spoke; the hub side is external, bring-your-own NATS config.
+func (c Config) Validate() error {
+	switch c.Mode {
+	case "", "embedded", "external":
+	default:
+		return fmt.Errorf("nats: mode must be \"embedded\" or \"external\", got %q", c.Mode)
+	}
+	if c.Leaf != nil {
+		if c.Mode == "external" {
+			return fmt.Errorf("nats.leaf requires mode = \"embedded\" (the hub side is external, bring-your-own NATS config)")
+		}
+		if err := c.Leaf.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validate checks the leaf section's own invariants, independent of the surrounding mode. It lives
+// on Leaf (not inline in Config.Validate) so leafOptions can re-run it: the builder is reachable
+// directly, not only through the manifest, and its fields are rendered verbatim into a generated
+// NATS config - so the config-injection guards must hold at the render site too, not on trust.
+func (l *Leaf) validate() error {
+	if l.Remote == "" {
+		return fmt.Errorf("nats.leaf.remote is required (the hub's leafnode listener)")
+	}
+	if l.Site == "" {
+		return fmt.Errorf("nats.leaf.site is required (the account this node binds to)")
+	}
+	if l.Domain == "" {
+		return fmt.Errorf("nats.leaf.domain is required (JetStream domain, unique per node)")
+	}
+	// site and domain are rendered verbatim into the generated NATS config, so they must be plain
+	// identifiers - a stray brace or space would corrupt the config, not just fail to match.
+	if !isConfigIdent(l.Site) {
+		return fmt.Errorf("nats.leaf.site %q must be a plain identifier (letters, digits, _ or -)", l.Site)
+	}
+	if !isConfigIdent(l.Domain) {
+		return fmt.Errorf("nats.leaf.domain %q must be a plain identifier (letters, digits, _ or -)", l.Domain)
+	}
+	// SYS is the system account the leaf config always defines; a site of the same name would render
+	// two SYS blocks and fail the server with an opaque error instead of this clear one.
+	if l.Site == "SYS" {
+		return fmt.Errorf("nats.leaf.site %q is reserved (the system account); pick another site name", l.Site)
+	}
+	// A password without a user cannot be applied to the leaf link; fail loudly rather than drop it.
+	if l.Password != "" && l.User == "" {
+		return fmt.Errorf("nats.leaf.password is set without nats.leaf.user")
+	}
+	return nil
+}
+
+// isConfigIdent reports whether s is a non-empty run of characters safe to render
+// verbatim into a NATS config file (an account name, a JetStream domain).
+func isConfigIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Ether holds the running bus and the system connection for the lord and registry.
 type Ether struct {
 	mode      string
@@ -72,11 +163,29 @@ type Ether struct {
 	ephemeral bool   // true -> storeDir is a temp dir we own and remove on Stop
 }
 
+// StartOption tunes how the bus is brought up. Options carry runtime context the [nats]
+// config alone does not - today the app name, which the leaf spoke exports as its data plane.
+type StartOption func(*startOptions)
+
+type startOptions struct {
+	app string // the manifest's app namespace; exported over the leaf as aether.<app>.>
+}
+
+// WithApp supplies the manifest's app name. It is required for an embedded leaf spoke (the
+// export subject aether.<app>.> is otherwise undefined) and ignored by the other modes.
+func WithApp(app string) StartOption {
+	return func(o *startOptions) { o.app = app }
+}
+
 // Start brings up an embedded NATS server (default), or connects to an external URL.
-func Start(ctx context.Context, cfg Config) (*Ether, error) {
+func Start(ctx context.Context, cfg Config, opts ...StartOption) (*Ether, error) {
+	var so startOptions
+	for _, opt := range opts {
+		opt(&so)
+	}
 	switch cfg.Mode {
 	case "", "embedded":
-		return startEmbedded(ctx, cfg)
+		return startEmbedded(ctx, cfg, so)
 	case "external":
 		return startExternal(ctx, cfg)
 	default:
@@ -102,7 +211,24 @@ func resolveStoreDir(cfg Config) (dir string, ephemeral bool, err error) {
 	return dir, true, nil
 }
 
-func startEmbedded(_ context.Context, cfg Config) (*Ether, error) {
+// embeddedOptions builds the NATS server options for the embedded bus. Without a leaf it is a
+// standalone single-account server (today's behaviour); with [nats.leaf] it is a spoke bound
+// into its site's account, exporting its app's data plane over a leaf link to the hub.
+func embeddedOptions(cfg Config, so startOptions, storeDir string) (*natsserver.Options, error) {
+	if cfg.Leaf != nil {
+		return leafOptions(cfg.Leaf, so.app, storeDir)
+	}
+	return &natsserver.Options{
+		Host:      "127.0.0.1",
+		Port:      -1,       // -1 = pick a free port
+		JetStream: true,     // durable mailbox / KV registry
+		StoreDir:  storeDir, // JetStream storage
+		NoSigs:    true,     // our runtime handles signals; otherwise the server would call Shutdown()
+		//        a second time concurrently with our eth.Stop() -> panic "close of nil channel".
+	}, nil
+}
+
+func startEmbedded(_ context.Context, cfg Config, so startOptions) (*Ether, error) {
 	storeDir, ephemeral, err := resolveStoreDir(cfg)
 	if err != nil {
 		return nil, err
@@ -114,13 +240,10 @@ func startEmbedded(_ context.Context, cfg Config) (*Ether, error) {
 			os.RemoveAll(storeDir)
 		}
 	}
-	opts := &natsserver.Options{
-		Host:      "127.0.0.1",
-		Port:      -1,       // -1 = pick a free port
-		JetStream: true,     // durable mailbox / KV registry
-		StoreDir:  storeDir, // JetStream storage
-		NoSigs:    true,     // our runtime handles signals; otherwise the server would call Shutdown()
-		//        a second time concurrently with our eth.Stop() -> panic "close of nil channel".
+	opts, err := embeddedOptions(cfg, so, storeDir)
+	if err != nil {
+		cleanup()
+		return nil, err
 	}
 	srv, err := natsserver.NewServer(opts)
 	if err != nil {

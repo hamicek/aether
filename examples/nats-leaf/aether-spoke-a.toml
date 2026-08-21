@@ -1,0 +1,25 @@
+# SPOKE-A - site A as an EMBEDDED leaf of the hub.
+#
+# This is the whole point of the example: the spoke runs its own bus (mode = "embedded")
+# and the [nats.leaf] section makes that bus a leaf of the hub, bound into account SITE_A
+# with its own JetStream domain. aether renders the spoke-side NATS config from this intent -
+# there is no spoke .conf to hand-write (contrast examples/hub-spoke-spike/nats/spoke-a.conf).
+#
+# Run (after starting the hub NATS, see README): ../../bin/aether up -f aether-spoke-a.toml
+app = "sitea"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[nats.leaf]
+remote   = "nats-leaf://127.0.0.1:7391"   # the hub's leafnode listener (nats/hub.conf)
+site     = "SITE_A"                        # the account this node binds to = its isolation unit
+domain   = "sa"                            # JetStream domain, unique per node
+user     = "leafA"                         # leaf-link credential (dev); prod: nkey = "/path/to/seed"
+password = "leafA"
+
+[[thrall]]
+name    = "counter"
+cmd     = "../../bin/counter-go"
+restart = "permanent"

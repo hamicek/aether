@@ -200,6 +200,218 @@ route."GET v" = { thrall = "c", op = "v" }
 	}
 }
 
+// TestLoadManifestNatsLeaf proves the [nats.leaf] section parses into the ether config with all
+// spoke-side fields, and that its absence leaves Leaf nil (a standalone embedded bus).
+func TestLoadManifestNatsLeaf(t *testing.T) {
+	m, err := LoadManifest(writeManifest(t, `
+app = "demo"
+
+[nats]
+mode      = "embedded"
+store_dir = "/var/lib/aether/siteA"
+
+[nats.leaf]
+remote   = "nats-leaf://hub.internal:7422"
+site     = "SITE_A"
+domain   = "sa"
+user     = "leafA"
+password = "leafA"
+nkey     = "/etc/aether/siteA.nk"
+
+[[thrall]]
+name = "counter"
+cmd  = "run counter"
+`))
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	leaf := m.Nats.Leaf
+	if leaf == nil {
+		t.Fatalf("nats.leaf = nil, want parsed section")
+	}
+	if leaf.Remote != "nats-leaf://hub.internal:7422" || leaf.Site != "SITE_A" || leaf.Domain != "sa" {
+		t.Errorf("leaf routing = %+v, want remote/SITE_A/sa", leaf)
+	}
+	if leaf.User != "leafA" || leaf.Password != "leafA" || leaf.Nkey != "/etc/aether/siteA.nk" {
+		t.Errorf("leaf credentials = %+v, want leafA/leafA and the nkey path", leaf)
+	}
+
+	noLeaf, err := LoadManifest(writeManifest(t, `
+app = "demo"
+
+[[thrall]]
+name = "counter"
+cmd  = "run counter"
+`))
+	if err != nil {
+		t.Fatalf("LoadManifest (no leaf): %v", err)
+	}
+	if noLeaf.Nats.Leaf != nil {
+		t.Errorf("nats.leaf = %+v, want nil when the section is absent", noLeaf.Nats.Leaf)
+	}
+}
+
+// TestManifestNatsValidation covers the [nats] semantic checks: a bad mode, and the leaf
+// constraints (embedded-only, required remote/site/domain) that fail fast rather than silently
+// falling back to an isolated embedded bus.
+func TestManifestNatsValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr string // substring the error must contain (empty = expect success)
+	}{
+		{
+			name: "ok leaf",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "sa"
+`,
+		},
+		{
+			name: "leaf without top-level app",
+			body: `
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "sa"
+`,
+			wantErr: "requires a top-level app",
+		},
+		{
+			name: "leaf site with space",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE A"
+domain = "sa"
+`,
+			wantErr: "must be a plain identifier",
+		},
+		{
+			name: "leaf domain with brace",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "s}a"
+`,
+			wantErr: "must be a plain identifier",
+		},
+		{
+			name: "leaf site reserved SYS",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SYS"
+domain = "sa"
+`,
+			wantErr: "reserved",
+		},
+		{
+			name: "leaf password without user",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote   = "nats-leaf://hub:7422"
+site     = "SITE_A"
+domain   = "sa"
+password = "secret"
+`,
+			wantErr: "without nats.leaf.user",
+		},
+		{
+			name: "unknown mode",
+			body: `
+[nats]
+mode = "cluster"
+`,
+			wantErr: "mode must be",
+		},
+		{
+			name: "leaf with external mode",
+			body: `
+[nats]
+mode = "external"
+url  = "nats://hub:7390"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "sa"
+`,
+			wantErr: "requires mode = \"embedded\"",
+		},
+		{
+			name: "leaf missing remote",
+			body: `
+[nats]
+mode = "embedded"
+[nats.leaf]
+site   = "SITE_A"
+domain = "sa"
+`,
+			wantErr: "nats.leaf.remote is required",
+		},
+		{
+			name: "leaf missing site",
+			body: `
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+domain = "sa"
+`,
+			wantErr: "nats.leaf.site is required",
+		},
+		{
+			name: "leaf missing domain",
+			body: `
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+`,
+			wantErr: "nats.leaf.domain is required",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadManifest(writeManifest(t, tc.body))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestManifestEventLogUseValidation covers the retention-intent field (AE-063): "rebuild" with a
 // retention bound is a fail-fast config error, "audit" makes a bound legitimate, an unset intent
 // keeps today's behaviour, and the field is meaningless without event_log.

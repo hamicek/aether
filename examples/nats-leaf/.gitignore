@@ -1,0 +1,4 @@
+# Build artifacts and runtime data of the example.
+/bin/
+/.run/
+.aether-endpoint

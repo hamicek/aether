@@ -1,0 +1,22 @@
+# SPOKE-B - site B, symmetric to spoke A: bound into account SITE_B, JetStream domain "sb".
+# Its app namespace is "siteb", so the hub imports it as a distinct data plane and the two sites
+# never collide. SITE_A and SITE_B import nothing from each other, so the sites are isolated.
+#
+# Run: ../../bin/aether up -f aether-spoke-b.toml
+app = "siteb"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[nats.leaf]
+remote   = "nats-leaf://127.0.0.1:7391"
+site     = "SITE_B"
+domain   = "sb"
+user     = "leafB"
+password = "leafB"
+
+[[thrall]]
+name    = "counter"
+cmd     = "../../bin/counter-go"
+restart = "permanent"
