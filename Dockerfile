@@ -32,10 +32,19 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends procps tini \
  && rm -rf /var/lib/apt/lists/*
 
+# Run as a non-root system user. /app must be writable: the lord writes .aether-endpoint there, and
+# /app/data is where a mounted store_dir volume lands - a named volume inherits this directory's
+# ownership on first use, so embedded persistence works without root.
+RUN useradd --system --uid 10001 --home-dir /app aether \
+ && mkdir -p /app/data
+
 WORKDIR /app
-COPY --from=build /out/aether     /app/bin/aether
-COPY --from=build /out/counter-go /app/bin/counter-go
-COPY examples/counter/aether-docker.toml /app/aether-docker.toml
+COPY --from=build --chown=aether:aether /out/aether     /app/bin/aether
+COPY --from=build --chown=aether:aether /out/counter-go /app/bin/counter-go
+COPY --chown=aether:aether examples/counter/aether-docker.toml /app/aether-docker.toml
+RUN chown -R aether:aether /app
+
+USER aether
 
 # tini as PID 1 reaps the `sh -c <cmd>` grandchildren that the lord does not Wait on directly.
 # Equivalent to `docker run --init`; baking it in means a plain `docker run` is already correct.
