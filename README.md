@@ -20,7 +20,7 @@ supervision, that is aether.
 Full design: [DESIGN.md](./DESIGN.md). License: [MIT](./LICENSE). Contributing:
 [CONTRIBUTING.md](./CONTRIBUTING.md). Roadmap and deliberately deferred work: [ROADMAP.md](./ROADMAP.md).
 
-This README tracks `main`; for tagged, versioned changes see [Releases](https://github.com/hamicek/aether/releases) (latest **v0.6.0**).
+This README tracks `main`; for tagged, versioned changes see [Releases](https://github.com/hamicek/aether/releases) (latest **v0.7.0**).
 
 ## Glossary
 
