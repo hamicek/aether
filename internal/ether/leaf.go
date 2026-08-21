@@ -20,6 +20,12 @@ import (
 // crosses the leaf; the supervision subjects aether._lord.> are never exported, so they stay
 // node-local by construction - no allow/deny policy needed.
 func leafOptions(leaf *Leaf, app, storeDir string) (*natsserver.Options, error) {
+	// Re-validate here, not only at the manifest: leaf and app are both rendered verbatim into the
+	// generated config, and this builder is reachable directly (tests, other callers), not solely
+	// through a pre-validated manifest.
+	if err := leaf.validate(); err != nil {
+		return nil, err
+	}
 	if app == "" {
 		return nil, fmt.Errorf("nats.leaf: the manifest has no app name; the leaf export subject aether.<app>.> is undefined")
 	}
@@ -98,7 +104,13 @@ func leafRemoteURL(leaf *Leaf) (string, error) {
 		return "", fmt.Errorf("nats.leaf.remote %q: %w", leaf.Remote, err)
 	}
 	if leaf.User != "" && u.User == nil {
-		u.User = url.UserPassword(leaf.User, leaf.Password)
+		// url.UserPassword with an empty password renders "user:@host" (password-present but empty),
+		// which NATS reads differently from "no password"; use url.User for the user-only case.
+		if leaf.Password != "" {
+			u.User = url.UserPassword(leaf.User, leaf.Password)
+		} else {
+			u.User = url.User(leaf.User)
+		}
 	}
 	return u.String(), nil
 }

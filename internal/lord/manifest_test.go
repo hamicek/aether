@@ -263,6 +263,7 @@ func TestManifestNatsValidation(t *testing.T) {
 		{
 			name: "ok leaf",
 			body: `
+app = "demo"
 [nats]
 mode = "embedded"
 [nats.leaf]
@@ -270,6 +271,71 @@ remote = "nats-leaf://hub:7422"
 site   = "SITE_A"
 domain = "sa"
 `,
+		},
+		{
+			name: "leaf without top-level app",
+			body: `
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "sa"
+`,
+			wantErr: "requires a top-level app",
+		},
+		{
+			name: "leaf site with space",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE A"
+domain = "sa"
+`,
+			wantErr: "must be a plain identifier",
+		},
+		{
+			name: "leaf domain with brace",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SITE_A"
+domain = "s}a"
+`,
+			wantErr: "must be a plain identifier",
+		},
+		{
+			name: "leaf site reserved SYS",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote = "nats-leaf://hub:7422"
+site   = "SYS"
+domain = "sa"
+`,
+			wantErr: "reserved",
+		},
+		{
+			name: "leaf password without user",
+			body: `
+app = "demo"
+[nats]
+mode = "embedded"
+[nats.leaf]
+remote   = "nats-leaf://hub:7422"
+site     = "SITE_A"
+domain   = "sa"
+password = "secret"
+`,
+			wantErr: "without nats.leaf.user",
 		},
 		{
 			name: "unknown mode",

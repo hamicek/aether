@@ -96,23 +96,43 @@ func (c Config) Validate() error {
 		if c.Mode == "external" {
 			return fmt.Errorf("nats.leaf requires mode = \"embedded\" (the hub side is external, bring-your-own NATS config)")
 		}
-		if c.Leaf.Remote == "" {
-			return fmt.Errorf("nats.leaf.remote is required (the hub's leafnode listener)")
+		if err := c.Leaf.validate(); err != nil {
+			return err
 		}
-		if c.Leaf.Site == "" {
-			return fmt.Errorf("nats.leaf.site is required (the account this node binds to)")
-		}
-		if c.Leaf.Domain == "" {
-			return fmt.Errorf("nats.leaf.domain is required (JetStream domain, unique per node)")
-		}
-		// site and domain are rendered verbatim into a generated NATS config, so they must be
-		// plain identifiers - a stray brace or space would corrupt the config, not just fail.
-		if !isConfigIdent(c.Leaf.Site) {
-			return fmt.Errorf("nats.leaf.site %q must be a plain identifier (letters, digits, _ or -)", c.Leaf.Site)
-		}
-		if !isConfigIdent(c.Leaf.Domain) {
-			return fmt.Errorf("nats.leaf.domain %q must be a plain identifier (letters, digits, _ or -)", c.Leaf.Domain)
-		}
+	}
+	return nil
+}
+
+// validate checks the leaf section's own invariants, independent of the surrounding mode. It lives
+// on Leaf (not inline in Config.Validate) so leafOptions can re-run it: the builder is reachable
+// directly, not only through the manifest, and its fields are rendered verbatim into a generated
+// NATS config - so the config-injection guards must hold at the render site too, not on trust.
+func (l *Leaf) validate() error {
+	if l.Remote == "" {
+		return fmt.Errorf("nats.leaf.remote is required (the hub's leafnode listener)")
+	}
+	if l.Site == "" {
+		return fmt.Errorf("nats.leaf.site is required (the account this node binds to)")
+	}
+	if l.Domain == "" {
+		return fmt.Errorf("nats.leaf.domain is required (JetStream domain, unique per node)")
+	}
+	// site and domain are rendered verbatim into the generated NATS config, so they must be plain
+	// identifiers - a stray brace or space would corrupt the config, not just fail to match.
+	if !isConfigIdent(l.Site) {
+		return fmt.Errorf("nats.leaf.site %q must be a plain identifier (letters, digits, _ or -)", l.Site)
+	}
+	if !isConfigIdent(l.Domain) {
+		return fmt.Errorf("nats.leaf.domain %q must be a plain identifier (letters, digits, _ or -)", l.Domain)
+	}
+	// SYS is the system account the leaf config always defines; a site of the same name would render
+	// two SYS blocks and fail the server with an opaque error instead of this clear one.
+	if l.Site == "SYS" {
+		return fmt.Errorf("nats.leaf.site %q is reserved (the system account); pick another site name", l.Site)
+	}
+	// A password without a user cannot be applied to the leaf link; fail loudly rather than drop it.
+	if l.Password != "" && l.User == "" {
+		return fmt.Errorf("nats.leaf.password is set without nats.leaf.user")
 	}
 	return nil
 }

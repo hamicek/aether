@@ -99,3 +99,27 @@ func TestLeafOptionsRequiresApp(t *testing.T) {
 		t.Fatalf("expected error for empty app, got nil")
 	}
 }
+
+// TestLeafOptionsRejectsInjection proves the builder guards the fields it renders verbatim into the
+// config, independent of the manifest validation - so a caller reaching leafOptions directly cannot
+// smuggle a brace, space or wildcard into the generated NATS config.
+func TestLeafOptionsRejectsInjection(t *testing.T) {
+	cases := []struct {
+		name string
+		leaf *Leaf
+		app  string
+	}{
+		{"site with brace", &Leaf{Remote: "nats-leaf://hub:7422", Site: "a } evil {", Domain: "sa"}, "demo"},
+		{"domain with space", &Leaf{Remote: "nats-leaf://hub:7422", Site: "SITE_A", Domain: "s a"}, "demo"},
+		{"reserved SYS site", &Leaf{Remote: "nats-leaf://hub:7422", Site: "SYS", Domain: "sa"}, "demo"},
+		{"app with wildcard", &Leaf{Remote: "nats-leaf://hub:7422", Site: "SITE_A", Domain: "sa"}, "de.mo"},
+		{"app with quote", &Leaf{Remote: "nats-leaf://hub:7422", Site: "SITE_A", Domain: "sa"}, "de\"mo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := leafOptions(tc.leaf, tc.app, t.TempDir()); err == nil {
+				t.Fatalf("expected leafOptions to reject %q, got nil", tc.name)
+			}
+		})
+	}
+}

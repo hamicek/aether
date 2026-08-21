@@ -202,6 +202,11 @@ func (m *Manifest) validate() error {
 	if err := m.Nats.Validate(); err != nil {
 		return err
 	}
+	// A leaf spoke exports its data plane as aether.<app>.>, so the top-level app must be present -
+	// caught here at load rather than later when the embedded server is built.
+	if m.Nats.Leaf != nil && m.App == "" {
+		return fmt.Errorf("nats.leaf requires a top-level app (the leaf exports aether.<app>.>)")
+	}
 	// Names must be unique across thralls and edge servers - they share the supervision namespace
 	// (registry key, control subject, fencing) and a collision would cross their wires.
 	seen := make(map[string]string) // name -> where it was first defined

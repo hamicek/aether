@@ -151,6 +151,43 @@ func TestLeafSpokeDataPlaneCrosses(t *testing.T) {
 	}
 }
 
+// TestLeafCastCrossesLeaf (AC #1) proves a one-way cast crosses the leaf, not just request-reply:
+// the site's data plane is a NATS service export, and the example's `aether cast ... inc` relies on
+// a fire-and-forget publish from the hub reaching the spoke - so pin that semantic down.
+func TestLeafCastCrossesLeaf(t *testing.T) {
+	leafURL, hub := startLeafHub(t)
+	spoke := startSpoke(t, leafURL, "SITE_A", "sitea", "sa", "leafA")
+
+	got := make(chan string, 1)
+	if _, err := spoke.Conn().Subscribe("aether.sitea.tell", func(m *nats.Msg) {
+		select {
+		case got <- string(m.Data):
+		default:
+		}
+	}); err != nil {
+		t.Fatalf("subscribe on spoke: %v", err)
+	}
+	spoke.Conn().Flush()
+
+	// Retry the publish until leaf interest has propagated, then confirm it arrived.
+	end := time.Now().Add(5 * time.Second)
+	for time.Now().Before(end) {
+		if err := hub.Publish("aether.sitea.tell", []byte("hi")); err != nil {
+			t.Fatalf("publish from hub: %v", err)
+		}
+		hub.Flush()
+		select {
+		case v := <-got:
+			if v != "hi" {
+				t.Fatalf("cast payload = %q, want hi", v)
+			}
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatalf("cast never crossed the leaf from hub to spoke")
+}
+
 // TestLeafSiteIsolation (AC #2) proves each site is isolated into its own account: the hub reaches
 // both sites, but one site cannot reach the other's data plane.
 func TestLeafSiteIsolation(t *testing.T) {
@@ -216,12 +253,16 @@ func TestLeafSupervisionStaysNodeLocal(t *testing.T) {
 }
 
 // TestLeafSpokeJetStreamDomain (AC #4) proves the spoke's JetStream runs under the manifest's own
-// domain: a KV bucket can be created and used on the spoke without colliding with the hub.
+// domain: a KV bucket - the same primitive the lord's registry and durable mailbox use - can be
+// created and used on the spoke via the plain, un-domained JetStream context the runtime uses.
 func TestLeafSpokeJetStreamDomain(t *testing.T) {
 	leafURL, _ := startLeafHub(t)
 	spoke := startSpoke(t, leafURL, "SITE_A", "sitea", "sa", "leafA")
 
-	js, err := spoke.Conn().JetStream(nats.Domain("sa"))
+	// The real runtime (registry, lord, thrall SDK) uses a plain JetStream() with no domain option,
+	// so the test must too - proving the spoke's own JetStream is reachable the way aether reaches it,
+	// not via an artificial domain-qualified context.
+	js, err := spoke.Conn().JetStream()
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
