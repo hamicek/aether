@@ -47,6 +47,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
+| **Embedded leaf spoke** | ✅ | `[nats.leaf]` -> the embedded bus joins a hub as a leaf node, bound into its site's account with its own JetStream domain; a single-binary site, no spoke NATS config - see [Multi-node](#multi-node-and-isolation) |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
@@ -86,6 +87,7 @@ examples/live-dashboard/ live push to the browser over SSE, subject-scoped per c
 examples/tracing/     trace propagation across call/cast hops
 examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a resource
 examples/hub-spoke-spike/ multi-node hub + isolated sites (leaf nodes) - see Multi-node below
+examples/nats-leaf/    embedded spoke joined to a hub via [nats.leaf] - single-binary site
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 scripts/durable-perf.sh durable cast drain throughput harness (out of CI) - examples/durable-perf/
 ```
@@ -422,6 +424,12 @@ NATS-layer concern, and a "global" single instance is the one node that owns tha
 not a lock several lords contend for (which does not work; see the fencing section). Full design:
 [DESIGN.md §11b](./DESIGN.md). Runnable spike: [`examples/hub-spoke-spike/`](./examples/hub-spoke-spike/)
 (a hub + two isolated sites, asserting cross-node reach and negative isolation).
+
+**Embedded spoke (`[nats.leaf]`).** For the common spoke - one node, one site, one hub link - a
+site deploys as a single binary: `mode = "embedded"` plus a `[nats.leaf]` section makes the embedded
+bus a leaf of the hub, bound into the site's account with its own JetStream domain, with no
+hand-written spoke NATS config. Only the hub stays operator-authored (bring-your-own). Runnable demo:
+[`examples/nats-leaf/`](./examples/nats-leaf/); asserted in `internal/ether/leaf_e2e_test.go`.
 
 ## Observability
 

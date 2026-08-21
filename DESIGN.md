@@ -273,6 +273,11 @@ mode = "embedded"                        # embedded | external
 # url = "nats://node-a:4222,nats://node-b:4222"   # for mode = "external"
 # [nats.tls]  ca = "/etc/aether/ca.pem"           # server TLS (verify the server) - external
 # [nats.auth] nkey_seed = "/etc/aether/user.nk"   # nkey authentication - external
+# [nats.leaf]                                     # embedded spoke: make this node a leaf of a hub (§11b)
+#   remote = "nats-leaf://hub.internal:7422"      #   the hub's leafnode listener
+#   site   = "SITE_A"                             #   the account this node binds to (its isolation unit)
+#   domain = "sa"                                 #   JetStream domain, unique per node
+#   user = "leafA"  password = "leafA"            #   or: nkey = "/etc/aether/siteA.nk"
 
 [[thrall]]
 name = "counter"
@@ -400,6 +405,21 @@ data plane** (`aether.<app>.<name>.*`), and the sites import nothing from each o
 then **structural** - a site cannot reach or observe another site because accounts are a hard
 boundary, not because application code is careful. A runnable, asserted example is
 `examples/hub-spoke-spike/` (distribution + isolation proven).
+
+**Embedded spoke ergonomics (`[nats.leaf]`).** The spoke side of that topology - one node, one site,
+one hub link - is common and small enough that aether ergonomizes it: an `[nats.leaf]` section under
+`[nats]` makes the *embedded* server a leaf of the hub, bound into the site's account with its own
+JetStream domain. aether renders the proven spoke-side NATS config from that intent (account, service
+export of `aether.<app>.>`, leaf remote, per-node domain), so a site deploys as a single binary
+instead of "aether + a hand-written NATS config". Supervision (`aether._lord.>`) is simply never
+exported, so it stays node-local by construction - the export list *is* the isolation policy, no
+allow/deny rules needed. The section carries only aether-shaped intent (which hub, which site, which
+domain, which credential); anything richer drops to `mode = "external"` against an operator-run bus.
+Deliberately asymmetric: aether ergonomizes only the **spoke** side; the **hub** side - the
+multi-account import matrix - stays operator-authored NATS config (bring-your-own). `examples/nats-leaf/`
+shows a spoke manifest (`[nats.leaf]`) against a hub node (`external`). Cross-node *fencing* is not
+introduced (each site is single-node and owns its singletons); a singleton that could fail over
+*between* sites would need a shared KV crossing the account boundary, which is out of scope here.
 
 **What crosses the node boundary.** Only the data plane (`aether.<app>.<name>.*`) needs to be exported
 across accounts. **Supervision** (`aether._lord.*`) and the KV fencing buckets are provisioned by each
