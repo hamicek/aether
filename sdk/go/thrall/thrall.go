@@ -324,8 +324,17 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 		nats.BindStream(wire.Stream(app, name)), nats.DeliverAll(),
 		nats.AckWait(durableAckWait), nats.MaxAckPending(durableMaxAckPending))
 	if err != nil {
-		log.Error("durable consumer setup failed", slog.Any("err", err))
-		return
+		// A durable consumer created by an earlier SDK version already exists with a different
+		// ack config, and nats.go refuses to reconcile it (it errors instead of updating). Attach
+		// to it as-is: draining continues (the batched fetch still applies; only the consumer's
+		// stored ack bounds keep their old values, which recreating the consumer would refresh).
+		// This mirrors the TS SDK's attach-if-exists behavior; a fresh deployment never hits it.
+		sub, err = js.PullSubscribe(wire.Cast(app, name), name,
+			nats.BindStream(wire.Stream(app, name)), nats.DeliverAll())
+		if err != nil {
+			log.Error("durable consumer setup failed", slog.Any("err", err))
+			return
+		}
 	}
 	for {
 		select {

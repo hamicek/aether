@@ -112,6 +112,63 @@ func TestDurableCastPreservesFIFO(t *testing.T) {
 	}
 }
 
+// TestDurableCastAttachesToPreexistingConsumer proves upgrade safety: a durable consumer left
+// by an earlier SDK version (created without the ack tuning) has a different stored ack config,
+// which nats.go refuses to reconcile. The consumer must still attach and drain rather than erroring
+// out and going silent.
+func TestDurableCastAttachesToPreexistingConsumer(t *testing.T) {
+	const (
+		app   = "dur"
+		name  = "legacy"
+		total = 50
+	)
+	nc, js := durableCastEnv(t, app, name)
+
+	// Create the consumer the pre-AE-065 way: no AckWait/MaxAckPending, so it takes the server
+	// defaults that differ from the tuned values consumeDurableCast now requests.
+	if _, err := js.AddConsumer(wire.Stream(app, name), &nats.ConsumerConfig{
+		Durable:       name,
+		AckPolicy:     nats.AckExplicitPolicy,
+		FilterSubject: wire.Cast(app, name),
+		DeliverPolicy: nats.DeliverAllPolicy,
+	}); err != nil {
+		t.Fatalf("AddConsumer (legacy): %v", err)
+	}
+	for i := 0; i < total; i++ {
+		if _, err := js.Publish(wire.Cast(app, name), []byte(fmt.Sprintf(`{"payload":{"n":%d}}`, i))); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+
+	var (
+		mu   sync.Mutex
+		got  int
+		done = make(chan struct{})
+	)
+	processCast := func([]byte) {
+		mu.Lock()
+		got++
+		reached := got == total
+		mu.Unlock()
+		if reached {
+			close(done)
+		}
+	}
+
+	stop := make(chan struct{})
+	go consumeDurableCast(nc, app, name, discardLogger(), stop, processCast)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		mu.Lock()
+		n := got
+		mu.Unlock()
+		t.Fatalf("attach-and-drain stalled at %d/%d - consumeDurableCast likely errored on the pre-existing consumer", n, total)
+	}
+	close(stop)
+}
+
 // TestDurableCastStopsOnEmptyStream proves the consumer neither blocks nor processes anything
 // on an empty stream, and returns promptly once stop is closed.
 func TestDurableCastStopsOnEmptyStream(t *testing.T) {
