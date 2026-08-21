@@ -48,11 +48,12 @@ const (
 	soakTrendWindows = 10
 	soakCallTimeout  = 1 * time.Second
 
-	// Durable publishers and their per-cast pacing. Paced well below the single-message
-	// durable consumer's drain rate so the JetStream backlog stays near empty and the
-	// end-of-run drain is quick.
+	// Durable publishers and their per-cast pacing. Kept below the batched durable consumer's
+	// drain rate (AE-065) so the JetStream backlog stays near empty and the end-of-run drain is
+	// quick. 2 workers x 1ms = ~2000 casts/s - the pre-AE-065 single-message consumer capped
+	// this at ~400/s (5ms), which the batched fetch lifted well past, so the pace could rise.
 	soakDurableWorkers = 2
-	soakDurablePace    = 5 * time.Millisecond
+	soakDurablePace    = 1 * time.Millisecond
 	soakDrainStall     = 20 // consecutive no-progress polls (~10s) that end the drain
 
 	// Leak sampling: how many samples to aim for over the run (bounding the interval).
