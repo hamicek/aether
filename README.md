@@ -64,13 +64,14 @@ idempotent on name, a supervising thrall can re-spawn its children blindly from 
 ## Layout
 
 ```
-cmd/aether/           CLI: up | ps | events | cast | call
+cmd/aether/           CLI: up | ps | events | fleet | cast | call
 internal/
-  ether/              embedded NATS / external connection (mode switch)
+  ether/              embedded NATS / external connection (mode switch, incl. [nats.leaf])
   lord/               supervisor: manifest, supervisor loop, restart strategies,
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
   singleton/          distributed lock over KV (Create/CAS) - one instance within the app
+  fleet/              fleet health payload + aggregator (network-wide runtime view across lords)
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
@@ -102,6 +103,7 @@ aether.<app>.<name>.info     # out-of-band (timers, notifications)
 aether._lord.<name>.ctl      # lord -> thrall (drain / shutdown / ping)
 aether._lord.<name>.hb       # thrall -> lord (heartbeat)
 aether._lord.events          # lifecycle stream (spawned/ready/down/restarting/...)
+aether._fleet.<app>.<lord>   # curated fleet health summary a lord publishes about itself (opt-in)
 aether_<app>_<name>          # JetStream stream for the durable mailbox (dots -> underscores)
 ```
 
@@ -631,7 +633,10 @@ docker compose up --build      # nats + one aether lord (counter-go) over nats:/
 docker compose down            # keeps the js-data volume; add -v to wipe it
 ```
 
-Scale by adding more `aether` services, each with its own slice of thralls.
+Scale by adding more `aether` services, **each with its own `app`** (its own slice of thralls).
+Note: `docker compose up --scale aether=N` does **not** work - it would start N lords for the *same*
+app, and one-lord-per-app (§14) makes all but the first refuse to start. That is correct behavior,
+just not what `--scale` implies: give each replica a distinct `app` (and manifest) instead.
 
 ### Polyglot image (recipe)
 
