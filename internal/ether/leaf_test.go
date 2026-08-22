@@ -69,6 +69,24 @@ func TestLeafOptions(t *testing.T) {
 	}
 }
 
+// TestLeafConfigExports proves the generated spoke config exports both the app data plane (service)
+// and the curated fleet-health summary (stream), and never exports the node-local supervision
+// subjects. The stream export is what lets a hub import a spoke's fleet health across the leaf.
+func TestLeafConfigExports(t *testing.T) {
+	leaf := &Leaf{Remote: "nats-leaf://hub:7422", Site: "SITE_A", Domain: "sa"}
+	cfg := leafConfig(leaf, "demo", "nats-leaf://hub:7422")
+
+	if !strings.Contains(cfg, `service: "aether.demo.>"`) {
+		t.Errorf("config missing data-plane service export:\n%s", cfg)
+	}
+	if !strings.Contains(cfg, `stream: "aether._fleet.demo.>"`) {
+		t.Errorf("config missing fleet-health stream export:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "_lord") {
+		t.Errorf("config exports a supervision subject; _lord must stay node-local:\n%s", cfg)
+	}
+}
+
 // TestLeafOptionsNkeyCredentials proves an nkey/creds file path lands on the leaf remote and the
 // URL is left untouched (no credentials folded in) when user/password are absent.
 func TestLeafOptionsNkeyCredentials(t *testing.T) {
