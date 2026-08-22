@@ -14,6 +14,12 @@ import (
 // considered stale (mirrors the liveness "misses" idea: a couple of missed beats, not one).
 const defaultStaleMultiple = 3
 
+// defaultEvictMultiple is how many publish intervals of silence before a node is dropped entirely
+// (not just stale). A restarted lord gets a new pid, hence a new (app, lord_id) key, so the old key
+// would otherwise linger forever as stale - this bounds the map. Far larger than the stale window so
+// a briefly-silent node is only flagged, not forgotten.
+const defaultEvictMultiple = 10
+
 // NodeView is one node's line in the fleet snapshot: its last health summary plus derived liveness.
 type NodeView struct {
 	Health
@@ -27,6 +33,7 @@ type NodeView struct {
 // a slow-publishing node is not flagged as often as a fast one.
 type Aggregator struct {
 	staleMultiple int
+	evictMultiple int
 	now           func() time.Time // injectable for tests
 
 	mu    sync.Mutex
@@ -38,18 +45,45 @@ type record struct {
 	lastSeen time.Time
 }
 
-// NewAggregator returns an empty aggregator with the default staleness multiple and wall clock.
+// NewAggregator returns an empty aggregator with the default staleness/eviction multiples and clock.
 func NewAggregator() *Aggregator {
-	return &Aggregator{staleMultiple: defaultStaleMultiple, now: time.Now, nodes: map[string]record{}}
+	return &Aggregator{
+		staleMultiple: defaultStaleMultiple,
+		evictMultiple: defaultEvictMultiple,
+		now:           time.Now,
+		nodes:         map[string]record{},
+	}
 }
 
 func key(app, lordID string) string { return app + "\x00" + lordID }
 
-// Ingest records a health summary, stamping it with the current time as its last-seen.
+// Ingest records a health summary, stamping it with the current time as its last-seen, and prunes
+// nodes that have been silent far beyond staleness (e.g., a restarted lord's old pid) so the map
+// stays bounded across restarts.
 func (a *Aggregator) Ingest(h Health) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.nodes[key(h.App, h.LordID)] = record{health: h, lastSeen: a.now()}
+	now := a.now()
+	a.nodes[key(h.App, h.LordID)] = record{health: h, lastSeen: now}
+	for k, r := range a.nodes {
+		if a.expired(r, now) {
+			delete(a.nodes, k)
+		}
+	}
+}
+
+// expired reports whether a node has been silent long enough to drop entirely (not just mark stale).
+func (a *Aggregator) expired(r record, now time.Time) bool {
+	return now.Sub(r.lastSeen) > time.Duration(a.evictMultiple)*intervalOf(r)
+}
+
+// intervalOf returns a node's publish interval, falling back to 5s when the summary carries none.
+func intervalOf(r record) time.Duration {
+	interval := time.Duration(r.health.IntervalMs) * time.Millisecond
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	return interval
 }
 
 // Snapshot returns the current fleet, sorted by (app, lord_id), with staleness computed now.
@@ -77,11 +111,7 @@ func (a *Aggregator) Snapshot() []NodeView {
 // isStale reports whether a node has missed staleMultiple of its own publish intervals. A missing
 // or nonsensical interval falls back to 5s so a bad summary cannot make a node look permanently live.
 func (a *Aggregator) isStale(r record, now time.Time) bool {
-	interval := time.Duration(r.health.IntervalMs) * time.Millisecond
-	if interval <= 0 {
-		interval = 5 * time.Second
-	}
-	return now.Sub(r.lastSeen) > time.Duration(a.staleMultiple)*interval
+	return now.Sub(r.lastSeen) > time.Duration(a.staleMultiple)*intervalOf(r)
 }
 
 // Subscribe wires the aggregator to a bus: it subscribes to every lord's health subject and ingests

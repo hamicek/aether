@@ -55,6 +55,27 @@ func TestAggregatorStaleness(t *testing.T) {
 	}
 }
 
+// TestAggregatorEviction proves a node silent far beyond staleness is dropped entirely, so a
+// restarted lord (new pid -> new key) does not leave its old key lingering forever.
+func TestAggregatorEviction(t *testing.T) {
+	now := time.Unix(1000, 0)
+	a := NewAggregator()
+	a.now = func() time.Time { return now }
+
+	a.Ingest(Health{App: "a", LordID: "old-1", IntervalMs: 1000}) // 1s interval -> evict after 10s
+	if len(a.Snapshot()) != 1 {
+		t.Fatalf("want 1 node, got %d", len(a.Snapshot()))
+	}
+
+	now = now.Add(11 * time.Second) // old-1 now silent beyond the eviction window
+	a.Ingest(Health{App: "a", LordID: "new-2", IntervalMs: 1000})
+
+	snap := a.Snapshot()
+	if len(snap) != 1 || snap[0].LordID != "new-2" {
+		t.Fatalf("old node not evicted on restart: %+v", snap)
+	}
+}
+
 // TestAggregatorStaleFallback proves a summary with no interval uses the 5s fallback rather than
 // looking permanently live.
 func TestAggregatorStaleFallback(t *testing.T) {

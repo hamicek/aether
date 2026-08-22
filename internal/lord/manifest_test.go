@@ -474,6 +474,21 @@ app = "demo"
 	}
 }
 
+// TestManifestFleetHealthRequiresApp proves fleet_health without a top-level app fails fast - the
+// fleet subject would be malformed and the publish a silent no-op.
+func TestManifestFleetHealthRequiresApp(t *testing.T) {
+	_, err := LoadManifest(writeManifest(t, `
+[observability]
+fleet_health = true
+`))
+	if err == nil {
+		t.Fatalf("expected error for fleet_health without app, got nil")
+	}
+	if !strings.Contains(err.Error(), "fleet_health") {
+		t.Fatalf("error %q does not mention fleet_health", err.Error())
+	}
+}
+
 // TestManifestAppUnderscoreRejected proves an app in the reserved underscore namespace fails fast -
 // it would collide with the runtime's own aether._lord.* / aether._fleet.* channels.
 func TestManifestAppUnderscoreRejected(t *testing.T) {

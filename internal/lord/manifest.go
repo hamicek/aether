@@ -227,6 +227,11 @@ func (m *Manifest) validate() error {
 	if strings.HasPrefix(m.App, "_") {
 		return fmt.Errorf("app %q must not start with \"_\" (reserved for the runtime's own channels)", m.App)
 	}
+	// Fleet health publishes on aether._fleet.<app>.<lord>; an empty app makes that subject malformed
+	// and the publish a silent no-op, so require the app when the feature is on.
+	if m.Observability.FleetHealth && m.App == "" {
+		return fmt.Errorf("observability: fleet_health = true requires a top-level app (it publishes on aether._fleet.<app>.<lord>)")
+	}
 	// Names must be unique across thralls and edge servers - they share the supervision namespace
 	// (registry key, control subject, fencing) and a collision would cross their wires.
 	seen := make(map[string]string) // name -> where it was first defined
