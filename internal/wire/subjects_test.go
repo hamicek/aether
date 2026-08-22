@@ -33,4 +33,10 @@ func TestSubjects(t *testing.T) {
 	if Events != "aether._lord.events" {
 		t.Errorf("Events: got %q, want %q", Events, "aether._lord.events")
 	}
+	if got := FleetHealth("demo", "host-123"); got != "aether._fleet.demo.host-123" {
+		t.Errorf("FleetHealth: got %q, want %q", got, "aether._fleet.demo.host-123")
+	}
+	if FleetHealthAll() != "aether._fleet.>" {
+		t.Errorf("FleetHealthAll: got %q, want %q", FleetHealthAll(), "aether._fleet.>")
+	}
 }

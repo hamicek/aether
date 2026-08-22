@@ -412,6 +412,85 @@ site   = "SITE_A"
 	}
 }
 
+// TestLoadManifestFleetHealth proves the [observability] fleet flags parse and the publish
+// interval defaults/clamps: unset -> 5000, too-small -> floor 500, sane -> kept.
+func TestLoadManifestFleetHealth(t *testing.T) {
+	cases := []struct {
+		name         string
+		body         string
+		wantEnabled  bool
+		wantInterval int
+	}{
+		{
+			name: "enabled, interval defaulted",
+			body: `
+app = "demo"
+[observability]
+fleet_health = true
+`,
+			wantEnabled: true, wantInterval: 5000,
+		},
+		{
+			name: "interval floored",
+			body: `
+app = "demo"
+[observability]
+fleet_health = true
+fleet_health_interval_ms = 50
+`,
+			wantEnabled: true, wantInterval: 500,
+		},
+		{
+			name: "interval kept",
+			body: `
+app = "demo"
+[observability]
+fleet_health = true
+fleet_health_interval_ms = 2000
+`,
+			wantEnabled: true, wantInterval: 2000,
+		},
+		{
+			name: "disabled by default",
+			body: `
+app = "demo"
+`,
+			wantEnabled: false, wantInterval: 5000,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, err := LoadManifest(writeManifest(t, tc.body))
+			if err != nil {
+				t.Fatalf("LoadManifest: %v", err)
+			}
+			if m.Observability.FleetHealth != tc.wantEnabled {
+				t.Errorf("FleetHealth = %v, want %v", m.Observability.FleetHealth, tc.wantEnabled)
+			}
+			if m.Observability.FleetHealthIntervalMs != tc.wantInterval {
+				t.Errorf("FleetHealthIntervalMs = %d, want %d", m.Observability.FleetHealthIntervalMs, tc.wantInterval)
+			}
+		})
+	}
+}
+
+// TestManifestAppUnderscoreRejected proves an app in the reserved underscore namespace fails fast -
+// it would collide with the runtime's own aether._lord.* / aether._fleet.* channels.
+func TestManifestAppUnderscoreRejected(t *testing.T) {
+	_, err := LoadManifest(writeManifest(t, `
+app = "_fleet"
+[[thrall]]
+name = "x"
+cmd  = "run"
+`))
+	if err == nil {
+		t.Fatalf("expected error for app starting with _, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not start with") {
+		t.Fatalf("error %q does not mention the reserved prefix", err.Error())
+	}
+}
+
 // TestManifestEventLogUseValidation covers the retention-intent field (AE-063): "rebuild" with a
 // retention bound is a fail-fast config error, "audit" makes a bound legitimate, an unset intent
 // keeps today's behaviour, and the field is meaningless without event_log.
