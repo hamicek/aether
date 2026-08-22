@@ -44,7 +44,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
-| **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a network-wide view across nodes (opt-in, mechanism not domain) - see [Observability](#observability) |
+| **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a view of every lord on the bus/cluster (opt-in, mechanism not domain; across leaf boundaries is a follow-up) - see [Observability](#observability) |
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
@@ -511,15 +511,19 @@ read-only (no control actions). The page is self-contained (no external assets),
 offline. Like `/metrics`, it binds wherever `metrics_addr` says (default a loopback address);
 exposing it on a network needs authentication (a follow-up).
 
-**Fleet health (across nodes).** The observer dashboard is per-lord; for a **network-wide** view,
-opt in with `fleet_health = true` and each lord publishes a curated summary of itself on
+**Fleet health (across lords).** The observer dashboard is per-lord; for a view of **every lord on
+the bus**, opt in with `fleet_health = true` and each lord publishes a curated summary of itself on
 `aether._fleet.<app>.<lord_id>`. `aether fleet [--watch]` (a reusable aggregator) assembles the whole
 fleet from those summaries - which lords are live or stale, their thralls and states - from one
-place. It is deliberately a separate, exportable channel: the raw supervision subjects
-(`aether._lord.>`) stay node-local and are never exported, while `_fleet` is what an operator
-explicitly exports/imports (like the data plane) to see across sites. The payload is a JSON contract,
-so an application dashboard can consume it in any language; a *domain* dashboard (tags/alarms) is an
-application thrall that reads this feed as one input, not part of aether.
+place. It is deliberately a separate subject from supervision: `_fleet` is a curated summary meant to
+be seen across lords, whereas the raw `aether._lord.>` channels are node-local. The payload is a JSON
+contract, so an application dashboard can consume it in any language; a *domain* dashboard
+(tags/alarms) is an application thrall that reads this feed as one input, not part of aether.
+
+Today the aggregator sees every lord that **shares its NATS account or cluster** (one bus, or an
+external cluster's single account). Reaching across **leaf-node account boundaries** - a hub seeing
+its isolated spokes - needs a stream export of `aether._fleet.>` that the `[nats.leaf]` path does not
+yet emit; that is a planned follow-up, so this is not (yet) a hub-spoke-across-sites view.
 
 ```toml
 [observability]

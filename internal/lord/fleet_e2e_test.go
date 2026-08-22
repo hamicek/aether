@@ -20,14 +20,17 @@ func findNode(snap []fleet.NodeView, app string) (fleet.NodeView, bool) {
 	return fleet.NodeView{}, false
 }
 
-// TestFleetEndToEnd proves L1+L2 together on one bus: a real lord publishes its health, an
-// aggregator assembles the fleet, a second node's summary shows up alongside it, a node that stops
-// publishing goes stale while the live one stays live, and the raw supervision channel never
-// carries fleet data.
+// TestFleetEndToEnd proves L1+L2 together on one bus (one NATS account, as an external cluster
+// presents): a real lord publishes its health, an aggregator assembles the fleet, a second lord's
+// summary shows up alongside it, a lord that stops publishing goes stale while the live one stays
+// live, and fleet health never lands on the raw supervision subject.
 //
-// The second node is published synthetically rather than by a second full lord: the real multi-node
-// topology gives each lord its own bus joined by a leaf/cluster, so what an aggregator actually
-// receives is exactly a fleet.Health message arriving on its bus - which is what we publish here.
+// The second lord is published synthetically rather than run as a second full process: within one
+// account, what the aggregator receives is exactly a fleet.Health message on the bus, which is what
+// we publish. This test does NOT cover crossing a leaf-node account boundary - fleet health does not
+// yet cross the leaf (a stream export of aether._fleet.> is a planned follow-up); the isolation
+// asserted here is that fleet health uses a subject separate from aether._lord.>, not an
+// account-export boundary.
 func TestFleetEndToEnd(t *testing.T) {
 	eth := startEmbedded(t)
 
@@ -36,7 +39,9 @@ func TestFleetEndToEnd(t *testing.T) {
 		t.Fatalf("aggregator subscribe: %v", err)
 	}
 
-	// Isolation guard: watch the raw supervision namespace and flag any fleet-shaped payload there.
+	// Subject-separation guard: watch the raw supervision namespace and flag any fleet-shaped payload
+	// there. This proves fleet health uses a subject distinct from aether._lord.> - not an
+	// account-export boundary (crossing accounts is out of scope; see the function doc).
 	leakedSupervision := make(chan struct{}, 1)
 	subLord, err := eth.Conn().Subscribe("aether._lord.>", func(m *nats.Msg) {
 		var h fleet.Health
@@ -58,14 +63,14 @@ func TestFleetEndToEnd(t *testing.T) {
 	m.Observability.FleetHealthIntervalMs = 500
 	startLord(t, eth, m)
 
-	// A second node (site-b), published once, with a short interval so it goes stale quickly.
+	// A second lord (site-b), published once, with a short interval so it goes stale quickly.
 	siteB, _ := json.Marshal(fleet.Health{App: "site-b", LordID: "node-b-1", IntervalMs: 500})
 	if err := eth.Conn().Publish(wire.FleetHealth("site-b", "node-b-1"), siteB); err != nil {
 		t.Fatalf("publish site-b: %v", err)
 	}
 
-	// AC #1 + #2: both nodes appear in the fleet.
-	waitFor(t, 5*time.Second, "both nodes in fleet", func() bool {
+	// AC #1 + #2: both lords appear in the fleet.
+	waitFor(t, 5*time.Second, "both lords in fleet", func() bool {
 		snap := agg.Snapshot()
 		_, aOK := findNode(snap, "site-a")
 		_, bOK := findNode(snap, "site-b")
