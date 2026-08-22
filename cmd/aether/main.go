@@ -1,4 +1,4 @@
-// Command aether starts the runtime (up) and provides tools: ps, events, cast, call.
+// Command aether starts the runtime (up) and provides tools: ps, events, fleet, cast, call.
 package main
 
 import (
@@ -17,6 +17,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/fleet"
 	"github.com/hamicek/aether/internal/lord"
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
@@ -48,6 +49,8 @@ func main() {
 		psCmd(os.Args[2:])
 	case "events":
 		eventsCmd(os.Args[2:])
+	case "fleet":
+		fleetCmd(os.Args[2:])
 	case "cast":
 		castCmd(os.Args[2:])
 	case "call":
@@ -168,6 +171,72 @@ func eventsCmd(argv []string) {
 		log.Fatalf("subscribe: %v", err)
 	}
 	<-ctx.Done()
+}
+
+// fleetCmd shows the fleet: every lord publishing a health summary on aether._fleet.>. Without
+// --watch it collects for a short window and prints once; with --watch it redraws until Ctrl-C.
+func fleetCmd(argv []string) {
+	fs := flag.NewFlagSet("fleet", flag.ExitOnError)
+	url := fs.String("url", "", "bus address")
+	watch := fs.Bool("watch", false, "keep redrawing the fleet until Ctrl-C")
+	collect := fs.Duration("for", 1500*time.Millisecond, "how long to collect before the one-shot print")
+	ca, nkey := credFlags(fs)
+	_ = fs.Parse(argv)
+
+	ep := resolveEndpoint(*url, "", *ca, *nkey)
+	nc := connect(ep)
+	defer nc.Close()
+
+	agg := fleet.NewAggregator()
+	if _, err := agg.Subscribe(nc); err != nil {
+		log.Fatalf("subscribe: %v", err)
+	}
+
+	if !*watch {
+		time.Sleep(*collect)
+		printFleet(agg.Snapshot())
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fmt.Printf("\n=== fleet @ %s ===\n", time.Now().Format("15:04:05"))
+			printFleet(agg.Snapshot())
+		}
+	}
+}
+
+// printFleet renders one row per node: app, lord id, live/stale, thrall count (ready of total),
+// and how long ago its last summary arrived.
+func printFleet(nodes []fleet.NodeView) {
+	if len(nodes) == 0 {
+		fmt.Println("no lords publishing fleet health (is [observability] fleet_health = true?)")
+		return
+	}
+	fmt.Printf("%-16s %-24s %-6s %-14s %s\n", "APP", "LORD", "STATE", "THRALLS", "LAST")
+	now := time.Now()
+	for _, n := range nodes {
+		ready := 0
+		for _, th := range n.Thralls {
+			if th.Status == "ready" {
+				ready++
+			}
+		}
+		state := "live"
+		if n.Stale {
+			state = "STALE"
+		}
+		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
+		fmt.Printf("%-16s %-24s %-6s %-14s %s ago\n",
+			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
+	}
 }
 
 // castCmd sends a fire-and-forget cast: `aether cast <name> <op> [json-payload]`.
@@ -312,6 +381,6 @@ func writeEndpoint(ep endpoint) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: aether <up|ps|events|cast|call|down> ...")
+	fmt.Fprintln(os.Stderr, "usage: aether <up|ps|events|fleet|cast|call|down> ...")
 	os.Exit(2)
 }

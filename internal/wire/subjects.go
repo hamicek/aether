@@ -53,3 +53,14 @@ func LordCtl() string { return "aether._lord.ctl" }
 
 // Events = lifecycle stream (started/crashed/restarted) for the dashboard.
 const Events = "aether._lord.events"
+
+// Fleet observability: a curated health summary each lord publishes about itself, so a fleet-wide
+// aggregator can show the whole network from one place. This is a deliberate sibling of the raw
+// supervision channels above: `aether._lord.>` stays node-local and is never exported, whereas
+// `aether._fleet.>` is the curated summary the operator explicitly exports/imports to build a fleet
+// view. The lord's identity travels in the payload (app + lord id), not in the subject, so a lord
+// id that contains dots (an FQDN hostname) does not have to be a single subject token.
+func FleetHealth(app, lordID string) string { return fmt.Sprintf("aether._fleet.%s.%s", app, lordID) }
+
+// FleetHealthAll = wildcard an aggregator subscribes to for every lord's health across the bus.
+func FleetHealthAll() string { return "aether._fleet.>" }

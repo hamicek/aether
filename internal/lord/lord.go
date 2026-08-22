@@ -100,6 +100,7 @@ type Lord struct {
 
 	backlogPollEvery   time.Duration // how often durable consumer backlogs are sampled
 	procStatsPollEvery time.Duration // how often thrall RSS/CPU are sampled
+	fleetHealthEvery   time.Duration // how often the fleet health summary is published (opt-in)
 }
 
 // New creates the root lord from a manifest.
@@ -147,6 +148,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		hbCheckEvery:       hbInterval,
 		backlogPollEvery:   backlogPollInterval,
 		procStatsPollEvery: procStatsPollInterval,
+		fleetHealthEvery:   time.Duration(m.Observability.FleetHealthIntervalMs) * time.Millisecond,
 	}
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
@@ -271,6 +273,10 @@ func (l *Lord) Start(ctx context.Context) error {
 	go l.reapHeartbeats()
 	go l.pollDurableBacklog()
 	go l.pollProcStats()
+	// Fleet health is opt-in: only publish when enabled, so plain runs add no traffic.
+	if l.manifest.Observability.FleetHealth {
+		go l.publishHealth()
+	}
 
 	for _, ch := range l.children {
 		ch.lordKey = l.manifest.App

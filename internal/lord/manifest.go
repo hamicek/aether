@@ -33,6 +33,13 @@ type Observability struct {
 	// Dashboard serves the read-only observer dashboard (live supervision tree + event stream)
 	// on the same HTTP server as /metrics; it therefore requires MetricsAddr. Off by default.
 	Dashboard bool `toml:"dashboard"`
+	// FleetHealth makes the lord publish a curated health summary of itself on aether._fleet.>
+	// (wire.FleetHealth) so a fleet-wide aggregator can show the whole network. It needs no HTTP
+	// port - only the bus - and is independent of the dashboard. Off by default (opt-in).
+	FleetHealth bool `toml:"fleet_health"`
+	// FleetHealthIntervalMs is how often the fleet summary is published. Default 5000 (the fleet is
+	// a coarser view than per-node metrics); ignored when FleetHealth is false.
+	FleetHealthIntervalMs int `toml:"fleet_health_interval_ms"`
 }
 
 // Liveness tunes how fast a hung-but-alive thrall is detected. The interval is propagated to the
@@ -174,6 +181,13 @@ func (m *Manifest) applyDefaults() {
 	if m.Liveness.StaleAfterMisses <= 0 {
 		m.Liveness.StaleAfterMisses = 3
 	}
+	// Fleet health: default the publish interval (non-positive -> 5s) and floor it, so an enabled
+	// but unset (or nonsensical) interval keeps a sane cadence. Only meaningful when FleetHealth is on.
+	if m.Observability.FleetHealthIntervalMs <= 0 {
+		m.Observability.FleetHealthIntervalMs = 5000
+	} else if m.Observability.FleetHealthIntervalMs < 500 {
+		m.Observability.FleetHealthIntervalMs = 500
+	}
 	for i := range m.Thralls {
 		if m.Thralls[i].Restart == "" {
 			m.Thralls[i].Restart = "permanent"
@@ -206,6 +220,17 @@ func (m *Manifest) validate() error {
 	// caught here at load rather than later when the embedded server is built.
 	if m.Nats.Leaf != nil && m.App == "" {
 		return fmt.Errorf("nats.leaf requires a top-level app (the leaf exports aether.<app>.>)")
+	}
+	// The app sits in the subject's app position (aether.<app>.…); a leading underscore is reserved
+	// for the runtime's own channels there (aether._lord.…, aether._fleet.…), so an app named that
+	// way would collide with supervision or fleet traffic. Reject it rather than route into them.
+	if strings.HasPrefix(m.App, "_") {
+		return fmt.Errorf("app %q must not start with \"_\" (reserved for the runtime's own channels)", m.App)
+	}
+	// Fleet health publishes on aether._fleet.<app>.<lord>; an empty app makes that subject malformed
+	// and the publish a silent no-op, so require the app when the feature is on.
+	if m.Observability.FleetHealth && m.App == "" {
+		return fmt.Errorf("observability: fleet_health = true requires a top-level app (it publishes on aether._fleet.<app>.<lord>)")
 	}
 	// Names must be unique across thralls and edge servers - they share the supervision namespace
 	// (registry key, control subject, fencing) and a collision would cross their wires.
