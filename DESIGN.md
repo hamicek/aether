@@ -154,6 +154,7 @@ aether.<app>.<name>.info     # out-of-band messages (timers, notifications)
 aether._lord.<name>.ctl      # lord -> thrall (drain / shutdown)
 aether._lord.<name>.hb       # thrall -> lord (heartbeat)
 aether._lord.events          # lifecycle events (spawned/ready/down/restarting) for a dashboard
+aether._fleet.<app>.<lord>   # curated health summary a lord publishes about itself (opt-in, fleet view)
 aether_<app>_<name>          # JetStream stream for the durable mailbox (dots become underscores)
 ```
 
@@ -455,6 +456,15 @@ application identity or roles.**
 - **Registry** -> NATS **KV** `name -> {node, pid, status}`. Cluster-wide with no extra work.
 - **Lifecycle stream** -> `aether._lord.events` (spawned/ready/down/restarting/...), surfaced by the
   CLI `events`.
+- **Fleet health** (opt-in, `[observability] fleet_health`) -> each lord publishes a **curated
+  summary of its own state** (its thralls, their status and metrics) on `aether._fleet.<app>.<lord>`,
+  and the CLI `fleet` (a `fleet.Aggregator`) assembles a **network-wide view** across nodes. This is
+  the fleet-wide sibling of the per-node observer dashboard, and a mechanism, not a domain concern -
+  it describes the runtime, never application data. Deliberately separate from supervision: the raw
+  `aether._lord.>` channels stay **node-local and are never exported**, whereas `_fleet` is the
+  curated summary the operator **explicitly exports/imports** (like the data plane) to build a fleet
+  view. The payload is a JSON contract, so a dashboard can consume it in any language; a *domain*
+  dashboard (tags/alarms/layout) is an application thrall that consumes this feed as one input.
 - **Singleton / global thrall** (the equivalent of Erlang `:global`). `scope = "singleton"` runs the
   thrall as **exactly one instance for the app** - no replicas - guarded by a **distributed lock over
   NATS KV with CAS** (the lord acquires the key `singleton/<name>` before spawning). Its original job
