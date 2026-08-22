@@ -56,6 +56,17 @@ site's account:
 Bring up `aether-spoke-b.toml` the same way for a second, isolated site (account SITE_B, domain
 `sb`, app `siteb`): the hub reaches both, but the sites cannot see each other.
 
+**Fleet health across the leaf.** The spokes set `fleet_health = true`, so each publishes a curated
+health summary that the hub imports (`nats/hub.conf` imports `aether._fleet.<site>.>` from each site).
+See every site's health from the hub:
+
+```bash
+../../bin/aether fleet --url nats://127.0.0.1:7390        # one-shot (waits one publish interval); --watch to keep redrawing
+```
+
+Raw supervision (`aether._lord.>`) is never exported, so the sites stay isolated - only the curated
+summary crosses.
+
 Tear down with `kill %1 %2` (or kill the two background PIDs) and `rm -rf .run`.
 
 ## Layout

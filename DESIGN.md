@@ -464,11 +464,12 @@ application identity or roles.**
   the raw `aether._lord.>` channels are node-local, whereas `_fleet` is a curated summary meant to be
   seen across lords. The payload is a JSON contract, so a dashboard can consume it in any language; a
   *domain* dashboard (tags/alarms/layout) is an application thrall that consumes this feed as one
-  input. **Scope today:** the aggregator sees every lord that shares its NATS account/cluster (one
-  bus, or an external cluster's single account). Reaching across **leaf-node account boundaries** (a
-  hub seeing isolated spokes) needs a stream export of `aether._fleet.>` that the ergonomic
-  `[nats.leaf]` path does not yet emit - a deliberate follow-up, so fleet health is not claimed to
-  cross the leaf isolation boundary until that lands.
+  input. **Across a leaf boundary:** in a single account (one bus, or an external cluster's single
+  account) the aggregator sees every lord directly. In a hub-spoke topology the summary crosses the
+  leaf as a **stream export** - the `[nats.leaf]` spoke exports `aether._fleet.<app>.>`, and the hub's
+  center account imports it (operator-authored, like the data-plane import), so an aggregator on the
+  hub sees every isolated spoke. Supervision (`aether._lord.>`) is still never exported, so isolation
+  holds: only the curated summary crosses, and only where the hub imports it.
 - **Singleton / global thrall** (the equivalent of Erlang `:global`). `scope = "singleton"` runs the
   thrall as **exactly one instance for the app** - no replicas - guarded by a **distributed lock over
   NATS KV with CAS** (the lord acquires the key `singleton/<name>` before spawning). Its original job

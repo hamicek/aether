@@ -16,9 +16,11 @@ import (
 // JetStream per account programmatically is not supported before the server starts, whereas the
 // config parser sets it up exactly as the hub-spoke spike proved (examples/hub-spoke-spike).
 //
-// Isolation and supervision fall out of what is exported: only aether.<app>.> (the data plane)
-// crosses the leaf; the supervision subjects aether._lord.> are never exported, so they stay
-// node-local by construction - no allow/deny policy needed.
+// Isolation and supervision fall out of what is exported: the data plane aether.<app>.> (a service
+// export) and the curated fleet-health summary aether._fleet.<app>.> (a stream export - a one-way
+// push the hub imports) are what may cross the leaf; the supervision subjects aether._lord.> are
+// never exported, so they stay node-local by construction - no allow/deny policy needed. The hub
+// side (the matching stream import into the center account) stays operator-authored NATS config.
 func leafOptions(leaf *Leaf, app, storeDir string) (*natsserver.Options, error) {
 	// Re-validate here, not only at the manifest: leaf and app are both rendered verbatim into the
 	// generated config, and this builder is reachable directly (tests, other callers), not solely
@@ -36,33 +38,7 @@ func leafOptions(leaf *Leaf, app, storeDir string) (*natsserver.Options, error) 
 	if err != nil {
 		return nil, err
 	}
-	// nkey/creds file for the leaf link; user:pass (embedded above in the URL) covers a dev cluster.
-	var creds string
-	if leaf.Nkey != "" {
-		creds = fmt.Sprintf("\n      credentials: %q", leaf.Nkey)
-	}
-
-	cfg := fmt.Sprintf(`
-jetstream { domain: %s }
-accounts {
-  %s {
-    jetstream: enabled
-    users: [ { user: local, password: local } ]
-    exports: [ { service: "aether.%s.>" } ]
-  }
-  SYS {}
-}
-system_account: SYS
-no_auth_user: local
-leafnodes {
-  remotes: [
-    {
-      url: %q
-      account: %s%s
-    }
-  ]
-}
-`, leaf.Domain, leaf.Site, app, remoteURL, leaf.Site, creds)
+	cfg := leafConfig(leaf, app, remoteURL)
 
 	// The parser needs a file; the server reads it once here (we never trigger a reload), so a
 	// temp file removed straight after is enough and leaves nothing behind in the store dir.
@@ -93,6 +69,43 @@ leafnodes {
 	// stray SIGHUP could not reach a config file we have already deleted.
 	opts.ConfigFile = ""
 	return opts, nil
+}
+
+// leafConfig renders the spoke-side NATS config: a per-site account that exports the app's data
+// plane (aether.<app>.>, a service export) and its curated fleet-health summary
+// (aether._fleet.<app>.>, a stream export the hub imports), a per-node JetStream domain, and the
+// leaf link to the hub. Supervision (aether._lord.>) is deliberately not exported, so it stays
+// node-local. Split out from leafOptions so the generated config is unit-testable without a server.
+func leafConfig(leaf *Leaf, app, remoteURL string) string {
+	// nkey/creds file for the leaf link; user:pass (embedded in the URL) covers a dev cluster.
+	var creds string
+	if leaf.Nkey != "" {
+		creds = fmt.Sprintf("\n      credentials: %q", leaf.Nkey)
+	}
+	return fmt.Sprintf(`
+jetstream { domain: %s }
+accounts {
+  %s {
+    jetstream: enabled
+    users: [ { user: local, password: local } ]
+    exports: [
+      { service: "aether.%s.>" }
+      { stream: "aether._fleet.%s.>" }
+    ]
+  }
+  SYS {}
+}
+system_account: SYS
+no_auth_user: local
+leafnodes {
+  remotes: [
+    {
+      url: %q
+      account: %s%s
+    }
+  ]
+}
+`, leaf.Domain, leaf.Site, app, app, remoteURL, leaf.Site, creds)
 }
 
 // leafRemoteURL returns the hub leafnode URL, folding in user/password credentials when the
