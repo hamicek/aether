@@ -54,9 +54,10 @@ func (l *Lord) publishHealth() {
 		return
 	}
 	subject := wire.FleetHealth(l.manifest.App, l.id)
-	// Publish once immediately so a fleet view is populated within a heartbeat of startup, rather than
-	// only after the first full interval (a 5s default would otherwise leave `aether fleet` empty for
-	// seconds after a lord comes up). Then tick at the configured cadence.
+	// Publish once immediately so an aggregator already subscribed sees this lord within a heartbeat
+	// of startup, rather than only after the first full interval. (This helps a long-running dashboard
+	// on the same bus; across a leaf the first publish can still be missed until interest propagates,
+	// so a freshly started `aether fleet` waits for a periodic tick.) Then tick at the configured cadence.
 	l.publishHealthOnce(subject)
 	t := time.NewTicker(l.fleetHealthEvery)
 	defer t.Stop()

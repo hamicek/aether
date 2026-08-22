@@ -93,6 +93,45 @@ func TestFleetHealthCrossesLeaf(t *testing.T) {
 	t.Fatal("spoke fleet health never reached the hub aggregator across the leaf")
 }
 
+// TestFleetTwoSpokesIsolated (AC #2) proves the hub sees two spokes at once, while the spokes stay
+// isolated: an aggregator on site A's own bus sees only site A, never site B's fleet health.
+func TestFleetTwoSpokesIsolated(t *testing.T) {
+	leafURL, hub := startFleetLeafHub(t)
+	spokeA := startSpoke(t, leafURL, "SITE_A", "sitea", "sa", "leafA")
+	spokeB := startSpoke(t, leafURL, "SITE_B", "siteb", "sb", "leafB")
+
+	hubAgg := fleet.NewAggregator()
+	if _, err := hubAgg.Subscribe(hub); err != nil {
+		t.Fatalf("hub aggregator subscribe: %v", err)
+	}
+	// An aggregator bound to site A's own bus - it must never see site B (accounts are isolated).
+	siteAAgg := fleet.NewAggregator()
+	if _, err := siteAAgg.Subscribe(spokeA.Conn()); err != nil {
+		t.Fatalf("site A aggregator subscribe: %v", err)
+	}
+
+	end := time.Now().Add(5 * time.Second)
+	for time.Now().Before(end) {
+		publishHealthOn(t, spokeA, "sitea", "node-a-1")
+		publishHealthOn(t, spokeB, "siteb", "node-b-1")
+		time.Sleep(150 * time.Millisecond)
+		apps := map[string]bool{}
+		for _, n := range hubAgg.Snapshot() {
+			apps[n.App] = true
+		}
+		if apps["sitea"] && apps["siteb"] {
+			// The hub sees both; site A must see only itself.
+			for _, n := range siteAAgg.Snapshot() {
+				if n.App == "siteb" {
+					t.Fatal("site A saw site B's fleet health; sites must stay isolated")
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("hub did not see both spokes' fleet health within 5s")
+}
+
 // TestFleetSupervisionDoesNotCrossLeaf (AC #3) proves the isolation invariant holds: even while
 // fleet health crosses, the raw supervision subject aether._lord.> published on the spoke never
 // reaches the hub - it is not exported.
