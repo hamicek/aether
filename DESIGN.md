@@ -298,8 +298,8 @@ restart = "transient"
 replicas = 3                             # -> queue group, a pool of 3 workers
 ```
 
-A programmatic API on top (a DynamicSupervisor, §12) for "add a thrall at runtime" is planned; the
-default path is the manifest.
+A programmatic API on top (a DynamicSupervisor, §12) adds a thrall at runtime (`ctx.StartChild` /
+`ctx.StopChild`); the default path is still the manifest.
 
 ---
 
@@ -571,8 +571,9 @@ State still lives in ordinary thralls behind it, reached via `ctx.Call`/`ctx.Cas
 `examples/webserver-custom/` (a custom edge doing an Authorization check beside the built-in ingress).
 
 Where the A/B line falls: what maps cleanly as route -> operation is model A (declarative, no code);
-custom logic around the call is model B. Input validation follows the same line - model A can validate
-declaratively (a JSON schema on a route, a planned follow-up), model B validates in code.
+custom logic around the call is model B. Input validation follows the same line - model A validates
+declaratively (a JSON schema on a route: `route."..." = { ..., schema = "..." }`, rejecting a bad body
+with a 400 before it reaches the ether), model B validates in code.
 
 **Live push to the browser (implemented, SSE).** The reverse flow: ether -> browser. A frontend opens a
 connection and the edge pushes events out to it as they cross the ether. `thrall.SSEStream` (Go SDK) is
