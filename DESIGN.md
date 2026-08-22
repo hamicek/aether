@@ -5,7 +5,7 @@
 > and run a **lord** (supervisor). Not BEAM-scale (millions of processes), but **tens** of
 > processes that communicate reliably.
 
-Status: implemented core, actively evolving. Last updated 2026-08-08.
+Status: implemented core, actively evolving. Last updated 2026-08-22 (through v0.8.0).
 
 ## Glossary
 
@@ -355,7 +355,9 @@ The thralls do not change by a single line. Two things do shift - accounted for 
   (connect/disconnect/subscription events). Built on `$SYS` it works the same embedded and external.
   (This `$SYS`-based liveness is on the ROADMAP; today liveness is derived from heartbeats.)
 - **A lord runs on every host** and starts its *local* thralls (holding to the rule "lord = a local
-  process manager"). That raises the singleton question - see §12.
+  process manager"). "One instance across hosts" is then a deployment concern - solved by leaf-node
+  isolation (one lord per node, its own app; §11b), not by lords racing a shared lock. The
+  `scope = "singleton"` lock is single-instance *within* an app, not across a cluster - see §12.
 
 So the runtime has two modes: `embedded` (the default, "download and run" convenience) and `external`
 (production, JetStream HA, scale).
@@ -470,9 +472,11 @@ application identity or roles.**
   center account imports it (operator-authored, like the data-plane import), so an aggregator on the
   hub sees every isolated spoke. Supervision (`aether._lord.>`) is still never exported, so isolation
   holds: only the curated summary crosses, and only where the hub imports it.
-- **Singleton / global thrall** (the equivalent of Erlang `:global`). `scope = "singleton"` runs the
-  thrall as **exactly one instance for the app** - no replicas - guarded by a **distributed lock over
-  NATS KV with CAS** (the lord acquires the key `singleton/<name>` before spawning). Its original job
+- **Singleton thrall.** `scope = "singleton"` runs the thrall as **at most one live instance within
+  the app** - no replicas - guarded by a **distributed lock over NATS KV with CAS** (the lord acquires
+  the key `singleton/<name>` before spawning). This is deliberately *not* Erlang's `:global`, which
+  registers a name cluster-wide across a BEAM cluster: aether does not cluster its supervision (§11b),
+  so this is single-instance within one app on one bus, not a globally registered name. Its original job
   - arbitrating between lords on several hosts racing to start the same instance - is gone: one lord
   per app is now enforced (§14), and lord-liveness fencing already reaps an orphan within the lease.
   What the lock still adds over `scope = "local"` is a **tighter handoff across a lord restart**: a
@@ -798,9 +802,10 @@ it small and safe: it does **not** chart metrics over time (that is Prometheus/G
 control actions (restart/drain from the UI) and authentication for network exposure are follow-ups,
 not v1. The page is self-contained (embedded, no external assets) so it serves in a closed
 environment. Because aether is bounded to tens of processes, the whole tree renders on one screen -
-unlike a BEAM-scale process list. Cluster-wide aggregation (one view across several lords via the
-KV registry) is future work; v1 shows a single lord's local subtree, consistent with "lord = a
-local process manager".
+unlike a BEAM-scale process list. The dashboard shows a **single lord's** local subtree, consistent
+with "lord = a local process manager"; the network-wide view across several lords is a separate
+mechanism - **fleet health** (§12, opt-in `[observability] fleet_health` + the `aether fleet` CLI),
+which aggregates the curated health summaries lords publish rather than reaching into each dashboard.
 
 ---
 
@@ -880,15 +885,18 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   `rest_for_one` is not fully specified.
 - **Thrall state persistence** - durability today covers the *mailbox* (casts survive a crash via
   JetStream), not the *state*. Like OTP, a restart runs a clean `init` and loses in-memory state.
-- **Monitoring / observability and long-running soak testing** - for high-reliability use.
 - **Stronger and server-side security** - the client side authenticates to an *external* bus with
   nkeys over server TLS (manifest `[nats.tls]` / `[nats.auth]`; the lord injects the credential
   paths into thralls, and the operator CLI takes `--ca`/`--nkey`). Still open: securing the embedded
   server itself for a networked bind, mutual TLS, JWT/account isolation, token auth, and key rotation.
 
-Note: JetStream durable mailboxes, cluster-wide singletons, and client-side nkey auth over server TLS,
-listed as future work in earlier drafts, are now implemented (see §6, §12 and the manifest `durable` /
-`scope` / `[nats.tls]` / `[nats.auth]` fields).
+Note: several items listed as future work in earlier drafts are now implemented - JetStream durable
+mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`, §12; these are
+single-instance *within an app*, not cluster-wide), client-side nkey auth over server TLS
+(`[nats.tls]` / `[nats.auth]`), structured logs + a Prometheus `/metrics` endpoint + the observer
+dashboard (§13b), fleet health across lords and leaf sites (§12, `[observability] fleet_health`), the
+embedded leaf spoke (`[nats.leaf]`, §11b), and a Docker image and recipe (see the README). The chaos
+and soak suite (`scripts/soak.sh`, out of CI) exercises these under failure.
 
 ---
 
@@ -903,6 +911,6 @@ listed as future work in earlier drafts, are now implemented (see §6, §12 and 
 | Topology | a declarative `aether.toml`; behavior in code |
 | Lord | variant A (dumb) + a heartbeat/drain contract ready for B |
 | Mailbox | core NATS ephemeral, with an optional JetStream durable mailbox (`durable = true`) |
-| Observability | structured logs + a Prometheus `/metrics` endpoint + heartbeat miss detection + `trace` propagation (§14); `$SYS` liveness still planned |
+| Observability | structured logs + a Prometheus `/metrics` endpoint + heartbeat miss detection + `trace` propagation + the per-lord observer dashboard + fleet health across lords (§13b); `$SYS` liveness still planned |
 | NATS features | do NOT hide them from thralls - `ctx.nats` is freely available |
-| Multi-node | a local lord; singletons via a KV CAS lock |
+| Multi-node | one lord per NATS node; distribution at the bus (leaf nodes + per-site accounts, §11b), not several lords over one bus; a within-app singleton via a KV-CAS lock + liveness fencing; fleet health across lords/sites |
