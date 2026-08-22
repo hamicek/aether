@@ -54,6 +54,10 @@ func (l *Lord) publishHealth() {
 		return
 	}
 	subject := wire.FleetHealth(l.manifest.App, l.id)
+	// Publish once immediately so a fleet view is populated within a heartbeat of startup, rather than
+	// only after the first full interval (a 5s default would otherwise leave `aether fleet` empty for
+	// seconds after a lord comes up). Then tick at the configured cadence.
+	l.publishHealthOnce(subject)
 	t := time.NewTicker(l.fleetHealthEvery)
 	defer t.Stop()
 	for {
@@ -61,11 +65,17 @@ func (l *Lord) publishHealth() {
 		case <-l.appCtx.Done():
 			return
 		case <-t.C:
-			data, err := json.Marshal(l.fleetHealth())
-			if err != nil {
-				continue
-			}
-			_ = l.ether.Conn().Publish(subject, data)
+			l.publishHealthOnce(subject)
 		}
 	}
+}
+
+// publishHealthOnce marshals and publishes a single fleet health summary. A marshal or publish error
+// is skipped, never fatal, so it cannot disturb supervision.
+func (l *Lord) publishHealthOnce(subject string) {
+	data, err := json.Marshal(l.fleetHealth())
+	if err != nil {
+		return
+	}
+	_ = l.ether.Conn().Publish(subject, data)
 }

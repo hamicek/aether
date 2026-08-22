@@ -19,6 +19,9 @@ domain   = "sa"                            # JetStream domain, unique per node
 user     = "leafA"                         # leaf-link credential (dev); prod: nkey = "/path/to/seed"
 password = "leafA"
 
+[observability]
+fleet_health = true                        # publish this site's health so the hub's `aether fleet` sees it
+
 [[thrall]]
 name    = "counter"
 cmd     = "../../bin/counter-go"

@@ -174,12 +174,15 @@ func eventsCmd(argv []string) {
 }
 
 // fleetCmd shows the fleet: every lord publishing a health summary on aether._fleet.>. Without
-// --watch it collects for a short window and prints once; with --watch it redraws until Ctrl-C.
+// --watch it collects for a window and prints once; with --watch it redraws until Ctrl-C. Fleet
+// health is fire-and-forget, so a one-shot only sees a lord that publishes while it is listening -
+// the default window therefore spans a full default publish interval (5s) so every publishing lord
+// appears at least once; --watch avoids the wait for continuous monitoring.
 func fleetCmd(argv []string) {
 	fs := flag.NewFlagSet("fleet", flag.ExitOnError)
 	url := fs.String("url", "", "bus address")
 	watch := fs.Bool("watch", false, "keep redrawing the fleet until Ctrl-C")
-	collect := fs.Duration("for", 1500*time.Millisecond, "how long to collect before the one-shot print")
+	collect := fs.Duration("for", 6*time.Second, "how long to collect before the one-shot print (span a publish interval)")
 	ca, nkey := credFlags(fs)
 	_ = fs.Parse(argv)
 

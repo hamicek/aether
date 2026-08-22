@@ -16,6 +16,9 @@ domain   = "sb"
 user     = "leafB"
 password = "leafB"
 
+[observability]
+fleet_health = true
+
 [[thrall]]
 name    = "counter"
 cmd     = "../../bin/counter-go"
