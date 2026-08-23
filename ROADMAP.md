@@ -60,6 +60,30 @@ Still open:
   OpenTelemetry (OTLP) exporter over the existing exporter-agnostic metric/trace model, for shops
   that push rather than scrape.
 
+## Security
+
+**Delivered** (see [Security](./README.md#security) and [DESIGN.md §11b / §14](./DESIGN.md)): the
+embedded server can be exposed on the network with **server-side TLS and mandatory nkey auth**
+(`[nats.security]`); a **least-privilege** tier gives the lord, thralls and operator their own nkey
+identities with deny-based subject permissions that make `aether._lord.>` node-local *by permission*
+on a networked bus (a thrall cannot drive supervision, an operator cannot forge control); and
+**credentials rotate without downtime** - replace a cert/key (or nkey) file in place and send
+`SIGHUP`, and the server reloads via `ReloadOptions` (a TLS rotation keeps live connections, an nkey
+rotation lets the new key in and the old out). Client-side auth against an *external* bus
+(`[nats.tls]` / `[nats.auth]`, including the operator CLI `--ca`/`--nkey`) was delivered earlier.
+
+Still open:
+
+- **Mutual TLS.** The server authenticates clients by nkey over server-side TLS; a
+  client-certificate (mTLS) identity is a later opt-in.
+- **Per-thrall identities.** A single shared thrall identity does not isolate one thrall from
+  another (name-scoped channels stay open across thralls); the roles isolate the lord / thrall /
+  operator boundaries. Per-thrall identities would be a separate step.
+- **Deny-based, not an allow-list.** The role permissions allow everything and subtract the
+  dangerous subjects (so JetStream and KV keep working); a stricter allow-list is not attempted.
+- **Soak of the secured, networked bus.** The soak suite exercises the loopback bus; extending it to
+  the networked, secured bus is future work.
+
 ## Testing
 
 - **Long-running soak and chaos testing.** For high-reliability use (for example SCADA-style

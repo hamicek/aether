@@ -1,0 +1,46 @@
+# The polyglot stack on a SECURED EMBEDDED bus: the embedded NATS server itself is exposed
+# on the network with server-side TLS and mandatory nkey auth. Only the [nats] section differs
+# from aether.toml. This example uses the LEAST-PRIVILEGE tier (a distinct nkey identity per
+# role); for a simpler single-identity bus, replace the three *_nkey lines with one nkey_seed.
+#
+# The referenced files are yours to provide: a server cert/key + CA, and one nkey seed per role
+# (generate them with your own PKI and the `nk` tool). The lord authenticates as the lord,
+# injects the THRALL identity into thralls, and the operator endpoint carries the OPERATOR
+# identity - secrets travel as file PATHS, never inline. Rotate a cert/key or nkey by replacing
+# the file in place and sending the process SIGHUP (no restart, live connections preserved).
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[nats.security]
+listen        = "0.0.0.0:4222"             # networked bind (omit [nats.security] = loopback, no auth)
+tls_cert      = "/etc/aether/server.pem"   # server certificate + key (server-side TLS)
+tls_key       = "/etc/aether/server-key.pem"
+ca            = "/etc/aether/ca.pem"       # clients verify the server against it
+lord_nkey     = "/etc/aether/lord.nk"      # supervisor: full rights
+thrall_nkey   = "/etc/aether/thrall.nk"    # workers: their data plane, not supervision control
+operator_nkey = "/etc/aether/operator.nk"  # CLI / dashboard: call/cast and observe, not control
+# Simple tier instead (one shared identity, no role separation):
+#   nkey_seed = "/etc/aether/node.nk"
+
+[[thrall]]
+name = "counter"
+cmd  = "bun run ./counter.ts tag-core"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-py"
+cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
+restart = "permanent"
+
+[[thrall]]
+name = "counter-go"
+cmd  = "../../bin/counter-go"
+restart = "permanent"
+
+[[thrall]]
+name = "gateway"
+cmd  = "bun run ./gateway.ts"
+restart = "transient"
