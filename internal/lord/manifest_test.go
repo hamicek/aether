@@ -251,6 +251,58 @@ cmd  = "run counter"
 	}
 }
 
+// TestLoadManifestNatsSecurity proves the [nats.security] section parses into the ether config with
+// all server-side fields, and that its absence leaves Security nil (the loopback, no-auth default).
+func TestLoadManifestNatsSecurity(t *testing.T) {
+	m, err := LoadManifest(writeManifest(t, `
+app = "demo"
+
+[nats]
+mode = "embedded"
+
+[nats.security]
+listen    = "0.0.0.0:4222"
+tls_cert  = "/etc/aether/server.pem"
+tls_key   = "/etc/aether/server-key.pem"
+ca        = "/etc/aether/ca.pem"
+nkey_seed = "/etc/aether/node.nk"
+
+[[thrall]]
+name = "counter"
+cmd  = "run counter"
+`))
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	sec := m.Nats.Security
+	if sec == nil {
+		t.Fatalf("nats.security = nil, want parsed section")
+	}
+	if sec.Listen != "0.0.0.0:4222" {
+		t.Errorf("listen = %q, want 0.0.0.0:4222", sec.Listen)
+	}
+	if sec.TLSCert != "/etc/aether/server.pem" || sec.TLSKey != "/etc/aether/server-key.pem" {
+		t.Errorf("tls cert/key = %q/%q, want the /etc/aether paths", sec.TLSCert, sec.TLSKey)
+	}
+	if sec.CA != "/etc/aether/ca.pem" || sec.NkeySeed != "/etc/aether/node.nk" {
+		t.Errorf("ca/nkey = %q/%q, want the /etc/aether paths", sec.CA, sec.NkeySeed)
+	}
+
+	noSec, err := LoadManifest(writeManifest(t, `
+app = "demo"
+
+[[thrall]]
+name = "counter"
+cmd  = "run counter"
+`))
+	if err != nil {
+		t.Fatalf("LoadManifest (no security): %v", err)
+	}
+	if noSec.Nats.Security != nil {
+		t.Errorf("nats.security = %+v, want nil when the section is absent", noSec.Nats.Security)
+	}
+}
+
 // TestManifestNatsValidation covers the [nats] semantic checks: a bad mode, and the leaf
 // constraints (embedded-only, required remote/site/domain) that fail fast rather than silently
 // falling back to an isolated embedded bus.
