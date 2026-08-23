@@ -5,7 +5,7 @@
 > and run a **lord** (supervisor). Not BEAM-scale (millions of processes), but **tens** of
 > processes that communicate reliably.
 
-Status: implemented core, actively evolving. Last updated 2026-08-22 (through v0.8.0).
+Status: implemented core, actively evolving. Last updated 2026-08-23 (through v0.9.0).
 
 ## Glossary
 
@@ -279,6 +279,13 @@ mode = "embedded"                        # embedded | external
 #   site   = "SITE_A"                             #   the account this node binds to (its isolation unit)
 #   domain = "sa"                                 #   JetStream domain, unique per node
 #   user = "leafA"  password = "leafA"            #   or: nkey = "/etc/aether/siteA.nk"
+# [nats.security]                                 # expose the embedded server on the network (§11b, §14)
+#   listen = "0.0.0.0:4222"                       #   networked bind (absent = loopback, no auth)
+#   tls_cert = "/etc/aether/server.pem"           #   server cert + key (server-side TLS)
+#   tls_key  = "/etc/aether/server-key.pem"
+#   ca = "/etc/aether/ca.pem"                     #   clients verify the server against it
+#   nkey_seed = "/etc/aether/node.nk"             #   one shared identity (or the three per-role seeds below)
+#   # lord_nkey / thrall_nkey / operator_nkey     #   least-privilege roles (exclusive with nkey_seed)
 
 [[thrall]]
 name = "counter"
@@ -427,7 +434,10 @@ introduced (each site is single-node and owns its singletons); a singleton that 
 **What crosses the node boundary.** Only the data plane (`aether.<app>.<name>.*`) needs to be exported
 across accounts. **Supervision** (`aether._lord.*`) and the KV fencing buckets are provisioned by each
 lord in its own NATS and stay **node-local** - they are never exported, so no supervision traffic
-leaks between sites. This is what makes one-lord-per-node clean. (Two consequences: a cross-node
+leaks between sites. This is what makes one-lord-per-node clean. This is a *different* mechanism from
+the one that keeps `aether._lord.>` node-local on a single shared secured bus (§14): **non-export**
+across leaf accounts is the boundary here, whereas **role permissions** are the boundary on a
+standalone networked embedded server. (Two consequences: a cross-node
 `ctx.Call` works transparently only within a *shared app namespace* - it is bound to the caller's app;
 and durable delivery *across* nodes is deliberately deferred - see §14 - because JetStream over leaf
 nodes needs a domain per node and cross-node streams mean mirror/source.)
@@ -437,10 +447,13 @@ subjects" are the same statement - authorization lives at the NATS layer, and ae
 reimplement it. Auth splits into three layers with a clear boundary:
 
 - **Infra (node ↔ bus)** - who may connect and to which subjects. aether provides the client-side
-  plumbing (nkey/CA from the manifest, injected into thralls; see §9); the bus policy - accounts,
-  exports/imports, subject permissions - is operator-authored NATS configuration. The supervision
-  subjects `aether._lord.>` should be permission-restricted to the lord/thrall users under network
-  exposure (ordinary clients deny them).
+  plumbing (nkey/CA from the manifest, injected into thralls; see §9). For a **secured embedded
+  server**, aether also *generates* the server-side policy: `[nats.security]`'s least-privilege tier
+  renders per-role nkey users (lord/thrall/operator) whose subject permissions keep `aether._lord.>`
+  node-local by construction (§14), so no manual rule is needed. For an **external** bus (or the hub
+  side of a leaf topology) the bus policy - accounts, exports/imports, subject permissions - stays
+  operator-authored NATS configuration; there the supervision subjects `aether._lord.>` should be
+  permission-restricted to the lord/thrall users under network exposure (ordinary clients deny them).
 - **Operator (control of aether)** - the dashboard, `/metrics`, and the control channels. This is
   aether's job (kept small - an auth gate and a permission recipe), not an application concern.
 - **Application users and roles** - login, RBAC, "who may acknowledge this". This is the **domain's**
@@ -907,8 +920,10 @@ mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`,
 single-instance *within an app*, not cluster-wide), client-side nkey auth over server TLS
 (`[nats.tls]` / `[nats.auth]`), structured logs + a Prometheus `/metrics` endpoint + the observer
 dashboard (§13b), fleet health across lords and leaf sites (§12, `[observability] fleet_health`), the
-embedded leaf spoke (`[nats.leaf]`, §11b), and a Docker image and recipe (see the README). The chaos
-and soak suite (`scripts/soak.sh`, out of CI) exercises these under failure.
+embedded leaf spoke (`[nats.leaf]`, §11b), the secured embedded server (`[nats.security]`: a networked
+bind with server TLS + nkey, least-privilege lord/thrall/operator roles making `aether._lord.>`
+node-local by permission, and SIGHUP credential rotation - §11b/§14), and a Docker image and recipe
+(see the README). The chaos and soak suite (`scripts/soak.sh`, out of CI) exercises these under failure.
 
 ---
 
@@ -926,3 +941,4 @@ and soak suite (`scripts/soak.sh`, out of CI) exercises these under failure.
 | Observability | structured logs + a Prometheus `/metrics` endpoint + heartbeat miss detection + `trace` propagation + the per-lord observer dashboard + fleet health across lords (§13b); `$SYS` liveness still planned |
 | NATS features | do NOT hide them from thralls - `ctx.nats` is freely available |
 | Multi-node | one lord per NATS node; distribution at the bus (leaf nodes + per-site accounts, §11b), not several lords over one bus; a within-app singleton via a KV-CAS lock + liveness fencing; fleet health across lords/sites |
+| Security | client-side auth to an external bus (`[nats.tls]` / `[nats.auth]`); the embedded server secured for a networked bind (`[nats.security]`: server TLS + nkey, one shared identity or three least-privilege roles making `aether._lord.>` node-local by permission, SIGHUP credential rotation, §11b/§14); mutual TLS still open |

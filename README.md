@@ -20,7 +20,7 @@ supervision, that is aether.
 Full design: [DESIGN.md](./DESIGN.md). License: [MIT](./LICENSE). Contributing:
 [CONTRIBUTING.md](./CONTRIBUTING.md). Roadmap and deliberately deferred work: [ROADMAP.md](./ROADMAP.md).
 
-This README tracks `main`; for tagged, versioned changes see [Releases](https://github.com/hamicek/aether/releases) (latest **v0.8.0**).
+This README tracks `main`; for tagged, versioned changes see [Releases](https://github.com/hamicek/aether/releases) (latest **v0.9.0**).
 
 ## Glossary
 
@@ -49,6 +49,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Embedded leaf spoke** | ✅ | `[nats.leaf]` -> the embedded bus joins a hub as a leaf node, bound into its site's account with its own JetStream domain; a single-binary site, no spoke NATS config - see [Multi-node](#multi-node-and-isolation) |
+| **Secured bus** | ✅ | `[nats.security]` -> a networked embedded bind with server TLS + mandatory nkey; one shared identity or three least-privilege roles (lord/thrall/operator) whose permissions keep `aether._lord.>` node-local; credential rotation without downtime via `SIGHUP` - see [Security](#security) |
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
@@ -66,7 +67,7 @@ idempotent on name, a supervising thrall can re-spawn its children blindly from 
 ```
 cmd/aether/           CLI: up | ps | events | fleet | cast | call
 internal/
-  ether/              embedded NATS / external connection (mode switch, incl. [nats.leaf])
+  ether/              embedded NATS / external connection (mode switch, incl. [nats.leaf], [nats.security])
   lord/               supervisor: manifest, supervisor loop, restart strategies,
                       graceful drain, durable stream provisioning, singleton lock
   registry/           JetStream KV registry (name -> pid/status)
@@ -707,7 +708,8 @@ The server then enforces a role-scoped permission set: a thrall cannot command s
 forge lifecycle events, or write the fencing leases it only reads; an operator cannot drive
 supervision; only the lord may use `aether._lord.>`. This is what makes `aether._lord.>` node-local
 **by permission** on a networked bus, not merely by non-export. The lord connects as the lord,
-injects the thrall identity into thralls, and the operator endpoint carries the operator identity.
+injects the thrall identity into thralls, and the operator endpoint carries the operator identity. A
+reference manifest is [`examples/counter/aether-secure-embedded.toml`](./examples/counter/aether-secure-embedded.toml).
 
 Two honest limits: the permissions are **deny-based** (allow all, subtract the dangerous subjects),
 chosen so JetStream and KV keep working - it is not a strict allow-list. And a single shared thrall
