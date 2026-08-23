@@ -70,7 +70,9 @@ on a networked bus (a thrall cannot drive supervision, an operator cannot forge 
 **credentials rotate without downtime** - replace a cert/key (or nkey) file in place and send
 `SIGHUP`, and the server reloads via `ReloadOptions` (a TLS rotation keeps live connections, an nkey
 rotation lets the new key in and the old out). Client-side auth against an *external* bus
-(`[nats.tls]` / `[nats.auth]`, including the operator CLI `--ca`/`--nkey`) was delivered earlier.
+(`[nats.tls]` / `[nats.auth]`, including the operator CLI `--ca`/`--nkey`) was delivered earlier. The
+**soak/chaos suite can run against the secured bus** (`AETHER_SOAK_SECURED=1`), with a
+TLS-certificate rotation under sustained load, and holds the same no-loss / leak / recovery bars.
 
 Still open:
 
@@ -81,8 +83,10 @@ Still open:
   operator boundaries. Per-thrall identities would be a separate step.
 - **Deny-based, not an allow-list.** The role permissions allow everything and subtract the
   dangerous subjects (so JetStream and KV keep working); a stricter allow-list is not attempted.
-- **Soak of the secured, networked bus.** The soak suite exercises the loopback bus; extending it to
-  the networked, secured bus is future work.
+- **nats-server reload-under-load race.** Reloading credentials while heavy traffic flows trips a
+  data race *inside* nats-server v2.10.20 (its authorization reload racing message delivery),
+  surfaced by the secured soak under the Go race detector - not aether code, and not hit in a normal
+  (non-`-race`) run. Follow-up: upgrade nats-server and re-check on the latest release.
 
 ## Testing
 

@@ -18,6 +18,8 @@
 # Env overrides (read by the test itself):
 #   AETHER_SOAK_DURATION   override the profile run length, e.g. 30s
 #   AETHER_SOAK_REPORT     also write the report to this path
+#   AETHER_SOAK_SECURED=1  run against a secured [nats.security] embedded bus (TLS + per-role
+#                          nkeys), with a TLS-certificate rotation under load; instead of loopback
 #
 set -euo pipefail
 
@@ -57,6 +59,7 @@ fi
 test_args=(-soak.profile "$profile")
 [ -n "$seed" ] && test_args+=(-soak.seed "$seed")
 [ -n "${AETHER_SOAK_REPORT:-}" ] && test_args+=(-soak.report "$AETHER_SOAK_REPORT")
+[ "${AETHER_SOAK_SECURED:-}" = "1" ] && test_args+=(-soak.secured)
 
 cd "$(dirname "$0")/.."
 export GOTOOLCHAIN=local
