@@ -303,6 +303,42 @@ cmd  = "run counter"
 	}
 }
 
+// TestLoadManifestNatsSecurityRoles proves the per-role seed fields parse (guarding their toml tags).
+func TestLoadManifestNatsSecurityRoles(t *testing.T) {
+	m, err := LoadManifest(writeManifest(t, `
+app = "demo"
+
+[nats]
+mode = "embedded"
+
+[nats.security]
+listen        = "0.0.0.0:4222"
+tls_cert      = "/etc/aether/server.pem"
+tls_key       = "/etc/aether/server-key.pem"
+ca            = "/etc/aether/ca.pem"
+lord_nkey     = "/etc/aether/lord.nk"
+thrall_nkey   = "/etc/aether/thrall.nk"
+operator_nkey = "/etc/aether/operator.nk"
+
+[[thrall]]
+name = "counter"
+cmd  = "run counter"
+`))
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	sec := m.Nats.Security
+	if sec == nil {
+		t.Fatalf("nats.security = nil, want parsed section")
+	}
+	if sec.NkeySeed != "" {
+		t.Errorf("nkey_seed = %q, want empty in the per-role tier", sec.NkeySeed)
+	}
+	if sec.LordNkey != "/etc/aether/lord.nk" || sec.ThrallNkey != "/etc/aether/thrall.nk" || sec.OperatorNkey != "/etc/aether/operator.nk" {
+		t.Errorf("per-role seeds = %q/%q/%q, want the /etc/aether paths", sec.LordNkey, sec.ThrallNkey, sec.OperatorNkey)
+	}
+}
+
 // TestManifestNatsValidation covers the [nats] semantic checks: a bad mode, and the leaf
 // constraints (embedded-only, required remote/site/domain) that fail fast rather than silently
 // falling back to an isolated embedded bus.

@@ -13,6 +13,17 @@ import (
 	"github.com/nats-io/nkeys"
 )
 
+// Role identifies which of the three least-privilege identities a client authenticates as. In the
+// simple tier all three collapse onto the one shared seed; in the least-privilege tier each has its
+// own seed and a role-scoped permission set on the server.
+type Role string
+
+const (
+	RoleLord     Role = "lord"     // the supervisor: full rights, incl. aether._lord.>
+	RoleThrall   Role = "thrall"   // a worker: its data plane, but not the broad supervision control
+	RoleOperator Role = "operator" // the CLI / dashboard: call/cast and observe, but not control
+)
+
 // securedServerOptions builds the embedded server options for a network-exposed, secured bus:
 // it binds Listen, presents the configured server certificate (server-side TLS), and admits only
 // the single nkey identity derived from NkeySeed. JetStream stays on (durable mailbox / KV
