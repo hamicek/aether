@@ -85,6 +85,25 @@ func SecuredServer(t testing.TB) Secured {
 	return Secured{URL: srv.ClientURL(), CAFile: caFile, SeedFile: seedFile}
 }
 
+// RotateCert generates a fresh self-signed cert/key and overwrites certPath and keyPath with it, as
+// an operator does when renewing a certificate in place. It returns the path to a CA file matching
+// the new cert (written next to it), for a client to verify the rotated server against.
+func RotateCert(t testing.TB, certPath, keyPath string) (newCAFile string) {
+	t.Helper()
+	certPEM, keyPEM := selfSignedPEM(t)
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("rotate cert %s: %v", certPath, err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("rotate key %s: %v", keyPath, err)
+	}
+	newCAFile = filepath.Join(filepath.Dir(certPath), "ca-rotated.pem")
+	if err := os.WriteFile(newCAFile, certPEM, 0o600); err != nil {
+		t.Fatalf("write rotated ca: %v", err)
+	}
+	return newCAFile
+}
+
 // selfSignedPEM generates a self-signed certificate (valid for 127.0.0.1 / localhost) and
 // returns its PEM cert and key. The cert doubles as the CA a client trusts.
 func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
