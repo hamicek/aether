@@ -14,6 +14,39 @@ func fullSecurity() *Security {
 	}
 }
 
+func TestClientCredentials(t *testing.T) {
+	cases := []struct {
+		name             string
+		cfg              Config
+		wantCA, wantSeed string
+	}{
+		{
+			"external uses client-side tls/auth",
+			Config{Mode: "external", TLS: TLS{CA: "ext-ca.pem"}, Auth: Auth{NkeySeed: "ext.nk"}},
+			"ext-ca.pem", "ext.nk",
+		},
+		{
+			"secured embedded uses its own security fields",
+			Config{Mode: "embedded", Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}},
+			"sec-ca.pem", "sec.nk",
+		},
+		{
+			"security takes precedence over stray client-side fields",
+			Config{Mode: "embedded", TLS: TLS{CA: "ext-ca.pem"}, Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}},
+			"sec-ca.pem", "sec.nk",
+		},
+		{"unsecured embedded returns empty", Config{Mode: "embedded"}, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ca, seed := tc.cfg.ClientCredentials()
+			if ca != tc.wantCA || seed != tc.wantSeed {
+				t.Fatalf("got (%q,%q), want (%q,%q)", ca, seed, tc.wantCA, tc.wantSeed)
+			}
+		})
+	}
+}
+
 func TestSecurityValidate(t *testing.T) {
 	valid := func() *Security { return fullSecurity() }
 	without := func(mut func(*Security)) *Security { s := fullSecurity(); mut(s); return s }

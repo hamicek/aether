@@ -87,7 +87,8 @@ func up(argv []string) {
 	defer eth.Stop()
 	logger.Info("ether running", slog.String("url", eth.URL()), slog.String("mode", m.Nats.Mode))
 
-	writeEndpoint(endpoint{URL: eth.URL(), App: m.App, CA: m.Nats.TLS.CA, NkeySeed: m.Nats.Auth.NkeySeed})
+	epCA, epNkey := m.Nats.ClientCredentials()
+	writeEndpoint(endpoint{URL: eth.URL(), App: m.App, CA: epCA, NkeySeed: epNkey})
 	defer os.Remove(endpointFile)
 
 	root, err := lord.New(m, eth)
