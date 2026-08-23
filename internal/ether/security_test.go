@@ -15,31 +15,26 @@ func fullSecurity() *Security {
 }
 
 func TestClientCredentials(t *testing.T) {
+	roleCfg := Config{Mode: "embedded", Security: &Security{
+		CA: "sec-ca.pem", LordNkey: "lord.nk", ThrallNkey: "thrall.nk", OperatorNkey: "operator.nk",
+	}}
 	cases := []struct {
 		name             string
 		cfg              Config
+		role             Role
 		wantCA, wantSeed string
 	}{
-		{
-			"external uses client-side tls/auth",
-			Config{Mode: "external", TLS: TLS{CA: "ext-ca.pem"}, Auth: Auth{NkeySeed: "ext.nk"}},
-			"ext-ca.pem", "ext.nk",
-		},
-		{
-			"secured embedded uses its own security fields",
-			Config{Mode: "embedded", Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}},
-			"sec-ca.pem", "sec.nk",
-		},
-		{
-			"security takes precedence over stray client-side fields",
-			Config{Mode: "embedded", TLS: TLS{CA: "ext-ca.pem"}, Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}},
-			"sec-ca.pem", "sec.nk",
-		},
-		{"unsecured embedded returns empty", Config{Mode: "embedded"}, "", ""},
+		{"external ignores role", Config{Mode: "external", TLS: TLS{CA: "ext-ca.pem"}, Auth: Auth{NkeySeed: "ext.nk"}}, RoleThrall, "ext-ca.pem", "ext.nk"},
+		{"simple tier: any role gets the shared seed", Config{Mode: "embedded", Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}}, RoleThrall, "sec-ca.pem", "sec.nk"},
+		{"security takes precedence over stray client-side fields", Config{Mode: "embedded", TLS: TLS{CA: "ext-ca.pem"}, Security: &Security{CA: "sec-ca.pem", NkeySeed: "sec.nk"}}, RoleLord, "sec-ca.pem", "sec.nk"},
+		{"unsecured embedded returns empty", Config{Mode: "embedded"}, RoleLord, "", ""},
+		{"role tier: lord gets the lord seed", roleCfg, RoleLord, "sec-ca.pem", "lord.nk"},
+		{"role tier: thrall gets the thrall seed", roleCfg, RoleThrall, "sec-ca.pem", "thrall.nk"},
+		{"role tier: operator gets the operator seed", roleCfg, RoleOperator, "sec-ca.pem", "operator.nk"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ca, seed := tc.cfg.ClientCredentials()
+			ca, seed := tc.cfg.ClientCredentials(tc.role)
 			if ca != tc.wantCA || seed != tc.wantSeed {
 				t.Fatalf("got (%q,%q), want (%q,%q)", ca, seed, tc.wantCA, tc.wantSeed)
 			}

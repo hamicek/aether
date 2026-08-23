@@ -153,19 +153,21 @@ func (s *Security) seedFor(r Role) string {
 // clientOptions turns the TLS/auth config into nats options. An empty field adds no
 // option, so a config without a security block connects exactly as before.
 func (c Config) clientOptions() ([]nats.Option, error) {
-	ca, seed := c.ClientCredentials()
+	// External mode has no roles; the role argument is ignored (simple/external return one identity).
+	ca, seed := c.ClientCredentials(RoleLord)
 	return ClientOptions(ca, seed)
 }
 
-// ClientCredentials returns the CA and nkey seed paths a client uses to reach this bus, from the
-// right source for the mode: an external bus uses the client-side TLS/Auth fields; a secured
-// embedded bus uses its own Security fields (the same identity the embedded server authorizes).
-// An unsecured bus returns empty paths. It is the one place the lord (injecting into thralls) and
-// the operator CLI (writing the endpoint file) derive credentials, so both stay consistent with
-// however the bus is secured.
-func (c Config) ClientCredentials() (ca, nkeySeed string) {
+// ClientCredentials returns the CA and nkey seed paths a client of the given role uses to reach this
+// bus, from the right source for the mode: an external bus uses the client-side TLS/Auth fields; a
+// secured embedded bus uses its own Security fields. In the least-privilege tier the seed is the
+// role's own; in the simple tier (and external) role is immaterial - one shared identity. An
+// unsecured bus returns empty paths. It is the one place the lord (its own connection as RoleLord,
+// injecting RoleThrall into thralls) and the operator CLI (RoleOperator endpoint) derive
+// credentials, so every client stays consistent with however the bus is secured.
+func (c Config) ClientCredentials(role Role) (ca, nkeySeed string) {
 	if c.Security != nil {
-		return c.Security.CA, c.Security.NkeySeed
+		return c.Security.CA, c.Security.seedFor(role)
 	}
 	return c.TLS.CA, c.Auth.NkeySeed
 }
@@ -383,7 +385,9 @@ func startEmbedded(_ context.Context, cfg Config, so startOptions) (*Ether, erro
 	var connOpts []nats.Option
 	if cfg.Security != nil {
 		url = dialableURL(url)
-		secure, err := ClientOptions(cfg.Security.CA, cfg.Security.NkeySeed)
+		// The lord connects as the lord role (full rights over aether._lord.>).
+		ca, seed := cfg.ClientCredentials(RoleLord)
+		secure, err := ClientOptions(ca, seed)
 		if err != nil {
 			srv.Shutdown()
 			cleanup()
