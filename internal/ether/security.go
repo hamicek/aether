@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 
@@ -47,6 +48,25 @@ func securedServerOptions(sec *Security, storeDir string) (*natsserver.Options, 
 		TLS:       true,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 	}, nil
+}
+
+// dialableURL rewrites a wildcard bind host to loopback so a local process can actually dial
+// it. A server bound to 0.0.0.0 (or ::, or an unspecified host) reports that address in its
+// client URL, but 0.0.0.0 is a bind-all, not a destination; the lord and its thralls run on the
+// same host and reach it over 127.0.0.1. A concrete bind host is left untouched (clients dial it
+// as configured, and the server certificate is expected to cover it).
+func dialableURL(clientURL string) string {
+	u, err := url.Parse(clientURL)
+	if err != nil {
+		return clientURL
+	}
+	switch u.Hostname() {
+	case "0.0.0.0", "::", "":
+		u.Host = net.JoinHostPort("127.0.0.1", u.Port())
+		return u.String()
+	default:
+		return clientURL
+	}
 }
 
 // authorizedNkey reads an nkey seed file and returns the public key of the identity it

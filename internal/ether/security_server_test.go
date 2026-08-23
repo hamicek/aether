@@ -1,7 +1,9 @@
 package ether
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,4 +79,39 @@ func TestSecuredServerEnforcesAuthAndTLS(t *testing.T) {
 	reject("no credentials")
 	reject("CA but no nkey", caOnly...)
 	reject("nkey but no CA (untrusted TLS)", seedOnly...)
+}
+
+// TestStartEmbeddedSecured drives the full embedded start path: the lord authenticates to its own
+// secured server, the injected URL is loopback-dialable (not the 0.0.0.0 wildcard bind), and a
+// second client reaches the bus through that injected URL with the same credentials.
+func TestStartEmbeddedSecured(t *testing.T) {
+	certFile, keyFile, caFile, seedFile := natstest.Files(t)
+	listen := fmt.Sprintf("0.0.0.0:%d", freePort(t)) // wildcard bind: the injected URL must resolve to loopback
+	cfg := Config{
+		Mode:     "embedded",
+		StoreDir: t.TempDir(),
+		Security: &Security{Listen: listen, TLSCert: certFile, TLSKey: keyFile, CA: caFile, NkeySeed: seedFile},
+	}
+	eth, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("start secured embedded: %v", err)
+	}
+	t.Cleanup(eth.Stop)
+
+	if strings.Contains(eth.URL(), "0.0.0.0") {
+		t.Fatalf("injected URL is not dialable: %s", eth.URL())
+	}
+	if err := eth.Conn().Publish("probe", []byte("ok")); err != nil {
+		t.Fatalf("lord connection does not work: %v", err)
+	}
+
+	opts, err := ClientOptions(caFile, seedFile)
+	if err != nil {
+		t.Fatalf("client options: %v", err)
+	}
+	nc, err := nats.Connect(eth.URL(), opts...)
+	if err != nil {
+		t.Fatalf("thrall-style connect via injected URL failed: %v", err)
+	}
+	nc.Close()
 }

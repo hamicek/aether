@@ -316,8 +316,22 @@ func startEmbedded(_ context.Context, cfg Config, so startOptions) (*Ether, erro
 		cleanup()
 		return nil, fmt.Errorf("embedded NATS did not start in time")
 	}
+	// When the bus is secured, the lord's own system connection must authenticate too - it is
+	// just another client of its embedded server. Local processes (the lord here, thralls later)
+	// dial a loopback-resolved URL: a wildcard bind (0.0.0.0) is not a dialable destination.
 	url := srv.ClientURL()
-	nc, err := nats.Connect(url)
+	var connOpts []nats.Option
+	if cfg.Security != nil {
+		url = dialableURL(url)
+		secure, err := ClientOptions(cfg.Security.CA, cfg.Security.NkeySeed)
+		if err != nil {
+			srv.Shutdown()
+			cleanup()
+			return nil, err
+		}
+		connOpts = append(connOpts, secure...)
+	}
+	nc, err := nats.Connect(url, connOpts...)
 	if err != nil {
 		srv.Shutdown()
 		cleanup()
