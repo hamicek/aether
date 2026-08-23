@@ -686,17 +686,41 @@ nkey_seed = "/etc/aether/node.nk"         # the identity authorized to connect
 ```
 
 The lord authenticates its own connection and injects the CA and seed into every thrall and the
-operator endpoint, so the whole node speaks the same secured way. This increment is **transport
-only**: one shared nkey identity over server-side TLS. Per-role identities and subject permissions,
-credential rotation, and mutual TLS are follow-ups tracked in [ROADMAP.md](./ROADMAP.md).
+operator endpoint, so the whole node speaks the same secured way. `nkey_seed` above is the **simple
+tier**: one shared identity with full rights - encrypted and authenticated, but no role separation.
+
+**Least-privilege tier (per-role identities).** For real least privilege, replace `nkey_seed` with
+one seed per role - all three together, mutually exclusive with `nkey_seed`:
+
+```toml
+[nats.security]
+listen        = "0.0.0.0:4222"
+tls_cert      = "/etc/aether/server.pem"
+tls_key       = "/etc/aether/server-key.pem"
+ca            = "/etc/aether/ca.pem"
+lord_nkey     = "/etc/aether/lord.nk"      # the supervisor: full rights
+thrall_nkey   = "/etc/aether/thrall.nk"    # workers: data plane, but not supervision control
+operator_nkey = "/etc/aether/operator.nk"  # CLI / dashboard: call/cast and observe, not control
+```
+
+The server then enforces a role-scoped permission set: a thrall cannot command sibling thralls,
+forge lifecycle events, or write the fencing leases it only reads; an operator cannot drive
+supervision; only the lord may use `aether._lord.>`. This is what makes `aether._lord.>` node-local
+**by permission** on a networked bus, not merely by non-export. The lord connects as the lord,
+injects the thrall identity into thralls, and the operator endpoint carries the operator identity.
+
+Two honest limits: the permissions are **deny-based** (allow all, subtract the dangerous subjects),
+chosen so JetStream and KV keep working - it is not a strict allow-list. And a single shared thrall
+identity does **not** isolate one thrall from another (name-scoped channels stay open across
+thralls); the roles isolate the lord / thrall / operator boundaries, not thrall-vs-thrall.
 
 Python thralls using nkey auth need the optional `nkeys` package (plain `nats-py` omits it):
 `pip install 'nats-py[nkeys]'`.
 
 Scope: `[nats.tls]` / `[nats.auth]` secure the **client** side against an already-secured external
 NATS (including the operator CLI, `--ca`/`--nkey`); `[nats.security]` secures the **embedded server**
-itself for a networked bind. Still open: per-role identities and subject permissions, credential
-rotation, and mutual TLS - tracked in [ROADMAP.md](./ROADMAP.md).
+itself for a networked bind, with either one shared identity or three least-privilege roles. Still
+open: credential rotation and mutual TLS - tracked in [ROADMAP.md](./ROADMAP.md).
 
 ## Reliability testing (soak)
 
