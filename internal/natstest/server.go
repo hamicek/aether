@@ -104,6 +104,33 @@ func RotateCert(t testing.TB, certPath, keyPath string) (newCAFile string) {
 	return newCAFile
 }
 
+// RotateSeed generates a fresh nkey user and overwrites seedPath with its seed, as an operator does
+// when rotating a key in place. It first copies the old seed to a sibling ".old" file and returns
+// that path, so a test can prove the old identity is no longer accepted after a reload.
+func RotateSeed(t testing.TB, seedPath string) (oldSeedPath string) {
+	t.Helper()
+	old, err := os.ReadFile(seedPath)
+	if err != nil {
+		t.Fatalf("read seed %s: %v", seedPath, err)
+	}
+	oldSeedPath = seedPath + ".old"
+	if err := os.WriteFile(oldSeedPath, old, 0o600); err != nil {
+		t.Fatalf("save old seed: %v", err)
+	}
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create nkey user: %v", err)
+	}
+	seed, err := kp.Seed()
+	if err != nil {
+		t.Fatalf("nkey seed: %v", err)
+	}
+	if err := os.WriteFile(seedPath, seed, 0o600); err != nil {
+		t.Fatalf("rotate seed %s: %v", seedPath, err)
+	}
+	return oldSeedPath
+}
+
 // selfSignedPEM generates a self-signed certificate (valid for 127.0.0.1 / localhost) and
 // returns its PEM cert and key. The cert doubles as the CA a client trusts.
 func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
