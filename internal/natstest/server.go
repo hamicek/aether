@@ -85,10 +85,9 @@ func SecuredServer(t testing.TB) Secured {
 	return Secured{URL: srv.ClientURL(), CAFile: caFile, SeedFile: seedFile}
 }
 
-// selfSignedCert writes a self-signed certificate (valid for 127.0.0.1 / localhost)
-// to dir and returns the CA file path and the parsed cert/key for the server. The
-// self-signed cert doubles as the CA the client trusts.
-func selfSignedCert(t testing.TB, dir string) (caFile string, cert tls.Certificate) {
+// selfSignedPEM generates a self-signed certificate (valid for 127.0.0.1 / localhost) and
+// returns its PEM cert and key. The cert doubles as the CA a client trusts.
+func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
 	t.Helper()
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -111,20 +110,64 @@ func selfSignedCert(t testing.TB, dir string) (caFile string, cert tls.Certifica
 	if err != nil {
 		t.Fatalf("create certificate: %v", err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
 		t.Fatalf("marshal key: %v", err)
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM
+}
 
+// selfSignedCert writes a self-signed certificate to dir and returns the CA file path and the
+// parsed cert/key for the server. The self-signed cert doubles as the CA the client trusts.
+func selfSignedCert(t testing.TB, dir string) (caFile string, cert tls.Certificate) {
+	t.Helper()
+
+	certPEM, keyPEM := selfSignedPEM(t)
 	caFile = filepath.Join(dir, "ca.pem")
 	if err := os.WriteFile(caFile, certPEM, 0o600); err != nil {
 		t.Fatalf("write ca: %v", err)
 	}
-	cert, err = tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
 		t.Fatalf("build tls cert: %v", err)
 	}
 	return caFile, cert
+}
+
+// Files generates the on-disk credential material a [nats.security] block points at: a
+// self-signed server cert/key (the cert doubling as the CA) and an nkey seed authorized to
+// connect. They are written to the test's temp dir and their paths returned, so a test can
+// drive the real secured embedded server through the manifest path.
+func Files(t testing.TB) (certFile, keyFile, caFile, seedFile string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	certPEM, keyPEM := selfSignedPEM(t)
+	certFile = filepath.Join(dir, "server.pem")
+	keyFile = filepath.Join(dir, "server-key.pem")
+	caFile = filepath.Join(dir, "ca.pem")
+	for _, w := range []struct {
+		path string
+		data []byte
+	}{{certFile, certPEM}, {keyFile, keyPEM}, {caFile, certPEM}} {
+		if err := os.WriteFile(w.path, w.data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", w.path, err)
+		}
+	}
+
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create nkey user: %v", err)
+	}
+	seed, err := kp.Seed()
+	if err != nil {
+		t.Fatalf("nkey seed: %v", err)
+	}
+	seedFile = filepath.Join(dir, "user.nk")
+	if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	return certFile, keyFile, caFile, seedFile
 }

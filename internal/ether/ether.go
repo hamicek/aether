@@ -276,6 +276,9 @@ func embeddedOptions(cfg Config, so startOptions, storeDir string) (*natsserver.
 	if cfg.Leaf != nil {
 		return leafOptions(cfg.Leaf, so.app, storeDir)
 	}
+	if cfg.Security != nil {
+		return securedServerOptions(cfg.Security, storeDir)
+	}
 	return &natsserver.Options{
 		Host:      "127.0.0.1",
 		Port:      -1,       // -1 = pick a free port
