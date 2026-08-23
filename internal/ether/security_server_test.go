@@ -115,3 +115,20 @@ func TestStartEmbeddedSecured(t *testing.T) {
 	}
 	nc.Close()
 }
+
+// TestStartEmbeddedUnsecuredDefault is the backward-compatibility guard: a manifest with no
+// [nats.security] keeps the loopback, no-auth embedded bus, so a client connects with no
+// credentials, exactly as before this change.
+func TestStartEmbeddedUnsecuredDefault(t *testing.T) {
+	eth, err := Start(context.Background(), Config{Mode: "embedded", StoreDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("start plain embedded: %v", err)
+	}
+	t.Cleanup(eth.Stop)
+
+	nc, err := nats.Connect(eth.URL())
+	if err != nil {
+		t.Fatalf("plain connect (no credentials) should succeed on the default bus: %v", err)
+	}
+	nc.Close()
+}
