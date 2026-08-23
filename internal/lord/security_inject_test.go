@@ -45,3 +45,34 @@ func TestLordInjectsSecurityCredentials(t *testing.T) {
 		}
 	}
 }
+
+// TestLordInjectsThrallRole proves that in the least-privilege tier the lord injects the THRALL
+// seed into a thrall - never the lord identity - so a thrall runs with thrall-scoped permissions.
+func TestLordInjectsThrallRole(t *testing.T) {
+	eth := startEmbedded(t)
+	m := &Manifest{
+		App:      "sec",
+		Strategy: "one_for_one",
+		Nats: ether.Config{Mode: "embedded", Security: &ether.Security{
+			Listen: "0.0.0.0:4222", TLSCert: "server.pem", TLSKey: "server-key.pem", CA: "ca.pem",
+			LordNkey: "lord.nk", ThrallNkey: "thrall.nk", OperatorNkey: "operator.nk",
+		}},
+		Thralls: []ThrallSpec{{Name: "worker", Cmd: "true", Restart: "permanent", Scope: "local"}},
+	}
+	l, err := New(m, eth)
+	if err != nil {
+		t.Fatalf("lord.New: %v", err)
+	}
+	var c *child
+	for _, ch := range l.children {
+		if ch.spec.Name == "worker" {
+			c = ch
+		}
+	}
+	if c == nil {
+		t.Fatalf("worker child not found")
+	}
+	if c.nkeySeed != "thrall.nk" {
+		t.Fatalf("thrall got seed %q, want thrall.nk (never lord.nk)", c.nkeySeed)
+	}
+}

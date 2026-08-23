@@ -150,10 +150,10 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		procStatsPollEvery: procStatsPollInterval,
 		fleetHealthEvery:   time.Duration(m.Observability.FleetHealthIntervalMs) * time.Millisecond,
 	}
-	// Credentials the lord hands its children to reach the bus. ClientCredentials picks the right
-	// source (a secured embedded bus vs an external bus), so a secured embedded server and its
-	// thralls authenticate with the same identity. Empty paths (unsecured bus) inject nothing.
-	caPath, nkeySeed := m.Nats.ClientCredentials()
+	// Credentials the lord hands its children (thralls and built-in edges are all the thrall role).
+	// ClientCredentials picks the right source (secured embedded vs external); in the least-privilege
+	// tier this is the thrall identity, never the lord's. Empty paths (unsecured bus) inject nothing.
+	caPath, nkeySeed := m.Nats.ClientCredentials(ether.RoleThrall)
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
 			spec:         spec,

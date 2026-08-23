@@ -87,7 +87,8 @@ func up(argv []string) {
 	defer eth.Stop()
 	logger.Info("ether running", slog.String("url", eth.URL()), slog.String("mode", m.Nats.Mode))
 
-	epCA, epNkey := m.Nats.ClientCredentials()
+	// The operator CLI inherits the operator role (call/cast and observe, not control).
+	epCA, epNkey := m.Nats.ClientCredentials(ether.RoleOperator)
 	writeEndpoint(endpoint{URL: eth.URL(), App: m.App, CA: epCA, NkeySeed: epNkey})
 	defer os.Remove(endpointFile)
 

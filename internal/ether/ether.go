@@ -69,16 +69,27 @@ type Auth struct {
 // every client must authenticate; absent = the loopback, no-auth default. When present,
 // all fields are required (no half-secured bus).
 //
-// AE-072 (transport) uses a single nkey identity: NkeySeed authorizes exactly one user,
-// shared by the lord, thralls and the operator CLI. The three-role split (per-role
-// authorized keys on the server, per-role seeds to clients) is a later increment; mTLS is
-// a later opt-in.
+// Authentication has two mutually exclusive shapes. NkeySeed is the *simple* tier: one shared
+// identity with full rights (encrypted and authenticated, but no role separation). The per-role
+// seeds (LordNkey / ThrallNkey / OperatorNkey, all three together) are the *least-privilege* tier:
+// each of the lord, thralls and operator gets its own identity with a role-scoped permission set,
+// so a thrall cannot drive supervision (see securedServerOptions). Set one shape or the other, never
+// a mix. mTLS is a later opt-in.
 type Security struct {
-	Listen   string `toml:"listen"`    // network bind, e.g. "0.0.0.0:4222"
-	TLSCert  string `toml:"tls_cert"`  // path to the server certificate (PEM)
-	TLSKey   string `toml:"tls_key"`   // path to the server private key (PEM)
-	CA       string `toml:"ca"`        // path to the CA clients verify the server against (the lord distributes it)
-	NkeySeed string `toml:"nkey_seed"` // path to the nkey seed authorized to connect
+	Listen  string `toml:"listen"`   // network bind, e.g. "0.0.0.0:4222"
+	TLSCert string `toml:"tls_cert"` // path to the server certificate (PEM)
+	TLSKey  string `toml:"tls_key"`  // path to the server private key (PEM)
+	CA      string `toml:"ca"`       // path to the CA clients verify the server against (the lord distributes it)
+
+	// Simple tier: one shared identity, full rights, no role separation.
+	NkeySeed string `toml:"nkey_seed"`
+
+	// Least-privilege tier: one nkey seed per role (all three required together, and exclusive
+	// with NkeySeed). The recommended path - the role permissions are what enforce aether._lord.>
+	// as node-local on a networked bus.
+	LordNkey     string `toml:"lord_nkey"`
+	ThrallNkey   string `toml:"thrall_nkey"`
+	OperatorNkey string `toml:"operator_nkey"`
 }
 
 // validate checks the security section's invariants. Like Leaf.validate it lives on the type
@@ -98,28 +109,65 @@ func (s *Security) validate() error {
 	if s.CA == "" {
 		return fmt.Errorf("nats.security.ca is required (clients verify the server against it)")
 	}
-	if s.NkeySeed == "" {
-		return fmt.Errorf("nats.security.nkey_seed is required (authentication is mandatory)")
+	// Authentication is either the simple shared identity or the full per-role trio, never a mix
+	// and never partial - a half-configured identity set is a hazard, not a convenience.
+	roles := 0
+	for _, seed := range []string{s.LordNkey, s.ThrallNkey, s.OperatorNkey} {
+		if seed != "" {
+			roles++
+		}
+	}
+	switch {
+	case s.NkeySeed != "" && roles > 0:
+		return fmt.Errorf("nats.security: nkey_seed (one shared identity) and the per-role seeds (lord_nkey/thrall_nkey/operator_nkey) are mutually exclusive")
+	case s.NkeySeed == "" && roles == 0:
+		return fmt.Errorf("nats.security: authentication is mandatory - set nkey_seed (one shared identity) or all three of lord_nkey/thrall_nkey/operator_nkey")
+	case s.NkeySeed == "" && roles != 3:
+		return fmt.Errorf("nats.security: per-role authentication requires all three of lord_nkey, thrall_nkey and operator_nkey")
 	}
 	return nil
+}
+
+// roleMode reports whether the per-role (least-privilege) identities are in use rather than the
+// single shared seed. Meaningful only after validate has passed (which guarantees exactly one shape).
+func (s *Security) roleMode() bool { return s.NkeySeed == "" }
+
+// seedFor returns the nkey seed path a given role authenticates with: its own per-role seed in the
+// least-privilege tier, or the shared seed in the simple tier.
+func (s *Security) seedFor(r Role) string {
+	if !s.roleMode() {
+		return s.NkeySeed
+	}
+	switch r {
+	case RoleLord:
+		return s.LordNkey
+	case RoleThrall:
+		return s.ThrallNkey
+	case RoleOperator:
+		return s.OperatorNkey
+	default:
+		return ""
+	}
 }
 
 // clientOptions turns the TLS/auth config into nats options. An empty field adds no
 // option, so a config without a security block connects exactly as before.
 func (c Config) clientOptions() ([]nats.Option, error) {
-	ca, seed := c.ClientCredentials()
+	// External mode has no roles; the role argument is ignored (simple/external return one identity).
+	ca, seed := c.ClientCredentials(RoleLord)
 	return ClientOptions(ca, seed)
 }
 
-// ClientCredentials returns the CA and nkey seed paths a client uses to reach this bus, from the
-// right source for the mode: an external bus uses the client-side TLS/Auth fields; a secured
-// embedded bus uses its own Security fields (the same identity the embedded server authorizes).
-// An unsecured bus returns empty paths. It is the one place the lord (injecting into thralls) and
-// the operator CLI (writing the endpoint file) derive credentials, so both stay consistent with
-// however the bus is secured.
-func (c Config) ClientCredentials() (ca, nkeySeed string) {
+// ClientCredentials returns the CA and nkey seed paths a client of the given role uses to reach this
+// bus, from the right source for the mode: an external bus uses the client-side TLS/Auth fields; a
+// secured embedded bus uses its own Security fields. In the least-privilege tier the seed is the
+// role's own; in the simple tier (and external) role is immaterial - one shared identity. An
+// unsecured bus returns empty paths. It is the one place the lord (its own connection as RoleLord,
+// injecting RoleThrall into thralls) and the operator CLI (RoleOperator endpoint) derive
+// credentials, so every client stays consistent with however the bus is secured.
+func (c Config) ClientCredentials(role Role) (ca, nkeySeed string) {
 	if c.Security != nil {
-		return c.Security.CA, c.Security.NkeySeed
+		return c.Security.CA, c.Security.seedFor(role)
 	}
 	return c.TLS.CA, c.Auth.NkeySeed
 }
@@ -337,7 +385,9 @@ func startEmbedded(_ context.Context, cfg Config, so startOptions) (*Ether, erro
 	var connOpts []nats.Option
 	if cfg.Security != nil {
 		url = dialableURL(url)
-		secure, err := ClientOptions(cfg.Security.CA, cfg.Security.NkeySeed)
+		// The lord connects as the lord role (full rights over aether._lord.>).
+		ca, seed := cfg.ClientCredentials(RoleLord)
+		secure, err := ClientOptions(ca, seed)
 		if err != nil {
 			srv.Shutdown()
 			cleanup()

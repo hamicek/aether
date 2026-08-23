@@ -889,11 +889,14 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
 - **Stronger and server-side security** - the client side authenticates to an *external* bus with
   nkeys over server TLS (manifest `[nats.tls]` / `[nats.auth]`; the lord injects the credential
   paths into thralls, and the operator CLI takes `--ca`/`--nkey`). The *embedded* server can now be
-  exposed on the network with server-side TLS and mandatory nkey auth (`[nats.security]`: a networked
-  bind and one shared nkey identity, injected into thralls and the operator endpoint the same way);
-  absent, it stays loopback with no auth. Still open: per-role identities and subject permissions
-  (so `aether._lord.>` is enforced node-local by permission, not only by non-export), mutual TLS, and
-  credential rotation - the later increments of the same arc.
+  exposed on the network with server-side TLS and mandatory nkey auth (`[nats.security]`); absent, it
+  stays loopback with no auth. Two tiers: one shared identity (`nkey_seed`), or three least-privilege
+  roles (`lord_nkey` / `thrall_nkey` / `operator_nkey`, mutually exclusive with the shared seed) with
+  a deny-based, role-scoped permission set - which is what makes `aether._lord.>` node-local *by
+  permission* on a networked bus, not only by non-export (a thrall cannot drive supervision, an
+  operator cannot forge control). The role boundary is lord / thrall / operator; a shared thrall
+  identity does not isolate one thrall from another (that would need per-thrall identities). Still
+  open: mutual TLS and credential rotation - the later increments of the same arc.
 
 Note: several items listed as future work in earlier drafts are now implemented - JetStream durable
 mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`, §12; these are
