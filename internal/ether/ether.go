@@ -6,6 +6,7 @@ package ether
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -27,6 +28,12 @@ type Config struct {
 	// (the spoke side of a hub-spoke topology). Valid only for embedded mode; nil =
 	// a standalone embedded bus, as before.
 	Leaf *Leaf `toml:"leaf"`
+	// Security, when present, exposes the embedded server on the network with server-side
+	// TLS and mandatory nkey authentication (the server side of the bus). Valid only for
+	// embedded mode, and not together with a leaf (securing the leaf spoke is a later
+	// increment). nil = today's behaviour: loopback bind, no auth. Unrelated to TLS/Auth
+	// above, which are the client side (connecting out to an external bus).
+	Security *Security `toml:"security"`
 }
 
 // Leaf configures the embedded server as a NATS leaf node of a central hub. It binds
@@ -55,6 +62,46 @@ type TLS struct {
 // an nkey seed file the client signs the server nonce with. Empty = no auth.
 type Auth struct {
 	NkeySeed string `toml:"nkey_seed"`
+}
+
+// Security configures the embedded server for a network bind with server-side TLS and
+// mandatory nkey authentication. Present = the bus is exposed on Listen, encrypted, and
+// every client must authenticate; absent = the loopback, no-auth default. When present,
+// all fields are required (no half-secured bus).
+//
+// AE-072 (transport) uses a single nkey identity: NkeySeed authorizes exactly one user,
+// shared by the lord, thralls and the operator CLI. The three-role split (per-role
+// authorized keys on the server, per-role seeds to clients) is a later increment; mTLS is
+// a later opt-in.
+type Security struct {
+	Listen   string `toml:"listen"`    // network bind, e.g. "0.0.0.0:4222"
+	TLSCert  string `toml:"tls_cert"`  // path to the server certificate (PEM)
+	TLSKey   string `toml:"tls_key"`   // path to the server private key (PEM)
+	CA       string `toml:"ca"`        // path to the CA clients verify the server against (the lord distributes it)
+	NkeySeed string `toml:"nkey_seed"` // path to the nkey seed authorized to connect
+}
+
+// validate checks the security section's invariants. Like Leaf.validate it lives on the type
+// so it can run wherever the section is consumed, and it is strict: a present [nats.security]
+// must be fully specified, because a partially configured secured bus is a security hazard,
+// not a convenience.
+func (s *Security) validate() error {
+	if s.Listen == "" {
+		return fmt.Errorf("nats.security.listen is required (the network bind, e.g. \"0.0.0.0:4222\")")
+	}
+	if _, _, err := net.SplitHostPort(s.Listen); err != nil {
+		return fmt.Errorf("nats.security.listen %q: %w", s.Listen, err)
+	}
+	if s.TLSCert == "" || s.TLSKey == "" {
+		return fmt.Errorf("nats.security: tls_cert and tls_key are both required (server-side TLS)")
+	}
+	if s.CA == "" {
+		return fmt.Errorf("nats.security.ca is required (clients verify the server against it)")
+	}
+	if s.NkeySeed == "" {
+		return fmt.Errorf("nats.security.nkey_seed is required (authentication is mandatory)")
+	}
+	return nil
 }
 
 // clientOptions turns the TLS/auth config into nats options. An empty field adds no
@@ -97,6 +144,17 @@ func (c Config) Validate() error {
 			return fmt.Errorf("nats.leaf requires mode = \"embedded\" (the hub side is external, bring-your-own NATS config)")
 		}
 		if err := c.Leaf.validate(); err != nil {
+			return err
+		}
+	}
+	if c.Security != nil {
+		if c.Mode == "external" {
+			return fmt.Errorf("nats.security requires mode = \"embedded\" (it secures the embedded server; an external bus is operator-secured via nats.tls / nats.auth)")
+		}
+		if c.Leaf != nil {
+			return fmt.Errorf("nats.security together with nats.leaf is not supported yet (securing the leaf spoke is a later increment)")
+		}
+		if err := c.Security.validate(); err != nil {
 			return err
 		}
 	}
