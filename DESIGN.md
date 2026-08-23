@@ -895,8 +895,12 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   a deny-based, role-scoped permission set - which is what makes `aether._lord.>` node-local *by
   permission* on a networked bus, not only by non-export (a thrall cannot drive supervision, an
   operator cannot forge control). The role boundary is lord / thrall / operator; a shared thrall
-  identity does not isolate one thrall from another (that would need per-thrall identities). Still
-  open: mutual TLS and credential rotation - the later increments of the same arc.
+  identity does not isolate one thrall from another (that would need per-thrall identities).
+  Credentials rotate without downtime: replacing a cert/key (or nkey) file in place and sending
+  `SIGHUP` makes the embedded server reload it via `ReloadOptions` - a TLS rotation keeps live
+  connections up, an nkey rotation closes a connection using the removed key (it reconnects with the
+  new one), and structural changes (listen, role set) still need a restart. Still open: mutual TLS -
+  the last increment of the same arc.
 
 Note: several items listed as future work in earlier drafts are now implemented - JetStream durable
 mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`, §12; these are
