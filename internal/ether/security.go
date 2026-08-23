@@ -24,11 +24,12 @@ const (
 	RoleOperator Role = "operator" // the CLI / dashboard: call/cast and observe, but not control
 )
 
-// securedServerOptions builds the embedded server options for a network-exposed, secured bus:
-// it binds Listen, presents the configured server certificate (server-side TLS), and admits only
-// the single nkey identity derived from NkeySeed. JetStream stays on (durable mailbox / KV
-// registry), exactly as on the loopback default. The three-role split and mTLS are later
-// increments; here one identity is shared by the lord, thralls and the operator CLI.
+// securedServerOptions builds the embedded server options for a network-exposed, secured bus: it
+// binds Listen, presents the configured server certificate (server-side TLS), and admits the
+// authorized nkey identities. JetStream stays on (durable mailbox / KV registry), exactly as on the
+// loopback default. In the simple tier there is one full-rights identity; in the least-privilege
+// tier there are three, each with a role-scoped permission set (see rolePermissions). mTLS is a
+// later opt-in.
 func securedServerOptions(sec *Security, storeDir string) (*natsserver.Options, error) {
 	host, portStr, err := net.SplitHostPort(sec.Listen)
 	if err != nil {
@@ -44,7 +45,7 @@ func securedServerOptions(sec *Security, storeDir string) (*natsserver.Options, 
 		return nil, fmt.Errorf("nats.security: load server cert/key: %w", err)
 	}
 
-	pub, err := authorizedNkey(sec.NkeySeed)
+	users, err := securedNkeyUsers(sec)
 	if err != nil {
 		return nil, err
 	}
@@ -55,10 +56,31 @@ func securedServerOptions(sec *Security, storeDir string) (*natsserver.Options, 
 		JetStream: true,
 		StoreDir:  storeDir,
 		NoSigs:    true,
-		Nkeys:     []*natsserver.NkeyUser{{Nkey: pub}},
+		Nkeys:     users,
 		TLS:       true,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12},
 	}, nil
+}
+
+// securedNkeyUsers builds the authorized nkey users: one full-rights user in the simple tier, or one
+// role-scoped user per role (lord / thrall / operator) in the least-privilege tier.
+func securedNkeyUsers(sec *Security) ([]*natsserver.NkeyUser, error) {
+	if !sec.roleMode() {
+		pub, err := authorizedNkey(sec.NkeySeed)
+		if err != nil {
+			return nil, err
+		}
+		return []*natsserver.NkeyUser{{Nkey: pub}}, nil
+	}
+	var users []*natsserver.NkeyUser
+	for _, r := range []Role{RoleLord, RoleThrall, RoleOperator} {
+		pub, err := authorizedNkey(sec.seedFor(r))
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, &natsserver.NkeyUser{Nkey: pub, Permissions: rolePermissions(r)})
+	}
+	return users, nil
 }
 
 // dialableURL rewrites a wildcard bind host to loopback so a local process can actually dial

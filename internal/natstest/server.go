@@ -157,6 +157,35 @@ func Files(t testing.TB) (certFile, keyFile, caFile, seedFile string) {
 		}
 	}
 
+	seedFile = writeSeed(t, dir, "user.nk")
+	return certFile, keyFile, caFile, seedFile
+}
+
+// RoleFiles is Files plus a distinct nkey seed per role (lord / thrall / operator), for driving the
+// least-privilege tier of [nats.security].
+func RoleFiles(t testing.TB) (certFile, keyFile, caFile, lordSeed, thrallSeed, operatorSeed string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	certPEM, keyPEM := selfSignedPEM(t)
+	certFile = filepath.Join(dir, "server.pem")
+	keyFile = filepath.Join(dir, "server-key.pem")
+	caFile = filepath.Join(dir, "ca.pem")
+	for _, w := range []struct {
+		path string
+		data []byte
+	}{{certFile, certPEM}, {keyFile, keyPEM}, {caFile, certPEM}} {
+		if err := os.WriteFile(w.path, w.data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", w.path, err)
+		}
+	}
+	return certFile, keyFile, caFile,
+		writeSeed(t, dir, "lord.nk"), writeSeed(t, dir, "thrall.nk"), writeSeed(t, dir, "operator.nk")
+}
+
+// writeSeed generates an nkey user and writes its seed to dir/name, returning the path.
+func writeSeed(t testing.TB, dir, name string) string {
+	t.Helper()
 	kp, err := nkeys.CreateUser()
 	if err != nil {
 		t.Fatalf("create nkey user: %v", err)
@@ -165,9 +194,9 @@ func Files(t testing.TB) (certFile, keyFile, caFile, seedFile string) {
 	if err != nil {
 		t.Fatalf("nkey seed: %v", err)
 	}
-	seedFile = filepath.Join(dir, "user.nk")
-	if err := os.WriteFile(seedFile, seed, 0o600); err != nil {
-		t.Fatalf("write seed: %v", err)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, seed, 0o600); err != nil {
+		t.Fatalf("write seed %s: %v", name, err)
 	}
-	return certFile, keyFile, caFile, seedFile
+	return path
 }
