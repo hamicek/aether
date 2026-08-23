@@ -714,13 +714,22 @@ chosen so JetStream and KV keep working - it is not a strict allow-list. And a s
 identity does **not** isolate one thrall from another (name-scoped channels stay open across
 thralls); the roles isolate the lord / thrall / operator boundaries, not thrall-vs-thrall.
 
-Python thralls using nkey auth need the optional `nkeys` package (plain `nats-py` omits it):
-`pip install 'nats-py[nkeys]'`.
+**Rotating credentials without downtime.** To renew a certificate or a key on a running node, replace
+the file in place (the same path the manifest points at) and send the process **`SIGHUP`**; the
+embedded server reloads the new credentials without a restart. A **TLS cert/key** rotation keeps live
+connections up (they keep their negotiated session; new connections get the new cert - clients must
+then trust the new CA). An **nkey** rotation applies the new authorization: the new key connects and
+the old one is rejected; a connection still using the removed key is closed and reconnects with the
+new key from its seed file - a brief drop. For that reason, rotating the **lord's own** key disrupts
+the lord's system connection for that window, so a lord-key change is better done with a restart.
+**Structural changes** (a different `listen`, adding or removing a role) are not a reload - they need
+a node restart.
 
 Scope: `[nats.tls]` / `[nats.auth]` secure the **client** side against an already-secured external
 NATS (including the operator CLI, `--ca`/`--nkey`); `[nats.security]` secures the **embedded server**
-itself for a networked bind, with either one shared identity or three least-privilege roles. Still
-open: credential rotation and mutual TLS - tracked in [ROADMAP.md](./ROADMAP.md).
+itself for a networked bind, with either one shared identity or three least-privilege roles, and its
+certificates and keys rotate without downtime (`SIGHUP`). Still open: mutual TLS - tracked in
+[ROADMAP.md](./ROADMAP.md).
 
 ## Reliability testing (soak)
 

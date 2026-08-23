@@ -87,6 +87,27 @@ func up(argv []string) {
 	defer eth.Stop()
 	logger.Info("ether running", slog.String("url", eth.URL()), slog.String("mode", m.Nats.Mode))
 
+	// SIGHUP rotates the secured bus's credentials in place: the operator replaces the cert/key (or
+	// nkey) files and signals the process, and the embedded server reloads them without dropping live
+	// connections. On a bus that cannot reload (no [nats.security]), it logs the reason and does nothing.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				signal.Stop(hup)
+				return
+			case <-hup:
+				if err := eth.Reload(m.Nats); err != nil {
+					logger.Warn("credential reload failed", slog.String("error", err.Error()))
+				} else {
+					logger.Info("credentials reloaded")
+				}
+			}
+		}
+	}()
+
 	// The operator CLI inherits the operator role (call/cast and observe, not control).
 	epCA, epNkey := m.Nats.ClientCredentials(ether.RoleOperator)
 	writeEndpoint(endpoint{URL: eth.URL(), App: m.App, CA: epCA, NkeySeed: epNkey})

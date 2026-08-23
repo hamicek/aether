@@ -428,6 +428,29 @@ func (e *Ether) Conn() *nats.Conn { return e.nc }
 // URL returns the bus address; injected into thralls as AETHER_NATS_URL.
 func (e *Ether) URL() string { return e.url }
 
+// Reload re-applies the secured embedded server's credentials without a restart: it rebuilds the
+// server options from the current [nats.security] files - which the operator has replaced in place
+// (a renewed TLS cert, a new nkey) - and hands them to the running server, keeping live connections
+// up. The bind and storage are unchanged, so only the certificate and the authorized identities
+// change; a structural change (a different listen address or role set) is not a reload and needs a
+// restart. Meaningful only for a secured embedded bus.
+func (e *Ether) Reload(cfg Config) error {
+	if e.srv == nil {
+		return fmt.Errorf("reload: not an embedded server")
+	}
+	if cfg.Security == nil {
+		return fmt.Errorf("reload: [nats.security] is not configured; nothing to rotate")
+	}
+	opts, err := securedServerOptions(cfg.Security, e.storeDir)
+	if err != nil {
+		return fmt.Errorf("reload: rebuild secured options: %w", err)
+	}
+	if err := e.srv.ReloadOptions(opts); err != nil {
+		return fmt.Errorf("reload: apply options: %w", err)
+	}
+	return nil
+}
+
 // Stop closes the connection and (in embedded mode) stops the server. An ephemeral
 // store dir is removed; a persistent one (configured store_dir) is kept so the
 // durable mailbox survives to the next start.
