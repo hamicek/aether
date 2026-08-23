@@ -150,13 +150,17 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		procStatsPollEvery: procStatsPollInterval,
 		fleetHealthEvery:   time.Duration(m.Observability.FleetHealthIntervalMs) * time.Millisecond,
 	}
+	// Credentials the lord hands its children to reach the bus. ClientCredentials picks the right
+	// source (a secured embedded bus vs an external bus), so a secured embedded server and its
+	// thralls authenticate with the same identity. Empty paths (unsecured bus) inject nothing.
+	caPath, nkeySeed := m.Nats.ClientCredentials()
 	for _, spec := range m.Thralls {
 		l.children = append(l.children, &child{
 			spec:         spec,
 			natsURL:      eth.URL(),
 			app:          m.App,
-			caPath:       m.Nats.TLS.CA,
-			nkeySeed:     m.Nats.Auth.NkeySeed,
+			caPath:       caPath,
+			nkeySeed:     nkeySeed,
 			hbIntervalMs: intervalMs,
 		})
 	}
@@ -182,8 +186,8 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 				},
 				natsURL:      eth.URL(),
 				app:          m.App,
-				caPath:       m.Nats.TLS.CA,
-				nkeySeed:     m.Nats.Auth.NkeySeed,
+				caPath:       caPath,
+				nkeySeed:     nkeySeed,
 				hbIntervalMs: intervalMs,
 				edgeSpecJSON: string(specJSON),
 			})
