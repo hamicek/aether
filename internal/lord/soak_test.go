@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"math/rand"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -36,6 +38,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/ether"
+	"github.com/hamicek/aether/internal/natstest"
 	"github.com/hamicek/aether/internal/registry"
 	"github.com/hamicek/aether/internal/soak"
 	"github.com/hamicek/aether/internal/wire"
@@ -77,6 +80,7 @@ var (
 	soakDurationFlag = flag.Duration("soak.duration", 0, "override the profile run duration")
 	soakSeedFlag     = flag.Int64("soak.seed", 0, "PRNG seed (0 -> profile default)")
 	soakReportFlag   = flag.String("soak.report", "", "optional path to also write the report to")
+	soakSecuredFlag  = flag.Bool("soak.secured", false, "run against a secured [nats.security] embedded bus (TLS + per-role nkeys), with credential rotation under load")
 )
 
 // loadProfile is the shape of one named profile: how long to run and how wide the
@@ -100,6 +104,7 @@ type soakConfig struct {
 	loadWorkers int
 	seed        int64
 	reportPath  string
+	secured     bool // run against a secured [nats.security] embedded bus, with rotation under load
 }
 
 // --- soak probe (the thrall behind AETHER_SOAK_PROBE=1) ---
@@ -838,7 +843,55 @@ func resolveSoakConfig(t *testing.T) soakConfig {
 	if cfg.reportPath == "" {
 		cfg.reportPath = os.Getenv("AETHER_SOAK_REPORT")
 	}
+
+	cfg.secured = *soakSecuredFlag || os.Getenv("AETHER_SOAK_SECURED") == "1"
 	return cfg
+}
+
+// freeSoakPort reserves and releases a loopback TCP port, for a secured bus's concrete bind.
+func freeSoakPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// startEmbeddedSecured starts an embedded bus with the full [nats.security] least-privilege tier
+// (networked bind + server TLS + per-role nkeys), so the soak exercises the real secured server:
+// role permissions are checked on every message, and the options set can be rebuilt for rotation.
+// It returns the ether and the matching Config, which the caller also puts on the manifest so the
+// lord injects the thrall identity into thralls.
+func startEmbeddedSecured(t *testing.T) (*ether.Ether, ether.Config) {
+	t.Helper()
+	certFile, keyFile, caFile, lordSeed, thrallSeed, operatorSeed := natstest.RoleFiles(t)
+	cfg := ether.Config{
+		Mode:     "embedded",
+		StoreDir: t.TempDir(),
+		Security: &ether.Security{
+			Listen:  fmt.Sprintf("127.0.0.1:%d", freeSoakPort(t)),
+			TLSCert: certFile, TLSKey: keyFile, CA: caFile,
+			LordNkey: lordSeed, ThrallNkey: thrallSeed, OperatorNkey: operatorSeed,
+		},
+	}
+	eth, err := ether.Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("secured embedded ether: %v", err)
+	}
+	t.Cleanup(eth.Stop)
+	return eth, cfg
+}
+
+// soakBus starts the loopback or the secured embedded bus per cfg, returning the ether and the
+// [nats] config to place on the manifest (a zero Config for loopback, the security block when
+// secured). The load generator drives the bus over the lord's own connection either way.
+func soakBus(t *testing.T, cfg soakConfig) (*ether.Ether, ether.Config) {
+	if cfg.secured {
+		return startEmbeddedSecured(t)
+	}
+	return startEmbedded(t), ether.Config{}
 }
 
 // --- the soak test ---
@@ -852,8 +905,10 @@ func TestSoak(t *testing.T) {
 	durSpec := spec("probe-dur", "permanent", "local")
 	durSpec.Durable = true
 
-	eth := startEmbedded(t)
-	startLord(t, eth, soakManifest(t, app, spec("probe", "permanent", "local"), durSpec))
+	eth, natsCfg := soakBus(t, cfg)
+	m := soakManifest(t, app, spec("probe", "permanent", "local"), durSpec)
+	m.Nats = natsCfg
+	startLord(t, eth, m)
 	nc := eth.Conn()
 	waitReady(t, eth, "probe")
 	waitReady(t, eth, "probe-dur")
@@ -954,10 +1009,12 @@ func TestSoakDrain(t *testing.T) {
 	durSpec := spec("probe-dur", "permanent", "local")
 	durSpec.Durable = true
 
-	eth := startEmbedded(t)
+	eth, natsCfg := soakBus(t, cfg)
 	nc := eth.Conn()
 	stopped := subscribeLifecycle(t, nc, probeStoppedSubject)
-	startLord(t, eth, soakManifest(t, app, durSpec))
+	m := soakManifest(t, app, durSpec)
+	m.Nats = natsCfg
+	startLord(t, eth, m)
 	waitReady(t, eth, "probe-dur")
 
 	report := soak.Report{Profile: cfg.profile, Duration: cfg.duration, Seed: cfg.seed, Bars: soak.DefaultBars()}
@@ -1016,7 +1073,8 @@ func TestSoakChaos(t *testing.T) {
 	// A zero RestartIntensity disables the give-up cap, so repeated kills keep restarting.
 	m := soakManifest(t, app, spec("probe", "permanent", "local"), durSpec)
 
-	eth := startEmbedded(t)
+	eth, natsCfg := soakBus(t, cfg)
+	m.Nats = natsCfg
 	startLord(t, eth, m)
 	nc := eth.Conn()
 	waitReady(t, eth, "probe")
