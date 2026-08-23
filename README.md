@@ -668,13 +668,35 @@ nkey_seed = "/etc/aether/user.nk"  # authenticate (nkey)
 Secrets are passed by **file path**, never as an env value - the nkey seed never appears in `ps` or
 the process environment. A full example is `examples/counter/aether-secure-external.toml`.
 
+**Securing the embedded server (`[nats.security]`).** To expose the *embedded* bus on the network
+(instead of running against an external NATS), add a `[nats.security]` block: it binds the given
+address with server-side TLS and requires nkey authentication. Absent, the server stays on
+`127.0.0.1` with no auth, exactly as before - existing manifests are unaffected.
+
+```toml
+[nats]
+mode = "embedded"
+
+[nats.security]
+listen    = "0.0.0.0:4222"                # network bind (absent = loopback, no auth)
+tls_cert  = "/etc/aether/server.pem"      # server certificate + key (server-side TLS)
+tls_key   = "/etc/aether/server-key.pem"
+ca        = "/etc/aether/ca.pem"          # clients verify the server against it
+nkey_seed = "/etc/aether/node.nk"         # the identity authorized to connect
+```
+
+The lord authenticates its own connection and injects the CA and seed into every thrall and the
+operator endpoint, so the whole node speaks the same secured way. This increment is **transport
+only**: one shared nkey identity over server-side TLS. Per-role identities and subject permissions,
+credential rotation, and mutual TLS are follow-ups tracked in [ROADMAP.md](./ROADMAP.md).
+
 Python thralls using nkey auth need the optional `nkeys` package (plain `nats-py` omits it):
 `pip install 'nats-py[nkeys]'`.
 
-Scope: this secures the client side against an already-secured external NATS (server TLS + nkeys),
-including the operator CLI (`--ca`/`--nkey`). Securing the embedded server itself (for a networked
-`0.0.0.0` bind), mutual TLS, JWT/account isolation and token auth are follow-ups tracked in
-[ROADMAP.md](./ROADMAP.md).
+Scope: `[nats.tls]` / `[nats.auth]` secure the **client** side against an already-secured external
+NATS (including the operator CLI, `--ca`/`--nkey`); `[nats.security]` secures the **embedded server**
+itself for a networked bind. Still open: per-role identities and subject permissions, credential
+rotation, and mutual TLS - tracked in [ROADMAP.md](./ROADMAP.md).
 
 ## Reliability testing (soak)
 
