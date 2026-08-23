@@ -131,14 +131,13 @@ func RotateSeed(t testing.TB, seedPath string) (oldSeedPath string) {
 	return oldSeedPath
 }
 
-// selfSignedPEM generates a self-signed certificate (valid for 127.0.0.1 / localhost) and
-// returns its PEM cert and key. The cert doubles as the CA a client trusts.
-func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
-	t.Helper()
-
+// regenPEM generates a fresh self-signed certificate (valid for 127.0.0.1 / localhost) and returns
+// its PEM cert and key. The cert doubles as the CA a client trusts. It takes no *testing.T so it can
+// run off the test goroutine (e.g. RegenCert during a soak run).
+func regenPEM() (certPEM, keyPEM []byte, err error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		return nil, nil, err
 	}
 	tmpl := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -154,15 +153,46 @@ func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		t.Fatalf("create certificate: %v", err)
+		return nil, nil, err
 	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		t.Fatalf("marshal key: %v", err)
+		return nil, nil, err
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
+}
+
+// selfSignedPEM generates a self-signed certificate (valid for 127.0.0.1 / localhost) and
+// returns its PEM cert and key. The cert doubles as the CA a client trusts.
+func selfSignedPEM(t testing.TB) (certPEM, keyPEM []byte) {
+	t.Helper()
+	certPEM, keyPEM, err := regenPEM()
+	if err != nil {
+		t.Fatalf("generate self-signed cert: %v", err)
+	}
 	return certPEM, keyPEM
+}
+
+// RegenCert regenerates a fresh self-signed cert/key and writes it to certPath, keyPath and caPath
+// (the cert doubling as the CA), all in place. It takes no *testing.T and returns an error, so a
+// soak run can rotate the certificate from a worker goroutine. A caller then reloads the server
+// (Ether.Reload) to apply it.
+func RegenCert(certPath, keyPath, caPath string) error {
+	certPEM, keyPEM, err := regenPEM()
+	if err != nil {
+		return err
+	}
+	for _, w := range []struct {
+		path string
+		data []byte
+	}{{certPath, certPEM}, {keyPath, keyPEM}, {caPath, certPEM}} {
+		if err := os.WriteFile(w.path, w.data, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // selfSignedCert writes a self-signed certificate to dir and returns the CA file path and the

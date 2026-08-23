@@ -894,6 +894,52 @@ func soakBus(t *testing.T, cfg soakConfig) (*ether.Ether, ether.Config) {
 	return startEmbedded(t), ether.Config{}
 }
 
+// rotateUnderLoad periodically renews the server's TLS certificate in place and reloads it while the
+// load runs, proving credential rotation is safe under sustained load: no dropped durable work (the
+// no-loss bar checked by the caller), no crash, no leak. It rotates the cert (a change that keeps
+// live connections) rather than an nkey (which closes the rotated identity's connections - AE-074).
+// It uses t.Errorf (not Fatal) since it runs off the test goroutine. Returns the rotation count.
+//
+// KNOWN: under the Go race detector (-race), reloading while traffic flows trips a data race INSIDE
+// nats-server v2.10.20 (its reloadAuthorization racing message delivery), not aether code. scripts/
+// soak.sh does not use -race (long runs cannot), so the delivered soak is clean; the race is a
+// tracked follow-up (upgrade nats-server, re-check on latest, report upstream if it persists).
+func rotateUnderLoad(ctx context.Context, t *testing.T, eth *ether.Ether, cfg ether.Config, interval time.Duration) int {
+	t.Helper()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	n := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return n
+		case <-ticker.C:
+			if err := natstest.RegenCert(cfg.Security.TLSCert, cfg.Security.TLSKey, cfg.Security.CA); err != nil {
+				t.Errorf("regen cert under load: %v", err)
+				continue
+			}
+			if err := eth.Reload(cfg); err != nil {
+				t.Errorf("reload under load: %v", err)
+				continue
+			}
+			n++
+		}
+	}
+}
+
+// rotationInterval spaces cert rotations so a run of any length gets a handful (a short ad-hoc run
+// still exercises the path), clamped to a sane band.
+func rotationInterval(d time.Duration) time.Duration {
+	iv := d / 4
+	if iv > 2*time.Second {
+		iv = 2 * time.Second
+	}
+	if iv < 250*time.Millisecond {
+		iv = 250 * time.Millisecond
+	}
+	return iv
+}
+
 // --- the soak test ---
 
 func TestSoak(t *testing.T) {
@@ -946,6 +992,16 @@ func TestSoak(t *testing.T) {
 		defer wg.Done()
 		samples = runLeakSampler(ctx, pids, samplerInterval(cfg.duration))
 	}()
+	// On a secured bus, rotate the TLS certificate under load: prove reloads apply without losing
+	// durable work (checked below), crashing, or leaking. Loopback runs skip this.
+	var rotations int
+	if cfg.secured {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rotations = rotateUnderLoad(ctx, t, eth, natsCfg, rotationInterval(cfg.duration))
+		}()
+	}
 	wg.Wait()
 	cancel()
 
@@ -969,6 +1025,13 @@ func TestSoak(t *testing.T) {
 
 	// Leak: reduce the sample series to start/end resource figures.
 	fillLeak(&report, samples)
+
+	if cfg.secured {
+		t.Logf("secured: %d TLS cert rotations under load (durable no-loss bar held across them)", rotations)
+		if rotations == 0 {
+			t.Errorf("secured run performed no credential rotations - the rotation phase did not run")
+		}
+	}
 
 	finishSoak(t, report, cfg.reportPath)
 }
