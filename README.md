@@ -31,6 +31,7 @@ adopting Erlang, a sidecar, or Kubernetes.
 
 Typical shapes: protocol/device drivers feeding a gateway (IoT / edge / SCADA-style), a pool of
 workers behind an ingress, or edge sites that must keep running while disconnected from a central hub.
+**Concrete shapes and runnable examples: [USE-CASES.md](./USE-CASES.md).**
 
 **It is not a BEAM replacement:** if you need millions of cheap in-VM actors in one language, reach
 for Erlang/Elixir. aether is **OTP-inspired, not OTP** - it trades that scale for real OS-process
