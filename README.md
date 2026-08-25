@@ -5,17 +5,43 @@
 A polyglot distributed actor/OTP runtime over NATS. A **lord** (supervisor) spawns
 **thralls** (genservers) as OS processes and lets them communicate in the **ether** (NATS).
 
+## What it's for
+
+You have a handful of long-running programs - a device driver, a worker pool, an API gateway, a
+background service - that need to **talk to each other reliably and stay alive**. Wiring that up by
+hand usually means gluing together a process manager, a message broker with hand-written reconnect
+logic, and your own restart/health/shutdown handling. And when one piece leaks memory or hangs, it
+often drags the rest down with it.
+
+aether gives you that plumbing as **one small binary**. It starts your programs as **isolated OS
+processes**, watches them, **restarts** them when they crash (per a policy you choose), **drains**
+them gracefully on shutdown, and lets them talk over NATS with simple `call` / `cast` messages. A
+crash or a leak in one process does not take the others down. And it works the same whether your
+programs are **Go, TypeScript, or Python**.
+
+In short: **OTP-style supervision and messaging, over real OS processes, across languages** - without
+adopting Erlang, a sidecar, or Kubernetes.
+
+**Reach for aether when you have:**
+- **tens** of long-running processes (not millions of tiny ones),
+- that must be **supervised** (started, watched, restarted, drained) and **isolated** (one crash does
+  not sink the rest),
+- possibly written in **different languages**, and
+- need **reliable messaging** (sync request/reply, fire-and-forget, optional durable delivery).
+
+Typical shapes: protocol/device drivers feeding a gateway (IoT / edge / SCADA-style), a pool of
+workers behind an ingress, or edge sites that must keep running while disconnected from a central hub.
+
+**It is not a BEAM replacement:** if you need millions of cheap in-VM actors in one language, reach
+for Erlang/Elixir. aether is **OTP-inspired, not OTP** - it trades that scale for real OS-process
+isolation and polyglot freedom.
+
+## For OTP folks
+
 If you know OTP, that is all you need: the **lord** is a **supervisor**, a **thrall** is a
 **GenServer** (or a `gen_statem` / `gen_event` behaviour), and the **ether** is the message
-transport. The names are flavor; the model is plain supervision-and-genservers - here over NATS
-and across languages.
-
-The goal: an SDK that makes it very easy to write thralls and run a lord. aether is
-**OTP-inspired, not OTP**: real OTP (Erlang/BEAM) runs *millions* of lightweight processes inside
-one VM, in one language; aether runs *tens* of **OS processes**, in any language. It trades that
-scale for real OS-process isolation and polyglot freedom - if you need millions of cheap in-VM
-actors, reach for BEAM; if you want a handful of reliable processes in Go/TS/Python with OTP-style
-supervision, that is aether.
+transport. The names are flavor; the model is plain supervision-and-genservers, here over NATS and
+across languages. The goal is an SDK that makes it very easy to write thralls and run a lord.
 
 Full design: [DESIGN.md](./DESIGN.md). License: [MIT](./LICENSE). Contributing:
 [CONTRIBUTING.md](./CONTRIBUTING.md). Roadmap and deliberately deferred work: [ROADMAP.md](./ROADMAP.md).
