@@ -188,7 +188,10 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     });
   };
 
-  const onCast = (e: Envelope): Promise<void> => {
+  // ackDurable acknowledges the source JetStream message (durable cast); undefined for a
+  // non-durable core cast, which needs no ack. On escalation the poison cast is acked before
+  // the crash, so it is not redelivered into a loop after the restart.
+  const onCast = (e: Envelope, ackDurable?: () => Promise<void>): Promise<void> => {
     const start = beginJob();
     return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
@@ -202,6 +205,9 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         } catch (err) {
           const esc = asEscalate(err);
           if (esc) {
+            // Ack the poison cast before crashing so JetStream does not redeliver it into a
+            // crash loop; a non-durable cast (no ackDurable) is simply dropped, as it is today.
+            if (ackDurable) await ackDurable();
             log.error("cast handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
             exitProcess(1);
             return;
@@ -292,7 +298,7 @@ export async function consumeDurableCast(
   nc: NatsConnection,
   app: string,
   name: string,
-  onCast: (e: Envelope) => Promise<void>,
+  onCast: (e: Envelope, ackDurable?: () => Promise<void>) => Promise<void>,
 ): Promise<void> {
   const stream = subjects.stream(app, name);
   const jsm = await nc.jetstreamManager();
@@ -313,8 +319,10 @@ export async function consumeDurableCast(
   const consumer = await js.consumers.get(stream, name);
   const messages = await consumer.consume();
   for await (const m of messages) {
-    await onCast(decode(m.data)); // process (serialized, in arrival order -> FIFO) ...
-    m.ack(); //                     ... and only then ack (at-least-once)
+    // On escalation onCast acks (awaiting server confirmation) before it crashes, so the poison
+    // cast is not redelivered; the happy path returns here and we ack in arrival order.
+    await onCast(decode(m.data), async () => { await m.ackAck(); }); // process (serialized, FIFO) ...
+    m.ack(); //                                                         ... and only then ack (at-least-once)
   }
 }
 
