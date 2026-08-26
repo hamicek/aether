@@ -7,6 +7,7 @@ import { newLogger, type Logger } from "./log";
 import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
 import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
+import { DedupCache, dedupKey } from "./dedup";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -73,7 +74,7 @@ export interface Ctx {
   // resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
   singletonEpoch: number;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
-  cast: (target: string, op: string, payload?: unknown) => void;
+  cast: (target: string, op: string, payload?: unknown, opts?: { idempotencyKey?: string }) => void;
   // append persists a domain event to this thrall's event log (opt-in event_log). Rebuild
   // replays it in init. Mirrors the Go SDK ctx.Append. Pass dedupKey to deduplicate the event
   // within the stream's duplicate window (Nats-Msg-Id).
@@ -91,6 +92,12 @@ export interface ThrallDef<S> {
   handleCall?: Record<string, CallHandler<S>>;
   handleCast?: Record<string, CastHandler<S>>;
   terminate?: (reason: string, state: S) => void | Promise<void>;
+  // idempotent turns on in-memory dedup of call/cast by idempotency key (opts.idempotencyKey,
+  // else the envelope id): a duplicate cast is skipped and a duplicate call returns the first
+  // reply. In-memory only - it does not survive a restart. See AE-077.
+  idempotent?: boolean;
+  // idempotencyMax bounds the dedup cache (undefined/0 = a sensible default). Ignored unless idempotent.
+  idempotencyMax?: number;
 }
 
 // defThrall is just a typed definition - the actual run is started by start().
@@ -116,13 +123,17 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     msgId: "",
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
-    cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
   };
 
   let state: S = await def.init(ctx);
+
+  // Optional in-memory dedup by idempotency key. Accessed only from the serialized mailbox, so
+  // it needs no lock of its own. Undefined unless the thrall opts in.
+  const dedup = def.idempotent ? new DedupCache(def.idempotencyMax ?? 0) : undefined;
 
   // Mailbox: serialized processing (1 message at a time) = the GenServer guarantee.
   let tail: Promise<void> = Promise.resolve();
@@ -165,9 +176,19 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           respond(encode(errReply(e, "unknown_op", `unknown call op: ${e.op}`)));
           return;
         }
+        const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
+        if (dkey) {
+          const [cached, seen] = dedup!.get(dkey);
+          if (seen) {
+            // A duplicate call: return the first reply instead of re-running the handler.
+            respond(encode(okReply(e, cached)));
+            return;
+          }
+        }
         try {
           const [reply, next] = await handler(e.payload, state, ctx);
           state = next;
+          if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
           respond(encode(okReply(e, reply)));
         } catch (err) {
           const esc = asEscalate(err);
@@ -200,8 +221,14 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
       try {
         const handler = def.handleCast?.[e.op ?? ""];
         if (!handler) return;
+        const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
+        if (dkey) {
+          const [, seen] = dedup!.get(dkey);
+          if (seen) return; // already processed; a durable cast is acked by the consume loop
+        }
         try {
           state = await handler(e.payload, state, ctx);
+          if (dkey) dedup!.put(dkey, undefined); // mark processed only after success
         } catch (err) {
           const esc = asEscalate(err);
           if (esc) {

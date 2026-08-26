@@ -9,6 +9,10 @@ export interface Envelope {
   // Correlation id propagated across hops (call/cast chains), distinct from id (which
   // correlates a request with its reply). Mirrors wire.Envelope.Trace on the Go side.
   trace?: string;
+  // Optional caller-supplied idempotency key. On an idempotent thrall a call/cast carrying the
+  // same idem is deduplicated (duplicate cast skipped, duplicate call returns the first reply).
+  // Empty = no explicit idempotency. Mirrors wire.Envelope.Idem on the Go side. See AE-077.
+  idem?: string;
   kind: Kind;
   from?: string;
   to?: string;

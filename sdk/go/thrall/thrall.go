@@ -101,6 +101,12 @@ type Def[S any] struct {
 	HandleCall map[string]CallFn[S]
 	HandleCast map[string]CastFn[S]
 	Terminate  func(reason string, state S)
+	// Idempotent turns on in-memory dedup of call/cast by idempotency key (Ctx.Call/Cast with
+	// WithIdempotencyKey, else the envelope ID): a duplicate cast is skipped and a duplicate call
+	// returns the first reply. In-memory only - it does not survive a restart. See AE-077.
+	Idempotent bool
+	// IdempotencyMax bounds the dedup cache (0 = a sensible default). Ignored unless Idempotent.
+	IdempotencyMax int
 }
 
 var sharedConn *nats.Conn // for Call/Cast from this thrall
@@ -162,6 +168,13 @@ func Start[S any](def Def[S]) error {
 	var mu sync.Mutex
 	stats := &mailboxStats{}
 
+	// Optional in-memory dedup by idempotency key. Accessed only under mu (the mailbox lock),
+	// so it needs no lock of its own. Nil unless the thrall opts in.
+	var dedup *dedupCache
+	if def.Idempotent {
+		dedup = newDedupCache(def.IdempotencyMax)
+	}
+
 	processCall := func(msg *nats.Msg) {
 		var e wire.Envelope
 		if json.Unmarshal(msg.Data, &e) != nil {
@@ -179,6 +192,17 @@ func Start[S any](def Def[S]) error {
 			_ = msg.Respond(mustJSON(errReply(e, "unknown_op", "unknown call op: "+e.Op)))
 			return
 		}
+		dkey := ""
+		if dedup != nil {
+			dkey = dedupKey(e) // empty (no idem and no ID) -> not deduped, never collide on ""
+		}
+		if dkey != "" {
+			if cached, seen := dedup.get(dkey); seen {
+				// A duplicate call: return the first reply instead of re-running the handler.
+				_ = msg.Respond(mustJSON(okReply(e, json.RawMessage(cached))))
+				return
+			}
+		}
 		reply, next, herr := h(e.Payload, state, ctx)
 		if esc, ok := asEscalate(herr); ok {
 			// Reply the caller before we crash, so it learns of the restart instead of
@@ -194,6 +218,9 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		state = next
+		if dkey != "" {
+			dedup.put(dkey, mustMarshal(reply)) // cache only a successful reply
+		}
 		_ = msg.Respond(mustJSON(okReply(e, reply)))
 	}
 
@@ -216,6 +243,15 @@ func Start[S any](def Def[S]) error {
 		if !ok {
 			return
 		}
+		dkey := ""
+		if dedup != nil {
+			dkey = dedupKey(e) // empty (no idem and no ID) -> not deduped, never collide on ""
+		}
+		if dkey != "" {
+			if _, seen := dedup.get(dkey); seen {
+				return // already processed; a durable cast is acked by the consume loop
+			}
+		}
 		next, herr := h(e.Payload, state, ctx)
 		if esc, ok := asEscalate(herr); ok {
 			// Ack the poison cast before crashing so JetStream does not redeliver it into a
@@ -232,6 +268,9 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		state = next
+		if dkey != "" {
+			dedup.put(dkey, nil) // mark processed only after success
+		}
 	}
 
 	stop := make(chan struct{})
@@ -381,35 +420,35 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 // Call = synchronous request/reply (GenServer.call) to another thrall. Called outside a
 // handler (standalone) it mints a fresh trace; from within a handler use Ctx.Call to
 // propagate the current trace instead.
-func Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
+func Call(target, op string, payload any, timeout time.Duration, opts ...SendOption) (json.RawMessage, error) {
 	if sharedConn == nil {
 		return nil, fmt.Errorf("no connection - call Start() first")
 	}
-	return doCall(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout)
+	return doCall(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout, applySendOpts(opts).idem)
 }
 
 // Cast = fire-and-forget (GenServer.cast) to another thrall. Mints a fresh trace; from within
 // a handler use Ctx.Cast to propagate the current trace.
-func Cast(target, op string, payload any) error {
+func Cast(target, op string, payload any, opts ...SendOption) error {
 	if sharedConn == nil {
 		return fmt.Errorf("no connection - call Start() first")
 	}
-	return doCast(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload)
+	return doCast(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, applySendOpts(opts).idem)
 }
 
 // Call is the trace-propagating request/reply from inside a handler: the downstream message
 // carries the trace of the message currently being handled.
-func (c *Ctx) Call(target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
-	return doCall(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout)
+func (c *Ctx) Call(target, op string, payload any, timeout time.Duration, opts ...SendOption) (json.RawMessage, error) {
+	return doCall(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout, applySendOpts(opts).idem)
 }
 
 // Cast is the trace-propagating fire-and-forget from inside a handler.
-func (c *Ctx) Cast(target, op string, payload any) error {
-	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload)
+func (c *Ctx) Cast(target, op string, payload any, opts ...SendOption) error {
+	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, applySendOpts(opts).idem)
 }
 
-func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration) (json.RawMessage, error) {
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration, idem string) (json.RawMessage, error) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
 	msg, err := nc.Request(wire.Call(app, target), mustJSON(req), timeout)
 	if err != nil {
 		return nil, err
@@ -424,8 +463,8 @@ func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout t
 	return reply.Payload, nil
 }
 
-func doCast(nc *nats.Conn, app, trace, target, op string, payload any) error {
-	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
+func doCast(nc *nats.Conn, app, trace, target, op string, payload any, idem string) error {
+	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
 	return nc.Publish(wire.Cast(app, target), mustJSON(e))
 }
 

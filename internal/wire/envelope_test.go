@@ -25,6 +25,8 @@ func goldenCases() map[string]Envelope {
 			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000000},
 		"call_traced": {V: 1, ID: "c-9", Trace: "t-abc", Kind: KindCall, To: "counter", Op: "get",
 			Payload: json.RawMessage(`{"n":1}`), TS: 1700000000004},
+		"call_idem": {V: 1, ID: "c-10", Idem: "withdraw-42", Kind: KindCall, To: "account", Op: "withdraw",
+			Payload: json.RawMessage(`{"amt":5}`), TS: 1700000000005},
 		"cast": {V: 1, ID: "c-2", Kind: KindCast, To: "counter", Op: "inc",
 			Payload: json.RawMessage(`{}`), TS: 1700000000001},
 		"reply_ok": {V: 1, ID: "c-1", Kind: KindReply, Status: "ok",

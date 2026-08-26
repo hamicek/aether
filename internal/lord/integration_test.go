@@ -50,9 +50,14 @@ func runProbe() {
 			_ = ctx.NATS.Flush()
 			return 0, nil
 		},
+		// Idempotent is opt-in per thrall; the idempotence e2e sets AETHER_PROBE_IDEM to turn it on.
+		Idempotent: os.Getenv("AETHER_PROBE_IDEM") == "1",
 		HandleCall: map[string]thrall.CallFn[int]{
 			"get": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return s, s, nil },
 			"pid": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return os.Getpid(), s, nil },
+			// inc_get increments and returns the new value: a second call with the same idempotency
+			// key must return the same value (from cache) with the state incremented only once.
+			"inc_get": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return s + 1, s + 1, nil },
 			// call_escalate crashes from a call handler: the caller must get the "escalated"
 			// error reply before the process dies, not a timeout.
 			"call_escalate": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) {
@@ -222,6 +227,53 @@ func cast(t *testing.T, nc *nats.Conn, app, name, op string) {
 	_ = nc.Flush()
 }
 
+// castIdem publishes a cast carrying an idempotency key (each send still gets a unique envelope
+// ID), so two calls with the same key are a genuine duplicate on an idempotent thrall.
+func castIdem(t *testing.T, nc *nats.Conn, app, name, op, idem string) {
+	t.Helper()
+	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Idem: idem, Kind: wire.KindCast, To: name, Op: op,
+		Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+	data, _ := json.Marshal(e)
+	if err := nc.Publish(wire.Cast(app, name), data); err != nil {
+		t.Fatalf("cast %s.%s: %v", name, op, err)
+	}
+	_ = nc.Flush()
+}
+
+// castNoKey publishes a cast with neither an id nor an idempotency key - a malformed message
+// that must not be deduplicated (an idempotent thrall must not collide distinct keyless messages
+// on the empty key and silently drop them).
+func castNoKey(t *testing.T, nc *nats.Conn, app, name, op string) {
+	t.Helper()
+	e := wire.Envelope{V: 1, Kind: wire.KindCast, To: name, Op: op,
+		Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+	data, _ := json.Marshal(e)
+	if err := nc.Publish(wire.Cast(app, name), data); err != nil {
+		t.Fatalf("cast %s.%s: %v", name, op, err)
+	}
+	_ = nc.Flush()
+}
+
+// callIntIdem issues a call carrying an idempotency key and returns the integer reply.
+func callIntIdem(nc *nats.Conn, app, name, op, idem string) (int, bool) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Idem: idem, Kind: wire.KindCall, To: name, Op: op,
+		Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+	data, _ := json.Marshal(req)
+	msg, err := nc.Request(wire.Call(app, name), data, 500*time.Millisecond)
+	if err != nil {
+		return 0, false
+	}
+	var reply wire.Envelope
+	if json.Unmarshal(msg.Data, &reply) != nil || reply.Status == "error" {
+		return 0, false
+	}
+	var v int
+	if json.Unmarshal(reply.Payload, &v) != nil {
+		return 0, false
+	}
+	return v, true
+}
+
 // --- tests ---
 
 func TestStartRegisterAndCall(t *testing.T) {
@@ -365,6 +417,114 @@ func TestEscalateDurableCastNotRedelivered(t *testing.T) {
 
 	if got := callInt(t, nc, app, "probe", "get"); got != 0 {
 		t.Fatalf("state after durable escalate-restart = %d, want a clean 0 from init", got)
+	}
+}
+
+// On an idempotent thrall, two casts carrying the same idempotency key are processed once; a
+// distinct key is processed normally. The get call is ordered after the casts on the probe's
+// single subscription, so the observed state is deterministic.
+func TestIdempotentCastDeduped(t *testing.T) {
+	const app = "itest"
+	t.Setenv("AETHER_PROBE_IDEM", "1")
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	castIdem(t, nc, app, "probe", "inc", "op-1")
+	castIdem(t, nc, app, "probe", "inc", "op-1") // duplicate key -> skipped
+	castIdem(t, nc, app, "probe", "inc", "op-2") // distinct key -> processed
+
+	if v := callInt(t, nc, app, "probe", "get"); v != 2 {
+		t.Fatalf("state = %d, want 2 (op-1 applied once + op-2 once)", v)
+	}
+}
+
+// A non-idempotent thrall does not dedup: the same key is processed every time (the opt-in
+// default is off, existing behavior is unchanged).
+func TestNonIdempotentThrallDoesNotDedup(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t) // AETHER_PROBE_IDEM unset -> Idempotent false
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	castIdem(t, nc, app, "probe", "inc", "op-1")
+	castIdem(t, nc, app, "probe", "inc", "op-1") // same key, but no dedup -> applied again
+
+	if v := callInt(t, nc, app, "probe", "get"); v != 2 {
+		t.Fatalf("state = %d, want 2 (no dedup without opt-in)", v)
+	}
+}
+
+// A duplicate call returns the first reply from cache and runs the handler once: two inc_get
+// calls with the same key both return 1, the state incremented a single time.
+func TestIdempotentCallReturnsCachedReply(t *testing.T) {
+	const app = "itest"
+	t.Setenv("AETHER_PROBE_IDEM", "1")
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	v1, ok1 := callIntIdem(nc, app, "probe", "inc_get", "call-1")
+	v2, ok2 := callIntIdem(nc, app, "probe", "inc_get", "call-1") // duplicate -> cached reply
+	if !ok1 || !ok2 || v1 != 1 || v2 != 1 {
+		t.Fatalf("duplicate call replies = (%d,%v),(%d,%v), want both 1 (handler ran once)", v1, ok1, v2, ok2)
+	}
+	if v3, _ := callIntIdem(nc, app, "probe", "inc_get", "call-2"); v3 != 2 {
+		t.Fatalf("distinct-key call = %d, want 2 (state incremented once more)", v3)
+	}
+}
+
+// An idempotent thrall must not deduplicate messages that carry no key at all (no idem, no id):
+// two such casts must both be processed, not collapsed onto the empty key.
+func TestIdempotentEmptyKeyNotDeduped(t *testing.T) {
+	const app = "itest"
+	t.Setenv("AETHER_PROBE_IDEM", "1")
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	castNoKey(t, nc, app, "probe", "inc")
+	castNoKey(t, nc, app, "probe", "inc")
+
+	if v := callInt(t, nc, app, "probe", "get"); v != 2 {
+		t.Fatalf("state = %d, want 2 (keyless casts must not be deduped)", v)
+	}
+}
+
+// A duplicate durable cast (same idempotency key, two stored JetStream messages) is processed
+// once and both messages are acked - dedup does not break the at-least-once drain.
+func TestIdempotentDurableCastDeduped(t *testing.T) {
+	const app = "itest"
+	t.Setenv("AETHER_PROBE_IDEM", "1")
+	eth := startEmbedded(t)
+	m := &Manifest{
+		App:      app,
+		Strategy: "one_for_one",
+		Thralls:  []ThrallSpec{{Name: "probe", Cmd: probeCmd(t), Restart: "permanent", Scope: "local", Durable: true}},
+	}
+	startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	castIdem(t, nc, app, "probe", "inc", "d-1")
+	castIdem(t, nc, app, "probe", "inc", "d-1") // duplicate durable cast, same key
+
+	// Wait for both stored messages to be delivered and acked, then the state is final.
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	stream := wire.Stream(app, "probe")
+	waitFor(t, 10*time.Second, "both durable casts delivered and acked", func() bool {
+		ci, err := js.ConsumerInfo(stream, "probe")
+		return err == nil && ci.NumPending == 0 && ci.NumAckPending == 0 && ci.Delivered.Consumer == 2
+	})
+	if v := callInt(t, nc, app, "probe", "get"); v != 1 {
+		t.Fatalf("state = %d, want 1 (duplicate durable cast processed once)", v)
 	}
 }
 

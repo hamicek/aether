@@ -788,6 +788,26 @@ Two honest limits, both inherent to JetStream dedup rather than worked around:
   events - correctly, since the runtime cannot know they were meant to be one. For client-driven
   idempotence, derive the key from a domain idempotency key the client supplies instead.
 
+### Handler-level idempotence (dedup the processing, not just the log)
+
+The command-key above deduplicates the **event-log write**, but the handler still runs on every
+delivery - a duplicate `withdraw` debits twice even though it is logged once. An opt-in flag on the
+thrall (`Idempotent` / `idempotent` / `idempotent=True`) closes that: the runtime deduplicates the
+**call/cast itself**, before the handler runs.
+
+- The **key** is a stable idempotency key the caller attaches (`WithIdempotencyKey(k)` in Go,
+  `opts.idempotencyKey` in TS, `idempotency_key=` in Python), else the per-send envelope id (which
+  never conflates two distinct sends but still catches an exact redelivery of the same message).
+- A **duplicate cast** is skipped; a **duplicate call** returns the first reply from a cache, so a
+  retrying caller gets the same answer instead of a re-execution. A durable duplicate is still
+  acked. Only **successful** outcomes are recorded - a handler that errored or escalated is not
+  marked, so a retry after a failure runs again (at-least-once for failures).
+- The cache is **bounded** (a generational FIFO) and **in-memory**: it holds for the thrall's
+  lifetime and does **not survive a restart**. That is the deliberate boundary - for idempotence
+  that outlives a crash, combine it with the event log (the command-key dedup above), whose
+  JetStream window persists. The two are complementary: handler dedup stops the double-processing
+  while the thrall is alive; the event log keeps the *write* single even across a restart.
+
 ---
 
 ## 13b. Observability (telemetry about the runtime itself)
