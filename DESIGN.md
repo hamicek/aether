@@ -286,6 +286,11 @@ reply (`type: "escalated"`, carrying the reason) and only then does the thrall e
 a back door around supervision - a `temporary` thrall that escalates stays down, and repeated
 escalation trips the same restart-intensity cap as any crash loop.
 
+When a **durable** cast handler escalates, the SDK acks the source JetStream message before the
+crash. The poison cast is consumed once and the restart is clean - it is not redelivered into a loop
+that would crash every restart until restart-intensity gives up (which is what an unacked exit would
+cause, since durable delivery is at-least-once with redelivery on crash).
+
 ---
 
 ## 9. Manifest - aether.toml
