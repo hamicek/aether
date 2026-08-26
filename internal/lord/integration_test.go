@@ -325,6 +325,49 @@ func TestEscalateCallerGetsError(t *testing.T) {
 	})
 }
 
+// A durable cast that escalates must not be left pending for redelivery (which would crash the
+// thrall again on every restart until restart-intensity gives up). The SDK acks the poison cast
+// before the crash, so after the restart the durable consumer has nothing ack-pending and the
+// thrall comes back clean. Asserting on the consumer's ack-pending count is deterministic;
+// waiting for an actual redelivery is not, since AckWait is 30s.
+func TestEscalateDurableCastNotRedelivered(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	m := &Manifest{
+		App:      app,
+		Strategy: "one_for_one",
+		Thralls:  []ThrallSpec{{Name: "probe", Cmd: probeCmd(t), Restart: "permanent", Scope: "local", Durable: true}},
+	}
+	startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+	cast(t, nc, app, "probe", "escalate") // durable cast: stored in the stream, delivered once
+
+	waitFor(t, 10*time.Second, "durable thrall restarts after escalation", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		return ok && v != pid1
+	})
+
+	// The poison cast was acked before the crash: the durable consumer has nothing pending and
+	// nothing ack-pending, so it will never be redelivered. Without the ack-before-crash it would
+	// sit ack-pending until AckWait and then loop.
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	stream := wire.Stream(app, "probe")
+	waitFor(t, 5*time.Second, "poison cast acked (nothing pending redelivery)", func() bool {
+		ci, err := js.ConsumerInfo(stream, "probe")
+		return err == nil && ci.NumAckPending == 0 && ci.NumPending == 0
+	})
+
+	if got := callInt(t, nc, app, "probe", "get"); got != 0 {
+		t.Fatalf("state after durable escalate-restart = %d, want a clean 0 from init", got)
+	}
+}
+
 func TestOneForAllRestart(t *testing.T) {
 	const app = "itest"
 	eth := startEmbedded(t)

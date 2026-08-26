@@ -197,7 +197,10 @@ func Start[S any](def Def[S]) error {
 		_ = msg.Respond(mustJSON(okReply(e, reply)))
 	}
 
-	processCast := func(data []byte) {
+	// ackDurable acknowledges the source JetStream message (durable cast); it is nil for a
+	// non-durable core cast, which needs no ack. On escalation the poison cast is acked before
+	// the crash, so it is not redelivered into a loop after the restart.
+	processCast := func(data []byte, ackDurable func()) {
 		var e wire.Envelope
 		if json.Unmarshal(data, &e) != nil {
 			return
@@ -215,6 +218,11 @@ func Start[S any](def Def[S]) error {
 		}
 		next, herr := h(e.Payload, state, ctx)
 		if esc, ok := asEscalate(herr); ok {
+			// Ack the poison cast before crashing so JetStream does not redeliver it into a
+			// crash loop; a non-durable cast (ackDurable nil) is simply dropped, as it is today.
+			if ackDurable != nil {
+				ackDurable()
+			}
 			log.Error("cast handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
 			exitProcess(1)
 			return
@@ -255,7 +263,7 @@ func Start[S any](def Def[S]) error {
 			case "call":
 				processCall(msg)
 			case "cast":
-				processCast(msg.Data)
+				processCast(msg.Data, nil) // core cast: no ack
 			}
 		})
 	}
@@ -328,7 +336,7 @@ const (
 // consumeDurableCast reads casts from a durable JetStream consumer with explicit ack.
 // While the thrall is down, casts accumulate in the stream (the lord created it) and are
 // drained on its return. At-least-once -> handlers must be idempotent.
-func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop <-chan struct{}, processCast func([]byte)) {
+func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop <-chan struct{}, processCast func([]byte, func())) {
 	js, err := nc.JetStream()
 	if err != nil {
 		log.Error("jetstream unavailable", slog.Any("err", err))
@@ -361,8 +369,11 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 			continue // timeout / no messages
 		}
 		for _, m := range msgs {
-			processCast(m.Data) // process ...
-			_ = m.Ack()         // ... and only then ack (in arrival order -> FIFO)
+			m := m
+			// On escalation processCast acks (synchronously) before it crashes, so the poison
+			// cast is not redelivered; the happy path returns here and we ack in arrival order.
+			processCast(m.Data, func() { _ = m.AckSync() }) // process ...
+			_ = m.Ack()                                     // ... and only then ack (in arrival order -> FIFO)
 		}
 	}
 }

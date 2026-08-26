@@ -68,7 +68,7 @@ func TestDurableCastPreservesFIFO(t *testing.T) {
 		got  []int
 		done = make(chan struct{})
 	)
-	processCast := func(data []byte) {
+	processCast := func(data []byte, _ func()) {
 		var e struct {
 			Payload struct {
 				N int `json:"n"`
@@ -145,7 +145,7 @@ func TestDurableCastAttachesToPreexistingConsumer(t *testing.T) {
 		got  int
 		done = make(chan struct{})
 	)
-	processCast := func([]byte) {
+	processCast := func([]byte, func()) {
 		mu.Lock()
 		got++
 		reached := got == total
@@ -178,7 +178,7 @@ func TestDurableCastStopsOnEmptyStream(t *testing.T) {
 	stop := make(chan struct{})
 	returned := make(chan struct{})
 	go func() {
-		consumeDurableCast(nc, app, name, discardLogger(), stop, func([]byte) {
+		consumeDurableCast(nc, app, name, discardLogger(), stop, func([]byte, func()) {
 			t.Error("no cast should be processed on an empty stream")
 		})
 		close(returned)

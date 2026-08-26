@@ -159,7 +159,7 @@ func StartFSM[D any](def FSM[D]) error {
 			case "call":
 				m.onCallMsg(msg)
 			case "cast":
-				m.onCastData(msg.Data)
+				m.onCastData(msg.Data, nil)
 			}
 		})
 	}
@@ -228,8 +228,10 @@ func (m *fsmRunner[D]) onCallMsg(msg *nats.Msg) {
 	}, e)
 }
 
-// onCastData turns a cast into an event and dispatches it (no reply).
-func (m *fsmRunner[D]) onCastData(data []byte) {
+// onCastData turns a cast into an event and dispatches it (no reply). The ackDurable hook (used
+// by the plain thrall's escalate-before-crash path) is unused here: FSM dispatch has no
+// escalation, so a durable cast is always acked by the consume loop after this returns.
+func (m *fsmRunner[D]) onCastData(data []byte, _ func()) {
 	var e wire.Envelope
 	if json.Unmarshal(data, &e) != nil {
 		return

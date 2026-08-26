@@ -128,7 +128,7 @@ func StartEvent(def EventManager) error {
 			case "call":
 				m.onCallMsg(msg)
 			case "cast":
-				m.onCastData(msg.Data)
+				m.onCastData(msg.Data, nil)
 			}
 		})
 	}
@@ -184,8 +184,10 @@ func (m *eventRunner) onCallMsg(msg *nats.Msg) {
 	_ = msg.Respond(mustJSON(errReply(e, "events_async", "event manager is async: use cast, not call")))
 }
 
-// onCastData turns a cast into an event and fans it out to every handler.
-func (m *eventRunner) onCastData(data []byte) {
+// onCastData turns a cast into an event and fans it out to every handler. The ackDurable hook
+// (used by the plain thrall's escalate-before-crash path) is unused here: gen_event dispatch
+// has no escalation, so a durable cast is always acked by the consume loop after this returns.
+func (m *eventRunner) onCastData(data []byte, _ func()) {
 	var e wire.Envelope
 	if json.Unmarshal(data, &e) != nil {
 		return
