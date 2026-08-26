@@ -23,6 +23,35 @@ export type CastHandler<S> = (
   ctx: Ctx,
 ) => Promise<S> | S;
 
+// EscalateError is the typed "let it crash" signal. A handler that throws it (via escalate())
+// asks the runtime to terminate the thrall with an abnormal exit, so the lord restarts it
+// through init per the thrall's restart policy - real OTP semantics without a manual
+// process.exit in application code. A plain thrown error keeps its old meaning: reply the
+// caller an error (call) or log it (cast), and keep living.
+export class EscalateError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`escalate: ${reason}`);
+    this.name = "EscalateError";
+    this.reason = reason;
+  }
+}
+
+// escalate is the typed let-it-crash path a handler calls to ask for a restart. The reason is
+// surfaced to a call caller (as the "escalated" error reply) and logged before the process exits.
+export function escalate(reason: string): never {
+  throw new EscalateError(reason);
+}
+
+// asEscalate returns the escalation signal if err is one, else null (a plain error).
+export function asEscalate(err: unknown): EscalateError | null {
+  return err instanceof EscalateError ? err : null;
+}
+
+// exitProcess terminates the thrall process on escalation. A module-local seam (mirrors the Go
+// SDK's exitProcess var) so it stays swappable; production exits for real.
+let exitProcess: (code: number) => void = (code) => process.exit(code);
+
 export interface Ctx {
   // WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
   nats: NatsConnection;
@@ -141,6 +170,16 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           state = next;
           respond(encode(okReply(e, reply)));
         } catch (err) {
+          const esc = asEscalate(err);
+          if (esc) {
+            // Reply the caller before we crash, so it learns of the restart instead of
+            // hanging until timeout; flush so the reply leaves before the process exits.
+            respond(encode(errReply(e, "escalated", esc.reason)));
+            await nc.flush();
+            log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
+            exitProcess(1);
+            return;
+          }
           respond(encode(errReply(e, "handler_error", String(err))));
         }
       } finally {
@@ -149,7 +188,10 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     });
   };
 
-  const onCast = (e: Envelope): Promise<void> => {
+  // ackDurable acknowledges the source JetStream message (durable cast); undefined for a
+  // non-durable core cast, which needs no ack. On escalation the poison cast is acked before
+  // the crash, so it is not redelivered into a loop after the restart.
+  const onCast = (e: Envelope, ackDurable?: () => Promise<void>): Promise<void> => {
     const start = beginJob();
     return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
@@ -161,6 +203,15 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         try {
           state = await handler(e.payload, state, ctx);
         } catch (err) {
+          const esc = asEscalate(err);
+          if (esc) {
+            // Ack the poison cast before crashing so JetStream does not redeliver it into a
+            // crash loop; a non-durable cast (no ackDurable) is simply dropped, as it is today.
+            if (ackDurable) await ackDurable();
+            log.error("cast handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
+            exitProcess(1);
+            return;
+          }
           log.error("cast handler failed", { op: e.op, err: String(err) });
         }
       } finally {
@@ -247,7 +298,7 @@ export async function consumeDurableCast(
   nc: NatsConnection,
   app: string,
   name: string,
-  onCast: (e: Envelope) => Promise<void>,
+  onCast: (e: Envelope, ackDurable?: () => Promise<void>) => Promise<void>,
 ): Promise<void> {
   const stream = subjects.stream(app, name);
   const jsm = await nc.jetstreamManager();
@@ -268,8 +319,10 @@ export async function consumeDurableCast(
   const consumer = await js.consumers.get(stream, name);
   const messages = await consumer.consume();
   for await (const m of messages) {
-    await onCast(decode(m.data)); // process (serialized, in arrival order -> FIFO) ...
-    m.ack(); //                     ... and only then ack (at-least-once)
+    // On escalation onCast acks (awaiting server confirmation) before it crashes, so the poison
+    // cast is not redelivered; the happy path returns here and we ack in arrival order.
+    await onCast(decode(m.data), async () => { await m.ackAck(); }); // process (serialized, FIFO) ...
+    m.ack(); //                                                         ... and only then ack (at-least-once)
   }
 }
 

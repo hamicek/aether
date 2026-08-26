@@ -214,6 +214,36 @@ func TestDynamicSpawnRevivesDeadChild(t *testing.T) {
 	})
 }
 
+// A temporary child that escalates (typed let-it-crash) must stay dead, exactly like any
+// other abnormal exit of a temporary child - escalation is not a back door around the restart
+// policy, it just reuses the same abnormal-exit supervision.
+func TestEscalateTemporaryStaysDead(t *testing.T) {
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, "demo", "one_for_one", spec("static", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "static")
+
+	sp := wire.SpawnSpec{Name: "dyn", Cmd: probeCmd(t), Restart: "temporary"}
+	if r := spawnDynamic(t, nc, sp); r.Status != "ok" {
+		t.Fatalf("spawn: %+v", r.Error)
+	}
+	waitReady(t, eth, "dyn")
+
+	cast(t, nc, "demo", "dyn", "escalate")
+	waitFor(t, 5*time.Second, "temporary child stops answering after escalation", func() bool {
+		_, ok := tryCallInt(nc, "demo", "dyn", "pid")
+		return !ok
+	})
+
+	// Give any (incorrect) restart a chance to bring it back; it must remain dead.
+	deadline := time.Now().Add(1 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := tryCallInt(nc, "demo", "dyn", "pid"); ok {
+			t.Fatal("temporary child answered again - it was restarted after escalation")
+		}
+	}
+}
+
 // childInSlice reports whether a child of the given name is currently in the supervision
 // slice (read under the same lock the supervisor uses).
 func childInSlice(l *Lord, name string) bool {

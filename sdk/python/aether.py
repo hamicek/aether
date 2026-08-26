@@ -344,7 +344,7 @@ _DURABLE_ACK_WAIT = 30  # seconds
 _DURABLE_MAX_ACK_PENDING = 512
 
 
-async def _cast_pull_loop(nc, app: str, name: str, stop: asyncio.Event, on_cast: Callable[[dict], Any]) -> None:
+async def _cast_pull_loop(nc, app: str, name: str, stop: asyncio.Event, on_cast: Callable[..., Any]) -> None:
     """Drain casts from a durable JetStream consumer with explicit ack, in batches.
 
     While the thrall is down, casts accumulate in the stream (the lord created it) and are
@@ -367,8 +367,10 @@ async def _cast_pull_loop(nc, app: str, name: str, stop: asyncio.Event, on_cast:
         except Exception:  # noqa: BLE001  (timeout / no messages)
             continue
         for m in msgs:
-            await on_cast(_decode(m.data))  # process ...
-            await m.ack()  #                  ... and only then ack (in arrival order -> FIFO)
+            # On escalation on_cast acks (synchronously) before it crashes, so the poison cast is
+            # not redelivered; the happy path returns here and we ack in arrival order.
+            await on_cast(_decode(m.data), ack_durable=m.ack_sync)  # process ...
+            await m.ack()  #                                          ... and only then ack (FIFO)
 
 
 # Handler shapes hold the GenServer semantics:
@@ -376,6 +378,25 @@ async def _cast_pull_loop(nc, app: str, name: str, stop: asyncio.Event, on_cast:
 #   handle_cast: (payload, state, ctx) -> new_state
 CallHandler = Callable[[Any, Any, "Ctx"], Any]
 CastHandler = Callable[[Any, Any, "Ctx"], Any]
+
+
+class Escalate(Exception):
+    """The typed "let it crash" signal. A handler that raises it asks the runtime to terminate
+    the thrall with an abnormal exit, so the lord restarts it through init per the thrall's
+    restart policy - real OTP semantics without a manual os._exit in application code. A plain
+    exception keeps its old meaning: reply the caller an error (call) or log it (cast), and
+    keep living.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# _exit_process terminates the thrall process. It is a module attribute so dispatch tests can
+# observe escalation without killing the test process; production exits for real. os._exit is
+# used (not sys.exit) so the crash is immediate and cannot be swallowed by an except.
+_exit_process: Callable[[int], None] = os._exit
 
 
 @dataclass
@@ -543,12 +564,23 @@ async def start(defn: ThrallDef) -> None:
                 try:
                     reply, state = await _maybe(handler(e.get("payload"), state, ctx))
                     await msg.respond(_encode(_ok_reply(e, reply)))
+                except Escalate as esc:
+                    # Reply the caller before we crash, so it learns of the restart instead of
+                    # hanging until timeout; flush so the reply leaves before the process exits.
+                    await msg.respond(_encode(_err_reply(e, "escalated", esc.reason)))
+                    await nc.flush()
+                    ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
+                    _exit_process(1)
+                    return
                 except Exception as ex:  # noqa: BLE001
                     await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
         finally:
             stats.end(start)
 
-    async def process_cast(e: dict) -> None:
+    # ack_durable acknowledges the source JetStream message (durable cast); None for a
+    # non-durable core cast, which needs no ack. On escalation the poison cast is acked before
+    # the crash, so it is not redelivered into a loop after the restart.
+    async def process_cast(e: dict, ack_durable: Optional[Callable[[], Any]] = None) -> None:
         nonlocal state
         start = stats.begin()
         try:
@@ -560,6 +592,14 @@ async def start(defn: ThrallDef) -> None:
                 if handler is not None:
                     try:
                         state = await _maybe(handler(e.get("payload"), state, ctx))
+                    except Escalate as esc:
+                        # Ack the poison cast before crashing so JetStream does not redeliver it
+                        # into a crash loop; a non-durable cast (ack_durable None) is dropped.
+                        if ack_durable is not None:
+                            await ack_durable()
+                        ctx.log.error("cast handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
+                        _exit_process(1)
+                        return
                     except Exception as ex:  # noqa: BLE001
                         ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
         finally:

@@ -80,6 +80,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
+| **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
 
@@ -171,6 +172,23 @@ await start(counter);
 
 The same thrall also exists in `counter_py.py` (Python) and `counter_go.go` (Go) - functionally
 identical. Durability is purely a manifest concern (`durable = true`), not thrall code.
+
+**Let it crash.** A returned/thrown error means "this request failed, but I'm fine" (the caller gets
+an error reply, the thrall keeps its state). To ask for the OTP *let it crash* instead, escalate -
+the thrall exits abnormally and the lord restarts it through `init` per its restart policy, no manual
+`panic`/`os.Exit` in your handler. A call caller gets a distinguishable `"escalated"` error reply
+before the crash rather than waiting out its timeout.
+
+```ts
+import { escalate } from "@hamicek/aether";
+handleCast: { withdraw: (amt, s) => { if (amt > s) escalate("balance underflow"); return s - amt; } }
+```
+```go
+return s, thrall.Escalate("balance underflow")     // Go
+```
+```python
+raise aether.Escalate("balance underflow")         # Python
+```
 
 ## State machine (FSM) behaviour
 
