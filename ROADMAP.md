@@ -11,7 +11,11 @@ a thrall self-terminates when it loses its KV lock or its lord's lease, so no th
 lord even on an external SIGKILL; the fencing epoch is exposed as `ctx.SingletonEpoch` for
 write-side fencing tokens (see [DESIGN.md §14](./DESIGN.md) and `examples/fencing-token/`). A
 per-thrall `fencing = false` opts a harmless orphan (a stateless / read-only poller) out of
-lord-liveness fencing, so a shared-bus hiccup does not reap the whole tree.
+lord-liveness fencing, so a shared-bus hiccup does not reap the whole tree. A handler can trigger a
+typed **let-it-crash** by returning/throwing `Escalate(reason)`: the SDK terminates the thrall with
+an abnormal exit so the lord restarts it through `init` per policy (a call caller first gets a
+distinguishable `"escalated"` reply), instead of a manual `panic`/`os.Exit` - see
+[DESIGN.md §8](./DESIGN.md).
 
 Still open:
 
@@ -33,6 +37,10 @@ and `examples/eventsourced/`. A **command-key** dedup key on `Append` (via `Nats
 `ctx.MsgID`) makes a redelivered non-idempotent event safe, and the lord warns when `event_log` is
 combined with a retention bound that would truncate a rebuild. The mailbox survives a restart when
 JetStream storage is persistent (embedded `store_dir` or external NATS; [DESIGN.md §13](./DESIGN.md)).
+An opt-in per-thrall **handler-level idempotence** (`Idempotent`) deduplicates the call/cast itself
+by an idempotency key (a caller-supplied key, else the envelope id): a duplicate cast is skipped and
+a duplicate call returns the first reply. It is in-memory (the thrall's lifetime), complementing the
+command-key that keeps the event-log *write* single across a restart - see [DESIGN.md §13c](./DESIGN.md).
 
 Still open:
 
