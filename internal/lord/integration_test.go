@@ -53,10 +53,21 @@ func runProbe() {
 		HandleCall: map[string]thrall.CallFn[int]{
 			"get": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return s, s, nil },
 			"pid": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) { return os.Getpid(), s, nil },
+			// call_escalate crashes from a call handler: the caller must get the "escalated"
+			// error reply before the process dies, not a timeout.
+			"call_escalate": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) {
+				return nil, s, thrall.Escalate("call asked to crash")
+			},
 		},
 		HandleCast: map[string]thrall.CastFn[int]{
 			"inc":   func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { return s + 1, nil },
 			"crash": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { os.Exit(1); return s, nil },
+			// escalate is the typed let-it-crash path: returning Escalate self-terminates the
+			// thrall abnormally, so the lord restarts it per policy (contrast with `crash`,
+			// which reaches for a raw os.Exit).
+			"escalate": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) {
+				return s, thrall.Escalate("cast asked to crash")
+			},
 			// emit_trace publishes the trace of the message currently being handled to a
 			// per-thrall subject, so a test can observe what reached the handler via ctx.
 			"emit_trace": func(_ json.RawMessage, s int, ctx *thrall.Ctx) (int, error) {
@@ -183,6 +194,23 @@ func tryCallInt(nc *nats.Conn, app, name, op string) (int, bool) {
 	return v, true
 }
 
+// callErrType issues a call and returns the error reply's type (e.g. "escalated"), reporting
+// false if the call succeeded, timed out, or returned a non-error reply.
+func callErrType(nc *nats.Conn, app, name, op string) (string, bool) {
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op,
+		Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+	data, _ := json.Marshal(req)
+	msg, err := nc.Request(wire.Call(app, name), data, 500*time.Millisecond)
+	if err != nil {
+		return "", false
+	}
+	var reply wire.Envelope
+	if json.Unmarshal(msg.Data, &reply) != nil || reply.Status != "error" || reply.Error == nil {
+		return "", false
+	}
+	return reply.Error.Type, true
+}
+
 func cast(t *testing.T, nc *nats.Conn, app, name, op string) {
 	t.Helper()
 	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCast, To: name, Op: op,
@@ -238,6 +266,63 @@ func TestOneForOneRestart(t *testing.T) {
 	if pid2 == 0 || pid2 == pid1 {
 		t.Fatalf("expected a restarted thrall with a new pid, got %d (was %d)", pid2, pid1)
 	}
+}
+
+// A cast handler returning Escalate self-terminates the thrall abnormally, so a permanent
+// thrall is restarted through init - the typed let-it-crash path, with no manual os.Exit in
+// the handler. The restart is fresh state from init, not a resumed old state.
+func TestEscalateRestartsThrall(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+	cast(t, nc, app, "probe", "inc") // dirty the state so a clean restart is observable
+	cast(t, nc, app, "probe", "escalate")
+
+	var pid2 int
+	waitFor(t, 10*time.Second, "restart with a fresh pid after escalation", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		if ok && v != pid1 {
+			pid2 = v
+			return true
+		}
+		return false
+	})
+	if pid2 == 0 || pid2 == pid1 {
+		t.Fatalf("expected a restarted thrall with a new pid, got %d (was %d)", pid2, pid1)
+	}
+	if got := callInt(t, nc, app, "probe", "get"); got != 0 {
+		t.Fatalf("state after escalate-restart = %d, want a clean 0 from init", got)
+	}
+}
+
+// An escalation from a call handler must reply the caller a distinguishable "escalated" error
+// before the process dies, so the caller learns of the restart instead of waiting out the
+// request timeout. Afterwards the permanent thrall comes back with a fresh pid.
+func TestEscalateCallerGetsError(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+
+	errType, ok := callErrType(nc, app, "probe", "call_escalate")
+	if !ok {
+		t.Fatal("expected an error reply from an escalating call, got none (caller hung until timeout?)")
+	}
+	if errType != "escalated" {
+		t.Fatalf("error reply type = %q, want %q", errType, "escalated")
+	}
+
+	waitFor(t, 10*time.Second, "restart with a fresh pid after a call escalation", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		return ok && v != pid1
+	})
 }
 
 func TestOneForAllRestart(t *testing.T) {
