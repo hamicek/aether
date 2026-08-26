@@ -48,12 +48,9 @@ export function asEscalate(err: unknown): EscalateError | null {
   return err instanceof EscalateError ? err : null;
 }
 
-// exitProcess terminates the thrall process. It is a module var so dispatch tests can observe
-// escalation without killing the test runner; production exits for real.
-export let exitProcess: (code: number) => void = (code) => process.exit(code);
-export function setExitProcessForTest(fn: (code: number) => void): void {
-  exitProcess = fn;
-}
+// exitProcess terminates the thrall process on escalation. A module-local seam (mirrors the Go
+// SDK's exitProcess var) so it stays swappable; production exits for real.
+let exitProcess: (code: number) => void = (code) => process.exit(code);
 
 export interface Ctx {
   // WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
