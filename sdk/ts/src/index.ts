@@ -1,4 +1,4 @@
-export { defThrall, start } from "./thrall";
+export { defThrall, start, escalate, EscalateError } from "./thrall";
 export type { ThrallDef, Ctx, CallHandler, CastHandler } from "./thrall";
 export { call, cast, useConnection, startChild, stopChild } from "./client";
 export type { CallOpts, SpawnSpec } from "./client";

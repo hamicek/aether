@@ -23,6 +23,38 @@ export type CastHandler<S> = (
   ctx: Ctx,
 ) => Promise<S> | S;
 
+// EscalateError is the typed "let it crash" signal. A handler that throws it (via escalate())
+// asks the runtime to terminate the thrall with an abnormal exit, so the lord restarts it
+// through init per the thrall's restart policy - real OTP semantics without a manual
+// process.exit in application code. A plain thrown error keeps its old meaning: reply the
+// caller an error (call) or log it (cast), and keep living.
+export class EscalateError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`escalate: ${reason}`);
+    this.name = "EscalateError";
+    this.reason = reason;
+  }
+}
+
+// escalate is the typed let-it-crash path a handler calls to ask for a restart. The reason is
+// surfaced to a call caller (as the "escalated" error reply) and logged before the process exits.
+export function escalate(reason: string): never {
+  throw new EscalateError(reason);
+}
+
+// asEscalate returns the escalation signal if err is one, else null (a plain error).
+export function asEscalate(err: unknown): EscalateError | null {
+  return err instanceof EscalateError ? err : null;
+}
+
+// exitProcess terminates the thrall process. It is a module var so dispatch tests can observe
+// escalation without killing the test runner; production exits for real.
+export let exitProcess: (code: number) => void = (code) => process.exit(code);
+export function setExitProcessForTest(fn: (code: number) => void): void {
+  exitProcess = fn;
+}
+
 export interface Ctx {
   // WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
   nats: NatsConnection;
@@ -141,6 +173,16 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           state = next;
           respond(encode(okReply(e, reply)));
         } catch (err) {
+          const esc = asEscalate(err);
+          if (esc) {
+            // Reply the caller before we crash, so it learns of the restart instead of
+            // hanging until timeout; flush so the reply leaves before the process exits.
+            respond(encode(errReply(e, "escalated", esc.reason)));
+            await nc.flush();
+            log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
+            exitProcess(1);
+            return;
+          }
           respond(encode(errReply(e, "handler_error", String(err))));
         }
       } finally {
@@ -161,6 +203,12 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         try {
           state = await handler(e.payload, state, ctx);
         } catch (err) {
+          const esc = asEscalate(err);
+          if (esc) {
+            log.error("cast handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
+            exitProcess(1);
+            return;
+          }
           log.error("cast handler failed", { op: e.op, err: String(err) });
         }
       } finally {
