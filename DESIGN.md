@@ -258,6 +258,34 @@ await cast("counter", "inc");
 const value = await call<number>("counter", "get", {}, { timeoutMs: 5000 }); // -> 2
 ```
 
+### Let it crash - escalation
+
+A handler has two ways to signal failure, and they mean different things:
+
+- **A returned/thrown error** = "this request failed, but I'm fine." The caller gets an error reply
+  (`type: "handler_error"`), a failed cast is logged, and the thrall keeps running with its state.
+- **An escalation** = "I can't safely continue - crash me." This is the OTP *let it crash*: the SDK
+  terminates the thrall with an **abnormal exit**, so the lord restarts it through `init` per its
+  restart policy and restart-intensity budget (§9). State is discarded; the restart starts
+  clean. Prefer this over reaching for a raw `panic`/`os.Exit`/`process.exit` in a handler - those
+  bypass the SDK contract, and a call caller then only learns of the crash by timing out.
+
+```ts
+import { escalate } from "@hamicek/aether";        // TS: throw the signal
+handleCast: { withdraw: (amt, s) => { if (amt > s) escalate("balance underflow"); return s - amt; } }
+```
+```go
+return s, thrall.Escalate("balance underflow")     // Go: return the signal
+```
+```python
+raise aether.Escalate("balance underflow")         # Python: raise the signal
+```
+
+On a **call**, the caller is not left hanging until timeout: it first gets a distinguishable error
+reply (`type: "escalated"`, carrying the reason) and only then does the thrall exit. Escalation is not
+a back door around supervision - a `temporary` thrall that escalates stays down, and repeated
+escalation trips the same restart-intensity cap as any crash loop.
+
 ---
 
 ## 9. Manifest - aether.toml
