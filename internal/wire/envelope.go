@@ -23,7 +23,12 @@ type Envelope struct {
 	// which correlates a single request with its reply. It lets one logical operation be
 	// followed across process boundaries; an edge (CLI, first message) mints it, handlers pass
 	// it to downstream calls, and it is logged so a trace and a log line can be joined.
-	Trace   string          `json:"trace,omitempty"`
+	Trace string `json:"trace,omitempty"`
+	// Idem is an optional caller-supplied idempotency key. On an idempotent thrall a call/cast
+	// carrying the same Idem is deduplicated: a duplicate cast is skipped and a duplicate call
+	// returns the first reply. Empty = no explicit idempotency (the receiver falls back to ID,
+	// which still catches an exact redelivery of the same envelope). See AE-077.
+	Idem    string          `json:"idem,omitempty"`
 	Kind    Kind            `json:"kind"`
 	From    string          `json:"from,omitempty"`
 	To      string          `json:"to,omitempty"`
