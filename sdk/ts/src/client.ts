@@ -7,6 +7,9 @@ export interface CallOpts {
   // Correlation id to stamp on the outgoing message. Omitted -> a fresh trace is minted (edge);
   // Ctx.call/Ctx.cast pass the current message's trace here to propagate it across a hop.
   trace?: string;
+  // Stable idempotency key. On an idempotent thrall a retry carrying the same key is not
+  // re-processed: a duplicate call returns the first reply, a duplicate cast is skipped. See AE-077.
+  idempotencyKey?: string;
 }
 
 // Shared connection for client calls (set by start(), or set manually by a
@@ -50,7 +53,7 @@ export async function call<R = unknown>(
   payload: unknown = {},
   opts: CallOpts = {},
 ): Promise<R> {
-  const req: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), kind: "call", to: target, op, payload, ts: Date.now() };
+  const req: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), idem: opts.idempotencyKey, kind: "call", to: target, op, payload, ts: Date.now() };
   const msg = await conn().request(subjects.call(app(), target), encode(req), {
     timeout: opts.timeoutMs ?? 5000,
   });
@@ -63,8 +66,8 @@ export async function call<R = unknown>(
 
 // cast = fire-and-forget (GenServer.cast). Pass opts.trace to propagate a trace (Ctx.cast
 // does this); omitted -> a fresh trace is minted.
-export function cast(target: string, op: string, payload: unknown = {}, opts: { trace?: string } = {}): void {
-  const e: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), kind: "cast", to: target, op, payload, ts: Date.now() };
+export function cast(target: string, op: string, payload: unknown = {}, opts: { trace?: string; idempotencyKey?: string } = {}): void {
+  const e: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), idem: opts.idempotencyKey, kind: "cast", to: target, op, payload, ts: Date.now() };
   conn().publish(subjects.cast(app(), target), encode(e));
 }
 
