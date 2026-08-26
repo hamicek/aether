@@ -180,6 +180,15 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		reply, next, herr := h(e.Payload, state, ctx)
+		if esc, ok := asEscalate(herr); ok {
+			// Reply the caller before we crash, so it learns of the restart instead of
+			// hanging until timeout; flush so the reply leaves before the process exits.
+			_ = msg.Respond(mustJSON(errReply(e, "escalated", esc.Reason)))
+			_ = nc.Flush()
+			log.Error("handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
+			exitProcess(1)
+			return
+		}
 		if herr != nil {
 			_ = msg.Respond(mustJSON(errReply(e, "handler_error", herr.Error())))
 			return
@@ -205,6 +214,11 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		next, herr := h(e.Payload, state, ctx)
+		if esc, ok := asEscalate(herr); ok {
+			log.Error("cast handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
+			exitProcess(1)
+			return
+		}
 		if herr != nil {
 			log.Error("cast handler failed", slog.String("op", e.Op), slog.Any("err", herr))
 			return
