@@ -66,7 +66,7 @@ class DurableCastTest(unittest.IsolatedAsyncioTestCase):
         got = []
         done = asyncio.Event()
 
-        async def on_cast(e):
+        async def on_cast(e, ack_durable=None):
             got.append(e["payload"]["n"])
             if len(got) == total:
                 done.set()
@@ -88,7 +88,7 @@ class DurableCastTest(unittest.IsolatedAsyncioTestCase):
 
         processed = []
 
-        async def on_cast(e):
+        async def on_cast(e, ack_durable=None):
             processed.append(e)
 
         stop = asyncio.Event()
