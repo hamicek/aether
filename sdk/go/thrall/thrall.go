@@ -192,8 +192,12 @@ func Start[S any](def Def[S]) error {
 			_ = msg.Respond(mustJSON(errReply(e, "unknown_op", "unknown call op: "+e.Op)))
 			return
 		}
+		dkey := ""
 		if dedup != nil {
-			if cached, seen := dedup.get(dedupKey(e)); seen {
+			dkey = dedupKey(e) // empty (no idem and no ID) -> not deduped, never collide on ""
+		}
+		if dkey != "" {
+			if cached, seen := dedup.get(dkey); seen {
 				// A duplicate call: return the first reply instead of re-running the handler.
 				_ = msg.Respond(mustJSON(okReply(e, json.RawMessage(cached))))
 				return
@@ -214,8 +218,8 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		state = next
-		if dedup != nil {
-			dedup.put(dedupKey(e), mustMarshal(reply)) // cache only a successful reply
+		if dkey != "" {
+			dedup.put(dkey, mustMarshal(reply)) // cache only a successful reply
 		}
 		_ = msg.Respond(mustJSON(okReply(e, reply)))
 	}
@@ -239,8 +243,12 @@ func Start[S any](def Def[S]) error {
 		if !ok {
 			return
 		}
+		dkey := ""
 		if dedup != nil {
-			if _, seen := dedup.get(dedupKey(e)); seen {
+			dkey = dedupKey(e) // empty (no idem and no ID) -> not deduped, never collide on ""
+		}
+		if dkey != "" {
+			if _, seen := dedup.get(dkey); seen {
 				return // already processed; a durable cast is acked by the consume loop
 			}
 		}
@@ -260,8 +268,8 @@ func Start[S any](def Def[S]) error {
 			return
 		}
 		state = next
-		if dedup != nil {
-			dedup.put(dedupKey(e), nil) // mark processed only after success
+		if dkey != "" {
+			dedup.put(dkey, nil) // mark processed only after success
 		}
 	}
 

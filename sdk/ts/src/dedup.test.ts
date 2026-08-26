@@ -8,6 +8,7 @@ import { decode, encode, type Envelope } from "./envelope";
 test("dedupKey prefers idem over id", () => {
   expect(dedupKey({ v: 1, kind: "call", id: "id-1", idem: "key-1" })).toBe("key-1");
   expect(dedupKey({ v: 1, kind: "call", id: "id-1" })).toBe("id-1");
+  expect(dedupKey({ v: 1, kind: "call" })).toBe(""); // no idem, no id -> dispatch skips dedup
 });
 
 // A cast records presence (undefined reply); a call records its reply value.

@@ -17,6 +17,7 @@ class DedupKey(unittest.TestCase):
     def test_prefers_idem_over_id(self):
         self.assertEqual(aether._dedup_key({"id": "id-1", "idem": "key-1"}), "key-1")
         self.assertEqual(aether._dedup_key({"id": "id-1"}), "id-1")
+        self.assertEqual(aether._dedup_key({}), "")  # no idem, no id -> dispatch skips dedup
 
 
 class DedupCache(unittest.TestCase):

@@ -15,6 +15,9 @@ func TestDedupKeyPrefersIdemOverID(t *testing.T) {
 	if got := dedupKey(wire.Envelope{ID: "id-1"}); got != "id-1" {
 		t.Fatalf("dedupKey without Idem = %q, want the envelope ID %q", got, "id-1")
 	}
+	if got := dedupKey(wire.Envelope{}); got != "" {
+		t.Fatalf("dedupKey with neither Idem nor ID = %q, want empty (dispatch then skips dedup)", got)
+	}
 }
 
 // WithIdempotencyKey is the caller-side option that stamps the key onto the outgoing envelope.

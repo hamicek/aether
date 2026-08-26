@@ -176,8 +176,9 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           respond(encode(errReply(e, "unknown_op", `unknown call op: ${e.op}`)));
           return;
         }
-        if (dedup) {
-          const [cached, seen] = dedup.get(dedupKey(e));
+        const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
+        if (dkey) {
+          const [cached, seen] = dedup!.get(dkey);
           if (seen) {
             // A duplicate call: return the first reply instead of re-running the handler.
             respond(encode(okReply(e, cached)));
@@ -187,7 +188,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
         try {
           const [reply, next] = await handler(e.payload, state, ctx);
           state = next;
-          if (dedup) dedup.put(dedupKey(e), reply); // cache only a successful reply
+          if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
           respond(encode(okReply(e, reply)));
         } catch (err) {
           const esc = asEscalate(err);
@@ -220,13 +221,14 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
       try {
         const handler = def.handleCast?.[e.op ?? ""];
         if (!handler) return;
-        if (dedup) {
-          const [, seen] = dedup.get(dedupKey(e));
+        const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
+        if (dkey) {
+          const [, seen] = dedup!.get(dkey);
           if (seen) return; // already processed; a durable cast is acked by the consume loop
         }
         try {
           state = await handler(e.payload, state, ctx);
-          if (dedup) dedup.put(dedupKey(e), undefined); // mark processed only after success
+          if (dkey) dedup!.put(dkey, undefined); // mark processed only after success
         } catch (err) {
           const esc = asEscalate(err);
           if (esc) {

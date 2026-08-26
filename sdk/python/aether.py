@@ -625,16 +625,17 @@ async def start(defn: ThrallDef) -> None:
                 if handler is None:
                     await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
                     return
-                if dedup is not None:
-                    cached, seen = dedup.get(_dedup_key(e))
+                dkey = _dedup_key(e) if dedup is not None else ""  # empty -> not deduped
+                if dkey:
+                    cached, seen = dedup.get(dkey)
                     if seen:
                         # A duplicate call: return the first reply instead of re-running the handler.
                         await msg.respond(_encode(_ok_reply(e, cached)))
                         return
                 try:
                     reply, state = await _maybe(handler(e.get("payload"), state, ctx))
-                    if dedup is not None:
-                        dedup.put(_dedup_key(e), reply)  # cache only a successful reply
+                    if dkey:
+                        dedup.put(dkey, reply)  # cache only a successful reply
                     await msg.respond(_encode(_ok_reply(e, reply)))
                 except Escalate as esc:
                     # Reply the caller before we crash, so it learns of the restart instead of
@@ -662,14 +663,15 @@ async def start(defn: ThrallDef) -> None:
                 ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_cast.get(e.get("op"))
                 if handler is not None:
-                    if dedup is not None:
-                        _, seen = dedup.get(_dedup_key(e))
+                    dkey = _dedup_key(e) if dedup is not None else ""  # empty -> not deduped
+                    if dkey:
+                        _, seen = dedup.get(dkey)
                         if seen:
                             return  # already processed; a durable cast is acked by the consume loop
                     try:
                         state = await _maybe(handler(e.get("payload"), state, ctx))
-                        if dedup is not None:
-                            dedup.put(_dedup_key(e), None)  # mark processed only after success
+                        if dkey:
+                            dedup.put(dkey, None)  # mark processed only after success
                     except Escalate as esc:
                         # Ack the poison cast before crashing so JetStream does not redeliver it
                         # into a crash loop; a non-durable cast (ack_durable None) is dropped.

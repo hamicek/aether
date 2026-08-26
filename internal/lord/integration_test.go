@@ -240,6 +240,20 @@ func castIdem(t *testing.T, nc *nats.Conn, app, name, op, idem string) {
 	_ = nc.Flush()
 }
 
+// castNoKey publishes a cast with neither an id nor an idempotency key - a malformed message
+// that must not be deduplicated (an idempotent thrall must not collide distinct keyless messages
+// on the empty key and silently drop them).
+func castNoKey(t *testing.T, nc *nats.Conn, app, name, op string) {
+	t.Helper()
+	e := wire.Envelope{V: 1, Kind: wire.KindCast, To: name, Op: op,
+		Payload: json.RawMessage("{}"), TS: time.Now().UnixMilli()}
+	data, _ := json.Marshal(e)
+	if err := nc.Publish(wire.Cast(app, name), data); err != nil {
+		t.Fatalf("cast %s.%s: %v", name, op, err)
+	}
+	_ = nc.Flush()
+}
+
 // callIntIdem issues a call carrying an idempotency key and returns the integer reply.
 func callIntIdem(nc *nats.Conn, app, name, op, idem string) (int, bool) {
 	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Idem: idem, Kind: wire.KindCall, To: name, Op: op,
@@ -460,6 +474,24 @@ func TestIdempotentCallReturnsCachedReply(t *testing.T) {
 	}
 	if v3, _ := callIntIdem(nc, app, "probe", "inc_get", "call-2"); v3 != 2 {
 		t.Fatalf("distinct-key call = %d, want 2 (state incremented once more)", v3)
+	}
+}
+
+// An idempotent thrall must not deduplicate messages that carry no key at all (no idem, no id):
+// two such casts must both be processed, not collapsed onto the empty key.
+func TestIdempotentEmptyKeyNotDeduped(t *testing.T) {
+	const app = "itest"
+	t.Setenv("AETHER_PROBE_IDEM", "1")
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	castNoKey(t, nc, app, "probe", "inc")
+	castNoKey(t, nc, app, "probe", "inc")
+
+	if v := callInt(t, nc, app, "probe", "get"); v != 2 {
+		t.Fatalf("state = %d, want 2 (keyless casts must not be deduped)", v)
 	}
 }
 
