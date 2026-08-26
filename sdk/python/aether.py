@@ -378,6 +378,25 @@ CallHandler = Callable[[Any, Any, "Ctx"], Any]
 CastHandler = Callable[[Any, Any, "Ctx"], Any]
 
 
+class Escalate(Exception):
+    """The typed "let it crash" signal. A handler that raises it asks the runtime to terminate
+    the thrall with an abnormal exit, so the lord restarts it through init per the thrall's
+    restart policy - real OTP semantics without a manual os._exit in application code. A plain
+    exception keeps its old meaning: reply the caller an error (call) or log it (cast), and
+    keep living.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+# _exit_process terminates the thrall process. It is a module attribute so dispatch tests can
+# observe escalation without killing the test process; production exits for real. os._exit is
+# used (not sys.exit) so the crash is immediate and cannot be swallowed by an except.
+_exit_process: Callable[[int], None] = os._exit
+
+
 @dataclass
 class SpawnSpec:
     # Request to spawn a child at runtime. Mirrors internal/wire.SpawnSpec: the subset of
@@ -543,6 +562,14 @@ async def start(defn: ThrallDef) -> None:
                 try:
                     reply, state = await _maybe(handler(e.get("payload"), state, ctx))
                     await msg.respond(_encode(_ok_reply(e, reply)))
+                except Escalate as esc:
+                    # Reply the caller before we crash, so it learns of the restart instead of
+                    # hanging until timeout; flush so the reply leaves before the process exits.
+                    await msg.respond(_encode(_err_reply(e, "escalated", esc.reason)))
+                    await nc.flush()
+                    ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
+                    _exit_process(1)
+                    return
                 except Exception as ex:  # noqa: BLE001
                     await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
         finally:
@@ -560,6 +587,10 @@ async def start(defn: ThrallDef) -> None:
                 if handler is not None:
                     try:
                         state = await _maybe(handler(e.get("payload"), state, ctx))
+                    except Escalate as esc:
+                        ctx.log.error("cast handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
+                        _exit_process(1)
+                        return
                     except Exception as ex:  # noqa: BLE001
                         ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
         finally:
