@@ -81,6 +81,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 | **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
+| **Idempotence** | ✅ | opt-in per thrall -> dedup a call/cast by an idempotency key: a duplicate cast is skipped, a duplicate call returns the first reply. In-memory (the thrall's lifetime), complements the event-log command-key. Go + TS + Python - see [Durability](#durability) |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
 
