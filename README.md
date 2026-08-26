@@ -439,6 +439,15 @@ external), the rebuilt state survives stopping and starting `aether up`. Mirrore
 SDKs (`ctx.append` + `rebuild` in TS/Python). Snapshots and compaction are future work. Runnable
 demo: `examples/eventsourced/` (a bank account whose balance survives a restart).
 
+The command-key dedups the *event-log write*; the handler still runs on every delivery. To
+deduplicate the **processing** too, mark the thrall `Idempotent` (`idempotent` / `idempotent=True`):
+a call/cast is deduplicated by an idempotency key - a stable key the caller supplies
+(`WithIdempotencyKey` / `opts.idempotencyKey` / `idempotency_key=`), else the envelope id - so a
+duplicate cast is skipped and a duplicate call returns the first reply from a cache. It is opt-in,
+bounded, and **in-memory** (it holds for the thrall's lifetime, not across a restart), which makes it
+complementary to the command-key: handler dedup stops double-processing while the thrall is alive,
+the event log keeps the write single even across a restart. All three SDKs; see [DESIGN §13c](./DESIGN.md).
+
 ## Singleton fencing (liveness, not write-exclusivity)
 
 A `scope="singleton"` thrall holds a KV-CAS lock, and if it loses that lock (a new holder took it,

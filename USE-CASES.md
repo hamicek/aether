@@ -60,6 +60,12 @@ replaying the log, not from a snapshot - "the log is truth").
 **Runs:** [`examples/counter/aether-durable.toml`](./examples/counter) (durable mailbox) +
 [`examples/eventsourced`](./examples/eventsourced) (state survives a restart by replay).
 
+**Two mechanisms sharpen it** for at-least-once delivery: mark the worker `Idempotent` so a
+redelivered task is deduplicated (a duplicate cast is skipped, a duplicate call returns the first
+reply - [DESIGN.md §13c](./DESIGN.md)), and return `Escalate(reason)` from the handler to let a
+worker crash on a task it cannot process, so the lord restarts it clean instead of the code reaching
+for `os.Exit` ([DESIGN.md §8](./DESIGN.md)).
+
 ## 5. An HTTP / SSE front over a supervised backend
 
 **You have** a backend of several supervised processes and want a REST/HTTP front plus live push to a
