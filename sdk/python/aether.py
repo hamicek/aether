@@ -399,6 +399,50 @@ class Escalate(Exception):
 _exit_process: Callable[[int], None] = os._exit
 
 
+# defaultIdempotencyMax bounds the dedup cache when a thrall enables idempotence without a size.
+_DEFAULT_IDEMPOTENCY_MAX = 1024
+
+
+def _dedup_key(e: dict) -> str:
+    """The idempotency key an idempotent thrall deduplicates on: the caller-supplied idem when set,
+    else the per-send envelope id. Keying on id never conflates two distinct sends (each mints a
+    fresh id) but still catches an exact redelivery of the same message."""
+    return e.get("idem") or e.get("id") or ""
+
+
+class _DedupCache:
+    """Bounded, generational (FIFO) cache of processed idempotency keys and their cached call
+    replies. Two generations bound memory at ~2*max with O(1) inserts and no LRU list: when the
+    current generation fills it becomes the previous one and a fresh current starts; a lookup
+    checks both. A cast stores None (presence in the dict means "already processed"). Not
+    thread-safe - the caller (the serialized mailbox) holds its lock.
+    """
+
+    _MISS = object()
+
+    def __init__(self, max_entries: int) -> None:
+        self.max = max_entries if max_entries > 0 else _DEFAULT_IDEMPOTENCY_MAX
+        self.current: dict[str, Any] = {}
+        self.previous: dict[str, Any] = {}
+
+    def get(self, key: str) -> tuple[Any, bool]:
+        """Return (cached_reply, seen); cached_reply is None for a cast or a miss."""
+        v = self.current.get(key, self._MISS)
+        if v is self._MISS:
+            v = self.previous.get(key, self._MISS)
+        if v is self._MISS:
+            return None, False
+        return v, True
+
+    def put(self, key: str, reply: Any) -> None:
+        """Record a processed key with its cached reply (None for a cast), rotating generations
+        when the current one is full."""
+        if len(self.current) >= self.max:
+            self.previous = self.current
+            self.current = {}
+        self.current[key] = reply
+
+
 @dataclass
 class SpawnSpec:
     # Request to spawn a child at runtime. Mirrors internal/wire.SpawnSpec: the subset of
@@ -456,12 +500,16 @@ class Ctx:
     # have the resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
     singleton_epoch: int = 0
 
-    async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0) -> Any:
+    async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
+                   idempotency_key: str | None = None) -> Any:
         """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
-        message carries the trace of the message currently being handled."""
+        message carries the trace of the message currently being handled. idempotency_key: on an
+        idempotent thrall a retry carrying the same key returns the first reply. See AE-077."""
         req = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "call",
                "to": target, "op": op, "payload": payload if payload is not None else {},
                "ts": int(time.time() * 1000)}
+        if idempotency_key:
+            req["idem"] = idempotency_key
         msg = await self.nats.request(_sub_call(self.app, target), _encode(req), timeout=timeout)
         reply = _decode(msg.data)
         if reply.get("status") == "error":
@@ -469,11 +517,15 @@ class Ctx:
             raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
         return reply.get("payload")
 
-    async def cast(self, target: str, op: str, payload: Any = None) -> None:
-        """Trace-propagating fire-and-forget to another thrall (GenServer.cast)."""
+    async def cast(self, target: str, op: str, payload: Any = None,
+                   idempotency_key: str | None = None) -> None:
+        """Trace-propagating fire-and-forget to another thrall (GenServer.cast). idempotency_key:
+        on an idempotent thrall a duplicate cast with the same key is skipped. See AE-077."""
         e = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "cast",
              "to": target, "op": op, "payload": payload if payload is not None else {},
              "ts": int(time.time() * 1000)}
+        if idempotency_key:
+            e["idem"] = idempotency_key
         await self.nats.publish(_sub_cast(self.app, target), _encode(e))
 
     async def append(self, event: Any, dedup_key: str | None = None) -> None:
@@ -503,10 +555,18 @@ class ThrallDef:
     handle_call: dict[str, CallHandler] = field(default_factory=dict)
     handle_cast: dict[str, CastHandler] = field(default_factory=dict)
     terminate: Optional[Callable[[str, Any], None]] = None
+    # idempotent turns on in-memory dedup of call/cast by idempotency key (call/cast
+    # idempotency_key, else the envelope id): a duplicate cast is skipped and a duplicate call
+    # returns the first reply. In-memory only - it does not survive a restart. See AE-077.
+    idempotent: bool = False
+    # idempotency_max bounds the dedup cache (0 = a sensible default). Ignored unless idempotent.
+    idempotency_max: int = 0
 
 
-def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None) -> ThrallDef:
-    return ThrallDef(name, init, handle_call or {}, handle_cast or {}, terminate)
+def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None,
+               idempotent=False, idempotency_max=0) -> ThrallDef:
+    return ThrallDef(name, init, handle_call or {}, handle_cast or {}, terminate,
+                     idempotent, idempotency_max)
 
 
 async def _maybe(v):
@@ -549,6 +609,10 @@ async def start(defn: ThrallDef) -> None:
     lock = asyncio.Lock()  # serialized mailbox: 1 handler changes state at a time
     stats = _MailboxStats()
 
+    # Optional in-memory dedup by idempotency key. Accessed only under the mailbox lock, so it
+    # needs no lock of its own. None unless the thrall opts in.
+    dedup = _DedupCache(defn.idempotency_max) if defn.idempotent else None
+
     async def process_call(e: dict, msg) -> None:
         nonlocal state
         start = stats.begin()
@@ -561,8 +625,16 @@ async def start(defn: ThrallDef) -> None:
                 if handler is None:
                     await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
                     return
+                if dedup is not None:
+                    cached, seen = dedup.get(_dedup_key(e))
+                    if seen:
+                        # A duplicate call: return the first reply instead of re-running the handler.
+                        await msg.respond(_encode(_ok_reply(e, cached)))
+                        return
                 try:
                     reply, state = await _maybe(handler(e.get("payload"), state, ctx))
+                    if dedup is not None:
+                        dedup.put(_dedup_key(e), reply)  # cache only a successful reply
                     await msg.respond(_encode(_ok_reply(e, reply)))
                 except Escalate as esc:
                     # Reply the caller before we crash, so it learns of the restart instead of
@@ -590,8 +662,14 @@ async def start(defn: ThrallDef) -> None:
                 ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_cast.get(e.get("op"))
                 if handler is not None:
+                    if dedup is not None:
+                        _, seen = dedup.get(_dedup_key(e))
+                        if seen:
+                            return  # already processed; a durable cast is acked by the consume loop
                     try:
                         state = await _maybe(handler(e.get("payload"), state, ctx))
+                        if dedup is not None:
+                            dedup.put(_dedup_key(e), None)  # mark processed only after success
                     except Escalate as esc:
                         # Ack the poison cast before crashing so JetStream does not redeliver it
                         # into a crash loop; a non-durable cast (ack_durable None) is dropped.
