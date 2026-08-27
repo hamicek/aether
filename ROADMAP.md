@@ -15,16 +15,19 @@ lord-liveness fencing, so a shared-bus hiccup does not reap the whole tree. A ha
 typed **let-it-crash** by returning/throwing `Escalate(reason)`: the SDK terminates the thrall with
 an abnormal exit so the lord restarts it through `init` per policy (a call caller first gets a
 distinguishable `"escalated"` reply), instead of a manual `panic`/`os.Exit` - see
-[DESIGN.md §8](./DESIGN.md).
+[DESIGN.md §8](./DESIGN.md). **One lord per app is enforced at startup** (best-effort): a second lord
+for an app that already has a live incumbent - detected by the incumbent's active lease renewal /
+KV-revision progress, not identity - refuses to start rather than stomping the lease and crash-looping
+the tree ([DESIGN.md §14](./DESIGN.md)).
 
 Still open:
 
 - **`temporary` restart policy inside group strategies.** `temporary` is honoured under
   `one_for_one`, but its interaction with `one_for_all` / `rest_for_one` group restarts is not
   yet fully specified.
-- **Single-lord enforcement.** "One lord per app" is assumed, not enforced at startup; a naive
-  refusal conflicts with the singleton-failover model (two lords per app racing for a lock), so
-  it needs a per-lord-instance lease rather than the per-app one - see [DESIGN.md §14](./DESIGN.md).
+- **Race-free single-lord start.** The enforcement above is best-effort: two lords starting for the
+  same app inside the same ~1.5s window can still both come up before either sees the other. Closing
+  that fully needs a per-lord-instance lease rather than the per-app one - see [DESIGN.md §14](./DESIGN.md).
 - **Dynamic-child fencing opt-out.** `fencing = false` applies to manifest thralls; a dynamic
   child (`StartChild`) is always fenced (the spawn API carries no opt-out yet).
 

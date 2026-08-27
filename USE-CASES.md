@@ -66,6 +66,13 @@ reply - [DESIGN.md §13c](./DESIGN.md)), and return `Escalate(reason)` from the 
 worker crash on a task it cannot process, so the lord restarts it clean instead of the code reaching
 for `os.Exit` ([DESIGN.md §8](./DESIGN.md)).
 
+**One caveat on `replicas`:** a queue group spreads each task to *one of* the workers, so it fits
+**stateless** work (or work partitioned by an external key). A *stateful* actor whose in-memory state
+must be authoritative - one whose identity matters, like a per-entity aggregate - must be a **single
+instance** (`scope = "singleton"`, or one thrall per key), not a replica pool: pooling would split
+that entity's messages across replicas that each hold a divergent copy. `replicas` scales the
+stateless tier, singletons own the stateful one.
+
 ## 5. An HTTP / SSE front over a supervised backend
 
 **You have** a backend of several supervised processes and want a REST/HTTP front plus live push to a
