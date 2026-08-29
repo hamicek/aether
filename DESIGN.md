@@ -911,10 +911,16 @@ aligned with the rest of the design:
   self-declared version alone only exposes if you read both numbers by eye. The mismatch is *derived*
   at render time (reported vs expected), never a stored flag, so it self-heals the moment the two
   line up; like the edge-route op check it is asynchronous, since a thrall reports only after startup.
-- **Metadata is shown, not turned into Prometheus labels.** It appears in `ps` / `describe` /
-  `fleet` and could feed an application dashboard, but mapping it onto metric labels is left out on
-  purpose: a high-cardinality value (a PLC address, an id) would explode the series count. An
-  allowlisted low-cardinality subset is a possible follow-up.
+- **Metadata is shown, and mapped onto metric labels only by an allowlist.** It appears in `ps` /
+  `describe` / `fleet` and could feed an application dashboard. It is *not* turned into Prometheus
+  labels by default - a high-cardinality value (a PLC address, an id) would explode the series count.
+  A per-thrall metric therefore carries only the `name` label until the operator opts in with
+  `[observability] metadata_labels = ["site", "criticality"]`, which projects just those
+  (low-cardinality) keys onto every per-thrall series - each series carries all allowlisted keys,
+  empty for a thrall that lacks one, so the label set stays consistent and a `sum by (site)` works.
+  Because the same enriched label set writes and deletes a series, a stopped dynamic thrall still
+  leaves no orphan. The allowlist is a global observability *policy* (which keys are label-safe),
+  which is why it sits in `[observability]` rather than being scattered per thrall.
 
 `last_error` resets on restart, like `processed_total` - it is process-local. On an *escalation* the
 thrall would die before its next scheduled beat, so it publishes one final "dying breath" heartbeat

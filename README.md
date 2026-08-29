@@ -633,9 +633,12 @@ Three choices make it honest and cheap:
   final "dying breath" heartbeat carrying the reason before it exits.
 - **Metadata is the operator's, not the code's.** A `[[thrall]]` can carry `metadata = { site =
   "A", plc = "10.0.0.5" }` - a deployment fact. The lord attaches it from the manifest (it does not
-  round-trip through the thrall) and shows it in `ps` / `describe` / `fleet`. It is deliberately kept
-  out of the Prometheus labels, where a high-cardinality value (a PLC address, an id) would explode
-  the series count.
+  round-trip through the thrall) and shows it in `ps` / `describe` / `fleet`. By default it stays
+  **out of the Prometheus labels**, where a high-cardinality value (a PLC address, an id) would
+  explode the series count. To slice metrics by a *low-cardinality* key, opt in with an allowlist:
+  `[observability] metadata_labels = ["site", "criticality"]` projects just those keys onto the
+  per-thrall metrics (`aether_thrall_rss_bytes{name="...",site="A"}`), so you can group RSS by site
+  or alarms by criticality in Grafana. Keep the list to keys with few values - never a PLC address.
 
 A `[[thrall]]` can also declare `expected_version = "1.4.0"` - the build the operator says *should*
 run there. The lord compares it against the version the thrall reports and raises a **rollout

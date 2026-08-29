@@ -10,21 +10,27 @@ mode = "embedded"
 
 [observability]
 metrics_addr = "127.0.0.1:7391"
+# Project these low-cardinality metadata keys onto the per-thrall metric labels, so /metrics carries
+# e.g. aether_thrall_rss_bytes{name="counter-go",site="demo",lang="go"}. Keep the list low-cardinality.
+metadata_labels = ["site", "lang"]
 
 [[thrall]]
 name = "counter"
 cmd  = "bun run ./counter.ts"
 restart = "permanent"
 scope   = "local"
+metadata = { site = "demo", lang = "ts" }
 
 [[thrall]]
 name = "counter-py"
 cmd  = "PYTHONPATH=../../sdk/python .venv/bin/python counter_py.py"
 restart = "permanent"
 scope   = "local"
+metadata = { site = "demo", lang = "py" }
 
 [[thrall]]
 name = "counter-go"
 cmd  = "../../bin/counter-go"
 restart = "permanent"
 scope   = "local"
+metadata = { site = "demo", lang = "go" }
