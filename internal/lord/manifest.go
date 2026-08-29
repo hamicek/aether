@@ -130,6 +130,13 @@ type ThrallSpec struct {
 	// dashboard can key off it. It is deliberately NOT mapped to Prometheus labels: a high-cardinality
 	// value (a PLC address, an id) would explode the series count. Optional.
 	Metadata map[string]string `toml:"metadata"`
+
+	// ExpectedVersion is the build the operator declares SHOULD run here. The lord compares it against
+	// the version the thrall reports in its self-description (AE-079) and raises a rollout mismatch
+	// alarm when they differ - catching a stale binary shipped with the right manifest. It is the
+	// operator's intent (contrast the thrall's own Version, a fact about the code), so it lives in the
+	// manifest and is attached lord-side, never round-tripped through the thrall. Empty = no check.
+	ExpectedVersion string `toml:"expected_version"`
 }
 
 // fencingEnabled reports whether the thrall takes part in lord-liveness fencing (the default). An

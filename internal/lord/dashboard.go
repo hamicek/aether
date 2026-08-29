@@ -162,6 +162,9 @@ type dashboardThrall struct {
 	Metrics  thrallMetricSnapshot `json:"metrics"`
 	// Metadata is the operator-declared deployment tags from the manifest (site, PLC, criticality).
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// ExpectedVersion is the build the operator declared should run here (manifest); compared against
+	// the reported Metrics.Describe.Version to surface a rollout mismatch.
+	ExpectedVersion string `json:"expected_version,omitempty"`
 }
 
 // treeSnapshot builds the read-only view from the lord's in-memory state: the manifest, the
@@ -185,17 +188,18 @@ func (l *Lord) treeSnapshot() dashboardTree {
 		}
 		m := metrics[ch.spec.Name] // zero value until the thrall reports
 		thralls = append(thralls, dashboardThrall{
-			Name:     ch.spec.Name,
-			Status:   m.Status,
-			Scope:    scope,
-			Restart:  restart,
-			Replicas: ch.spec.Replicas,
-			Durable:  ch.spec.Durable,
-			EventLog: ch.spec.EventLog,
-			Dynamic:  ch.dynamic,
-			Live:     ch.live.Load(),
-			Metrics:  m,
-			Metadata: ch.spec.Metadata,
+			Name:            ch.spec.Name,
+			Status:          m.Status,
+			Scope:           scope,
+			Restart:         restart,
+			Replicas:        ch.spec.Replicas,
+			Durable:         ch.spec.Durable,
+			EventLog:        ch.spec.EventLog,
+			Dynamic:         ch.dynamic,
+			Live:            ch.live.Load(),
+			Metrics:         m,
+			Metadata:        ch.spec.Metadata,
+			ExpectedVersion: ch.spec.ExpectedVersion,
 		})
 	}
 

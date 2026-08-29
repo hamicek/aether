@@ -637,6 +637,12 @@ Three choices make it honest and cheap:
   out of the Prometheus labels, where a high-cardinality value (a PLC address, an id) would explode
   the series count.
 
+A `[[thrall]]` can also declare `expected_version = "1.4.0"` - the build the operator says *should*
+run there. The lord compares it against the version the thrall reports and raises a **rollout
+mismatch** (a warning logged once, and a `! version mismatch` marker in `ps` / `describe` / `fleet`)
+when they differ, so a stale binary shipped with the right manifest is caught instead of read off two
+numbers by hand. The mismatch clears on its own once the versions line up.
+
 ## Quickstart
 
 The default demo (`aether.toml`) is polyglot, so it needs Go, Bun and Python. Build the runtime

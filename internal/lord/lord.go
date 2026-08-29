@@ -100,6 +100,12 @@ type Lord struct {
 	edgeWarnMu   sync.Mutex
 	edgeOpWarned map[string]bool
 
+	// versionWarned records which rollout mismatches have already been logged, keyed by
+	// name + reported version, so a mismatch warns once (and re-warns if the reported version
+	// changes). Guarded by versionWarnMu.
+	versionWarnMu sync.Mutex
+	versionWarned map[string]bool
+
 	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
 	hbMissAfter  time.Duration // no heartbeat for this long -> stale
 	hbCheckEvery time.Duration // how often the reaper checks
@@ -151,6 +157,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		lastSeen:           map[string]time.Time{},
 		statusApplied:      map[string]uint64{},
 		edgeOpWarned:       map[string]bool{},
+		versionWarned:      map[string]bool{},
 		hbMissAfter:        hbInterval * time.Duration(misses),
 		hbCheckEvery:       hbInterval,
 		backlogPollEvery:   backlogPollInterval,
@@ -750,7 +757,9 @@ func (l *Lord) onHeartbeat(name string, data []byte) {
 		return
 	}
 	l.recordHeartbeatMetrics(name, data)
-	l.checkEdgeOps(name, l.metrics.describeFor(name))
+	describe := l.metrics.describeFor(name)
+	l.checkEdgeOps(name, describe)
+	l.checkExpectedVersion(name, describe)
 	l.mu.Lock()
 	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
 	announce := !l.ready[name] || l.stale[name]
@@ -819,6 +828,38 @@ func (l *Lord) checkEdgeOps(name string, d *wire.ThrallDescribe) {
 					slog.String("thrall", name), slog.String("op", r.Op), slog.String("kind", r.Kind))
 			}
 		}
+	}
+}
+
+// checkExpectedVersion raises a rollout mismatch alarm when a thrall reports a version that differs
+// from the one the operator declared in the manifest (`expected_version`). Like the ops check it is
+// asynchronous - thralls start after the load - and best surfaced once the thrall describes itself.
+// A thrall with no declared expectation is skipped; a reported-empty version against a set
+// expectation is itself a mismatch ("should be 1.4.0, reports nothing"). The warning is logged once
+// per (thrall, reported version), so a corrected version re-arms the alarm for a future regression
+// but a steady mismatch does not spam every heartbeat. The machine-readable mismatch is derived at
+// render time (registry Version vs ExpectedVersion), so it self-heals without a stored flag to clear.
+func (l *Lord) checkExpectedVersion(name string, d *wire.ThrallDescribe) {
+	ch := l.childByName(name)
+	if ch == nil || ch.spec.ExpectedVersion == "" {
+		return
+	}
+	var reported string
+	if d != nil {
+		reported = d.Version
+	}
+	if reported == ch.spec.ExpectedVersion {
+		return
+	}
+	wkey := name + "\x00" + reported
+	l.versionWarnMu.Lock()
+	warned := l.versionWarned[wkey]
+	l.versionWarned[wkey] = true
+	l.versionWarnMu.Unlock()
+	if !warned {
+		l.log.Warn("thrall version does not match the expected version (rollout mismatch)",
+			slog.String("thrall", name), slog.String("expected", ch.spec.ExpectedVersion),
+			slog.String("reported", reported))
 	}
 }
 
@@ -937,6 +978,7 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 	}
 	if ch := l.childByName(name); ch != nil {
 		entry.Metadata = ch.spec.Metadata
+		entry.ExpectedVersion = ch.spec.ExpectedVersion
 	}
 	if err := l.reg.Set(name, entry); err != nil {
 		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))
