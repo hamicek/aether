@@ -64,9 +64,9 @@ func TestCheckEdgeOpsWarnsOnUnknownOp(t *testing.T) {
 		manifest: &Manifest{Edge: Edge{HTTP: []EdgeHTTPSpec{{
 			Name: "api", Addr: ":8080",
 			Routes: map[string]EdgeRoute{
-				"GET /value":      {Thrall: "counter", Op: "get", Kind: "call"},   // valid call op
-				"POST /increment": {Thrall: "counter", Op: "incr", Kind: "cast"},  // typo: incr, not inc
-				"POST /bad-kind":  {Thrall: "counter", Op: "get", Kind: "cast"},   // op exists but as a call, not a cast
+				"GET /value":      {Thrall: "counter", Op: "get", Kind: "call"},  // valid call op
+				"POST /increment": {Thrall: "counter", Op: "incr", Kind: "cast"}, // typo: incr, not inc
+				"POST /bad-kind":  {Thrall: "counter", Op: "get", Kind: "cast"},  // op exists but as a call, not a cast
 			},
 		}}}},
 	}
