@@ -78,10 +78,25 @@ type thrallMetricSnapshot struct {
 type lordMetrics struct {
 	reg *obs.Metrics
 
+	// labelsFor returns the label set for a per-thrall metric series - the name plus any allowlisted
+	// metadata labels the lord projects. The lord sets it after construction; it is nil in metric-only
+	// unit tests, where the bare name label is the whole set. It must be stable for a given name (the
+	// same set is used to write and to delete a series), which holds: the allowlist and a thrall's
+	// metadata are fixed for its lifetime.
+	labelsFor func(name string) map[string]string
+
 	mu       sync.Mutex
 	status   map[string]string               // thrall name -> last status
 	raw      map[string]*thrallRaw           // thrall name -> latest raw values
 	describe map[string]*wire.ThrallDescribe // thrall name -> latest self-description
+}
+
+// labels returns the label set for a per-thrall metric series (see labelsFor).
+func (lm *lordMetrics) labels(name string) map[string]string {
+	if lm.labelsFor != nil {
+		return lm.labelsFor(name)
+	}
+	return map[string]string{"name": name}
 }
 
 func newLordMetrics() *lordMetrics {
@@ -173,7 +188,7 @@ func (lm *lordMetrics) forget(name string) {
 	lm.recompute()
 	lm.mu.Unlock()
 
-	labels := map[string]string{"name": name}
+	labels := lm.labels(name)
 	for _, mname := range perThrallMetrics {
 		lm.reg.Delete(mname, labels)
 	}
@@ -194,21 +209,21 @@ func (lm *lordMetrics) incRestart(name string) {
 	lm.mu.Lock()
 	lm.rawFor(name).restarts++
 	lm.mu.Unlock()
-	lm.reg.Inc(metricRestarts, map[string]string{"name": name})
+	lm.reg.Inc(metricRestarts, lm.labels(name))
 }
 
 func (lm *lordMetrics) incGaveUp(name string) {
 	lm.mu.Lock()
 	lm.rawFor(name).gaveUp++
 	lm.mu.Unlock()
-	lm.reg.Inc(metricGaveUp, map[string]string{"name": name})
+	lm.reg.Inc(metricGaveUp, lm.labels(name))
 }
 
 func (lm *lordMetrics) incHeartbeatMiss(name string) {
 	lm.mu.Lock()
 	lm.rawFor(name).heartbeatMiss++
 	lm.mu.Unlock()
-	lm.reg.Inc(metricHeartbeatMiss, map[string]string{"name": name})
+	lm.reg.Inc(metricHeartbeatMiss, lm.labels(name))
 }
 
 // recordHeartbeat folds a thrall's self-reported mailbox metrics into the registry and the raw
@@ -227,7 +242,7 @@ func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	}
 	lm.mu.Unlock()
 
-	labels := map[string]string{"name": name}
+	labels := lm.labels(name)
 	lm.reg.Set(metricMailboxDepth, labels, float64(hm.MailboxDepth))
 	lm.reg.Set(metricMailboxLat, labels, hm.MailboxLatencyMs)
 	lm.reg.Set(metricProcessed, labels, float64(hm.ProcessedTotal))
@@ -275,7 +290,7 @@ func (lm *lordMetrics) recordBacklog(name string, pending float64) {
 	lm.mu.Lock()
 	lm.rawFor(name).durableBacklog = pending
 	lm.mu.Unlock()
-	lm.reg.Set(metricDurableBacklog, map[string]string{"name": name}, pending)
+	lm.reg.Set(metricDurableBacklog, lm.labels(name), pending)
 }
 
 // recordProcStats stores a thrall's process-group resident memory (bytes) and CPU usage (percent)
@@ -287,7 +302,7 @@ func (lm *lordMetrics) recordProcStats(name string, rssBytes int64, cpuPercent f
 	r.cpuPercent = cpuPercent
 	lm.mu.Unlock()
 
-	labels := map[string]string{"name": name}
+	labels := lm.labels(name)
 	lm.reg.Set(metricThrallRSS, labels, float64(rssBytes))
 	lm.reg.Set(metricThrallCPU, labels, cpuPercent)
 }

@@ -164,6 +164,9 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		procStatsPollEvery: procStatsPollInterval,
 		fleetHealthEvery:   time.Duration(m.Observability.FleetHealthIntervalMs) * time.Millisecond,
 	}
+	// Project the allowlisted thrall metadata onto the per-thrall metric labels (a no-op when
+	// metadata_labels is empty). Set after construction so the closure can read l.manifest / children.
+	l.metrics.labelsFor = l.enrichedLabels
 	// Credentials the lord hands its children (thralls and built-in edges are all the thrall role).
 	// ClientCredentials picks the right source (secured embedded vs external); in the least-privilege
 	// tier this is the thrall identity, never the lord's. Empty paths (unsecured bus) inject nothing.
@@ -861,6 +864,28 @@ func (l *Lord) checkExpectedVersion(name string, d *wire.ThrallDescribe) {
 			slog.String("thrall", name), slog.String("expected", ch.spec.ExpectedVersion),
 			slog.String("reported", reported))
 	}
+}
+
+// enrichedLabels builds the Prometheus label set for a thrall's per-thrall metrics: the name label
+// plus each allowlisted metadata key (observability.metadata_labels), with the thrall's value or ""
+// when it lacks the key - so every series of a metric carries the same label set. With no allowlist
+// it is just the name label (today's behaviour). It is the labelsFor injected into lordMetrics, and
+// must be stable for a name (used to both write and delete a series): the allowlist and a thrall's
+// metadata are fixed for its lifetime.
+func (l *Lord) enrichedLabels(name string) map[string]string {
+	labels := map[string]string{"name": name}
+	keys := l.manifest.Observability.MetadataLabels
+	if len(keys) == 0 {
+		return labels
+	}
+	var meta map[string]string
+	if ch := l.childByName(name); ch != nil {
+		meta = ch.spec.Metadata
+	}
+	for _, k := range keys {
+		labels[k] = meta[k] // "" when meta is nil or lacks the key - keeps the label set consistent
+	}
+	return labels
 }
 
 // containsString reports whether s is in the (small, sorted) slice ops.

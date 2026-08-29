@@ -738,6 +738,34 @@ event_log_use = "audit"
 	}
 }
 
+// TestManifestMetadataLabels proves the metadata-label allowlist parses, and that an empty or
+// reserved label name is rejected at load (it would corrupt the exposition or overwrite a built-in
+// label).
+func TestManifestMetadataLabels(t *testing.T) {
+	m, err := LoadManifest(writeManifest(t, `
+[observability]
+metrics_addr = "127.0.0.1:7391"
+metadata_labels = ["site", "criticality"]
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := m.Observability.MetadataLabels; len(got) != 2 || got[0] != "site" || got[1] != "criticality" {
+		t.Errorf("metadata_labels = %v, want [site criticality]", got)
+	}
+
+	for _, bad := range []struct{ list, wantErr string }{
+		{`[""]`, "empty key"},
+		{`["name"]`, "reserved"},
+		{`["status"]`, "reserved"},
+	} {
+		_, err := LoadManifest(writeManifest(t, "[observability]\nmetadata_labels = "+bad.list+"\n"))
+		if err == nil || !strings.Contains(err.Error(), bad.wantErr) {
+			t.Errorf("metadata_labels = %s: got %v, want error containing %q", bad.list, err, bad.wantErr)
+		}
+	}
+}
+
 // TestManifestThrallMetadata proves deployment metadata parses off a thrall and that an empty key
 // (a config typo) is rejected at load.
 func TestManifestThrallMetadata(t *testing.T) {

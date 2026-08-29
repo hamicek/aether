@@ -206,3 +206,59 @@ func TestMetricsSnapshotIncludesProcStats(t *testing.T) {
 		t.Error("forgotten thrall still in snapshot after recordProcStats")
 	}
 }
+
+// TestEnrichedLabels covers the metadata->label projection: an allowlisted key present in the
+// thrall's metadata becomes a label with its value; an allowlisted key the thrall lacks becomes an
+// empty label (so the label set stays consistent across series); a non-allowlisted key is dropped;
+// and no allowlist yields just the name label.
+func TestEnrichedLabels(t *testing.T) {
+	l := &Lord{
+		manifest: &Manifest{Observability: Observability{MetadataLabels: []string{"site", "criticality"}}},
+		children: []*child{
+			{spec: ThrallSpec{Name: "pump", Metadata: map[string]string{"site": "A", "plc": "10.0.0.5"}}},
+			{spec: ThrallSpec{Name: "bare"}},
+		},
+	}
+	if got := l.enrichedLabels("pump"); got["name"] != "pump" || got["site"] != "A" || got["criticality"] != "" {
+		t.Errorf("pump labels = %v, want name=pump site=A criticality=\"\"", got)
+	}
+	if _, ok := l.enrichedLabels("pump")["plc"]; ok {
+		t.Error("a non-allowlisted key (plc) must not become a label")
+	}
+	if got := l.enrichedLabels("bare"); got["site"] != "" || got["criticality"] != "" {
+		t.Errorf("bare labels = %v, want empty site/criticality (consistent label set)", got)
+	}
+
+	noList := &Lord{manifest: &Manifest{}, children: []*child{{spec: ThrallSpec{Name: "pump"}}}}
+	if got := noList.enrichedLabels("pump"); len(got) != 1 || got["name"] != "pump" {
+		t.Errorf("no allowlist labels = %v, want just name=pump", got)
+	}
+}
+
+// TestMetadataLabelsInExposition proves the projected labels reach /metrics and that a forgotten
+// thrall's enriched series is deleted (no orphan) - the same labelsFor is used to write and delete.
+func TestMetadataLabelsInExposition(t *testing.T) {
+	l := newTestLord()
+	l.manifest = &Manifest{Observability: Observability{MetadataLabels: []string{"site"}}}
+	l.children = []*child{
+		{spec: ThrallSpec{Name: "pump", Metadata: map[string]string{"site": "A"}}},
+		{spec: ThrallSpec{Name: "bare"}},
+	}
+	l.metrics.labelsFor = l.enrichedLabels
+
+	l.metrics.recordHeartbeat("pump", wire.HeartbeatMetrics{MailboxDepth: 3})
+	l.metrics.recordHeartbeat("bare", wire.HeartbeatMetrics{MailboxDepth: 1})
+
+	out := scrape(t, l)
+	if !strings.Contains(out, `aether_mailbox_depth{name="pump",site="A"} 3`) {
+		t.Errorf("expected pump's series to carry site=A\n%s", out)
+	}
+	if !strings.Contains(out, `aether_mailbox_depth{name="bare",site=""} 1`) {
+		t.Errorf("expected bare's series to carry an empty site (consistent label set)\n%s", out)
+	}
+
+	l.metrics.forget("pump")
+	if out := scrape(t, l); strings.Contains(out, `name="pump"`) {
+		t.Errorf("forget must delete the enriched series, no orphan left\n%s", out)
+	}
+}

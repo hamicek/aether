@@ -40,6 +40,13 @@ type Observability struct {
 	// FleetHealthIntervalMs is how often the fleet summary is published. Default 5000 (the fleet is
 	// a coarser view than per-node metrics); ignored when FleetHealth is false.
 	FleetHealthIntervalMs int `toml:"fleet_health_interval_ms"`
+	// MetadataLabels is the allowlist of thrall metadata keys projected onto the per-thrall Prometheus
+	// metrics as labels (e.g. ["site", "criticality"]) - opt-in, because metadata is deliberately kept
+	// off the labels by default: a high-cardinality value (a PLC address, an id) would explode the
+	// series count. Only these keys become labels; every per-thrall series carries all of them (empty
+	// for a thrall that lacks the key) so the label set stays consistent. Keep it to low-cardinality
+	// keys. Empty = today's behaviour (only the name label).
+	MetadataLabels []string `toml:"metadata_labels"`
 }
 
 // Liveness tunes how fast a hung-but-alive thrall is detected. The interval is propagated to the
@@ -246,6 +253,17 @@ func (m *Manifest) validate() error {
 	// and the publish a silent no-op, so require the app when the feature is on.
 	if m.Observability.FleetHealth && m.App == "" {
 		return fmt.Errorf("observability: fleet_health = true requires a top-level app (it publishes on aether._fleet.<app>.<lord>)")
+	}
+	// metadata_labels become Prometheus label names; an empty one is malformed, and "name"/"status"
+	// are already used by the per-thrall and per-status series, so allowing them would silently
+	// overwrite an existing label. Reject both rather than corrupt the exposition.
+	for _, key := range m.Observability.MetadataLabels {
+		if key == "" {
+			return fmt.Errorf("observability: metadata_labels contains an empty key")
+		}
+		if key == "name" || key == "status" {
+			return fmt.Errorf("observability: metadata_labels %q is reserved (used by the built-in metric labels)", key)
+		}
 	}
 	// Names must be unique across thralls and edge servers - they share the supervision namespace
 	// (registry key, control subject, fencing) and a collision would cross their wires.
