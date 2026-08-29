@@ -29,6 +29,17 @@ const cases: Record<string, Envelope> = {
     payload: { mailbox_depth: 2, mailbox_latency_ms: 1.5, processed_total: 10 },
     ts: 1700000000003,
   },
+  hb_describe: {
+    v: 1, kind: "hb", to: "counter",
+    payload: {
+      mailbox_depth: 0, mailbox_latency_ms: 0, processed_total: 3,
+      describe: {
+        call_ops: ["get", "value"], cast_ops: ["inc", "reset"], version: "1.2.0",
+        last_error: "handler_error: boom", last_error_ms: 1700000000005,
+      },
+    },
+    ts: 1700000000006,
+  },
   ctl: { v: 1, kind: "ctl", op: "drain" },
   minimal: { v: 1, kind: "call" },
 };

@@ -38,6 +38,9 @@ export interface EventManagerDef {
   name: string;
   handlers: Record<string, EventHandler>;
   terminate?: (reason: string) => void | Promise<void>;
+  // version is the manager's self-declared build, reported in the heartbeat's self-description
+  // (see ThrallDef.version). Optional; omitted means unversioned.
+  version?: string;
 }
 
 // EventBus is the serialized fan-out core, independent of NATS (so it is unit-testable).
@@ -178,7 +181,9 @@ export async function startEvent(def: EventManagerDef): Promise<void> {
     }
   })();
 
-  startHeartbeat(nc, name, () => bus.snapshot());
+  // An event manager fans every event out to all handlers, so it declares no per-op contract; its
+  // self-description carries only the version.
+  startHeartbeat(nc, name, () => bus.snapshot(), () => (def.version ? { version: def.version } : {}));
   await startFencingIfSingleton(nc, name, log);
   await startLordLivenessFencing(nc, name, log);
 }
