@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -75,6 +76,30 @@ type FSM[D any] struct {
 	Init      func(ctx *Ctx) (D, error)
 	States    map[string]State[D]
 	Terminate func(reason, state string, data D)
+	// Version is the machine's self-declared build, reported to the lord in the heartbeat's
+	// self-description (see thrall.Def.Version). Optional; empty means unversioned.
+	Version string
+}
+
+// describe builds the FSM's self-description: the union of every state's reaction ops (each is
+// dispatchable as a call or a cast, so it appears in both sets), plus the reserved _state call op.
+// The developer declares no operations - they are the reaction keys already present in the states.
+func (def FSM[D]) describe() *wire.ThrallDescribe {
+	seen := make(map[string]struct{})
+	for _, st := range def.States {
+		for op := range st.On {
+			seen[op] = struct{}{}
+		}
+	}
+	events := make([]string, 0, len(seen))
+	for op := range seen {
+		events = append(events, op)
+	}
+	callOps := append(events[:len(events):len(events)], fsmStateOp)
+	sort.Strings(callOps)
+	castOps := append([]string(nil), events...)
+	sort.Strings(castOps)
+	return &wire.ThrallDescribe{CallOps: callOps, CastOps: castOps, Version: def.Version}
 }
 
 // stateReply is the payload returned by the reserved _state introspection op.
@@ -176,7 +201,11 @@ func StartFSM[D any](def FSM[D]) error {
 		return err
 	}
 
-	go heartbeat(nc, name, m.stats, stop)
+	fsmDescribe := def.describe()
+	go heartbeat(nc, name, m.stats, func() *wire.ThrallDescribe {
+		d := *fsmDescribe
+		return &d
+	}, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return err

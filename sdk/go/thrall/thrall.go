@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -107,6 +108,26 @@ type Def[S any] struct {
 	Idempotent bool
 	// IdempotencyMax bounds the dedup cache (0 = a sensible default). Ignored unless Idempotent.
 	IdempotencyMax int
+	// Version is the thrall's self-declared build (e.g. "1.4.0"), reported to the lord in the
+	// heartbeat's self-description and surfaced by `aether ps` / `aether describe`. It lives with
+	// the code, so it answers "what actually runs on this node" - unlike a manifest, it cannot go
+	// stale against the binary. Optional; empty means unversioned.
+	Version string
+}
+
+// opNames returns the sorted keys of a handler map (the operations the thrall answers), or nil for
+// an empty map so the describe field is omitted on the wire. Generic over the call/cast handler
+// value types, which differ.
+func opNames[V any](handlers map[string]V) []string {
+	if len(handlers) == 0 {
+		return nil
+	}
+	ops := make([]string, 0, len(handlers))
+	for op := range handlers {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	return ops
 }
 
 var sharedConn *nats.Conn // for Call/Cast from this thrall
@@ -321,7 +342,17 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 
-	go heartbeat(nc, name, stats, stop)
+	// The self-description reported on every heartbeat. Ops and version are static (built once);
+	// the last-error fields stay zero here and are filled in by later work.
+	describe := wire.ThrallDescribe{
+		CallOps: opNames(def.HandleCall),
+		CastOps: opNames(def.HandleCast),
+		Version: def.Version,
+	}
+	go heartbeat(nc, name, stats, func() *wire.ThrallDescribe {
+		d := describe
+		return &d
+	}, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return err
@@ -521,10 +552,15 @@ func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.R
 	return reply.Payload, nil
 }
 
-func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, stop <-chan struct{}) {
+// heartbeat publishes the thrall's liveness beat at the lord-configured interval. describe returns
+// the self-description to attach to each beat (a fresh value per tick, so a mutable field such as the
+// last error is picked up as it changes); it may return nil to attach none.
+func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, describe func() *wire.ThrallDescribe, stop <-chan struct{}) {
 	tick := func() {
+		m := stats.snapshot()
+		m.Describe = describe()
 		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli(),
-			Payload: mustMarshal(stats.snapshot())}
+			Payload: mustMarshal(m)}
 		_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
 	}
 	tick()

@@ -39,6 +39,9 @@ type EventManager struct {
 	Name      string
 	Handlers  []Handler
 	Terminate func(reason string)
+	// Version is the manager's self-declared build, reported in the heartbeat's self-description
+	// (see thrall.Def.Version). Optional; empty means unversioned.
+	Version string
 }
 
 // StartEvent connects an event-manager thrall to the ether and runs its lifecycle. It mirrors
@@ -145,7 +148,11 @@ func StartEvent(def EventManager) error {
 		return err
 	}
 
-	go heartbeat(nc, name, m.stats, stop)
+	// An event manager fans every event out to all handlers, so it declares no per-op contract;
+	// its self-description carries only the version (the ops sets stay empty).
+	go heartbeat(nc, name, m.stats, func() *wire.ThrallDescribe {
+		return &wire.ThrallDescribe{Version: def.Version}
+	}, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return err
