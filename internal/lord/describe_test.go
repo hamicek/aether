@@ -54,6 +54,46 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 	}
 }
 
+// TestCheckEdgeOpsWarnsOnUnknownOp proves the async validation flags an edge route whose op the
+// thrall does not report (against the right call/cast set), leaves a valid route alone, is
+// idempotent (warns once), and skips a thrall that reports no ops.
+func TestCheckEdgeOpsWarnsOnUnknownOp(t *testing.T) {
+	l := &Lord{
+		log:          obs.NewLogger(),
+		edgeOpWarned: map[string]bool{},
+		manifest: &Manifest{Edge: Edge{HTTP: []EdgeHTTPSpec{{
+			Name: "api", Addr: ":8080",
+			Routes: map[string]EdgeRoute{
+				"GET /value":      {Thrall: "counter", Op: "get", Kind: "call"},   // valid call op
+				"POST /increment": {Thrall: "counter", Op: "incr", Kind: "cast"},  // typo: incr, not inc
+				"POST /bad-kind":  {Thrall: "counter", Op: "get", Kind: "cast"},   // op exists but as a call, not a cast
+			},
+		}}}},
+	}
+	d := &wire.ThrallDescribe{CallOps: []string{"get"}, CastOps: []string{"inc"}}
+
+	l.checkEdgeOps("counter", d)
+	if !l.edgeOpWarned["api\x00POST /increment"] {
+		t.Error("a route targeting an unreported op must be flagged")
+	}
+	if !l.edgeOpWarned["api\x00POST /bad-kind"] {
+		t.Error("a cast route targeting a call-only op must be flagged")
+	}
+	if l.edgeOpWarned["api\x00GET /value"] {
+		t.Error("a valid route must not be flagged")
+	}
+
+	// Idempotent: a second pass must not panic and keeps the flags.
+	l.checkEdgeOps("counter", d)
+
+	// A thrall that reports no ops (event manager / edge) is skipped, not falsely flagged.
+	l2 := &Lord{log: obs.NewLogger(), edgeOpWarned: map[string]bool{}, manifest: l.manifest}
+	l2.checkEdgeOps("counter", &wire.ThrallDescribe{Version: "1.0"})
+	if len(l2.edgeOpWarned) != 0 {
+		t.Errorf("a describe with no ops must not flag anything, got %v", l2.edgeOpWarned)
+	}
+}
+
 // TestProbeReportsVersionAndLastError drives a real re-exec'd thrall end-to-end: its self-declared
 // version reaches the registry over the heartbeat, and a plain (non-fatal) handler error is
 // reported as last_error on a later beat while the thrall keeps running.

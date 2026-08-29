@@ -94,6 +94,12 @@ type Lord struct {
 	statusMu      sync.Mutex
 	statusApplied map[string]uint64
 
+	// edgeOpWarned records which (edge, route) mismatches the async op-validation has already
+	// logged, so an edge route pointing at an operation its thrall does not report warns once
+	// rather than on every heartbeat. Guarded by edgeWarnMu.
+	edgeWarnMu   sync.Mutex
+	edgeOpWarned map[string]bool
+
 	// heartbeat miss-detection tuning (defaults from the constants; tests shorten them).
 	hbMissAfter  time.Duration // no heartbeat for this long -> stale
 	hbCheckEvery time.Duration // how often the reaper checks
@@ -144,6 +150,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		stale:              map[string]bool{},
 		lastSeen:           map[string]time.Time{},
 		statusApplied:      map[string]uint64{},
+		edgeOpWarned:       map[string]bool{},
 		hbMissAfter:        hbInterval * time.Duration(misses),
 		hbCheckEvery:       hbInterval,
 		backlogPollEvery:   backlogPollInterval,
@@ -743,6 +750,7 @@ func (l *Lord) onHeartbeat(name string, data []byte) {
 		return
 	}
 	l.recordHeartbeatMetrics(name, data)
+	l.checkEdgeOps(name, l.metrics.describeFor(name))
 	l.mu.Lock()
 	// Announce "ready" on the first heartbeat and again on recovery from a stale outage.
 	announce := !l.ready[name] || l.stale[name]
@@ -775,6 +783,53 @@ func (l *Lord) recordHeartbeatMetrics(name string, data []byte) {
 		return
 	}
 	l.metrics.recordHeartbeat(name, hm)
+}
+
+// checkEdgeOps validates the manifest's edge routes that target this thrall against the operations
+// it just reported. Route targets are checked for existence at manifest load (AE-078), but an
+// operation cannot be: thralls start after the load, so this runs when a thrall first describes
+// itself. A route pointing at an op the thrall does not answer (a typo, or a since-renamed handler)
+// is a warning, logged once - not a fatal error, since it is discovered asynchronously and the
+// route may simply target a thrall whose ops changed. A thrall that reports no ops (an event
+// manager, an edge) is skipped: there is nothing to validate against.
+func (l *Lord) checkEdgeOps(name string, d *wire.ThrallDescribe) {
+	if d == nil || (len(d.CallOps) == 0 && len(d.CastOps) == 0) {
+		return
+	}
+	for _, edge := range l.manifest.Edge.HTTP {
+		for key, r := range edge.Routes {
+			if r.Thrall != name {
+				continue
+			}
+			ops := d.CallOps
+			if r.Kind == "cast" {
+				ops = d.CastOps
+			}
+			if containsString(ops, r.Op) {
+				continue
+			}
+			wkey := edge.Name + "\x00" + key
+			l.edgeWarnMu.Lock()
+			warned := l.edgeOpWarned[wkey]
+			l.edgeOpWarned[wkey] = true
+			l.edgeWarnMu.Unlock()
+			if !warned {
+				l.log.Warn("edge route targets an operation the thrall does not report",
+					slog.String("edge", edge.Name), slog.String("route", key),
+					slog.String("thrall", name), slog.String("op", r.Op), slog.String("kind", r.Kind))
+			}
+		}
+	}
+}
+
+// containsString reports whether s is in the (small, sorted) slice ops.
+func containsString(ops []string, s string) bool {
+	for _, op := range ops {
+		if op == s {
+			return true
+		}
+	}
+	return false
 }
 
 // reapHeartbeats periodically looks for ready thralls that stopped heart-beating (a hung
