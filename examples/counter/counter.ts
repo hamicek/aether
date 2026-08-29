@@ -5,6 +5,7 @@ import { defThrall, start } from "@hamicek/aether";
 // Durability is purely a manifest concern (durable = true), not thrall code.
 const counter = defThrall<number>({
   name: process.env.AETHER_NAME ?? "counter",
+  version: "1.0.0",
 
   init: () => 0,
 

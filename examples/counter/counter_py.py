@@ -13,6 +13,7 @@ name = os.environ.get("AETHER_NAME") or "counter-py"
 
 counter = def_thrall(
     name=name,
+    version="1.0.0",
     init=lambda ctx: 0,
     handle_call={
         "get": lambda payload, state, ctx: (state, state),  # (reply, new_state)

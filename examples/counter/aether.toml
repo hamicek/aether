@@ -22,6 +22,8 @@ name = "counter-go"
 cmd  = "../../bin/counter-go"
 restart = "permanent"
 scope   = "local"
+# Deployment metadata (operator-owned): shown by `aether describe counter-go` / `ps` / `fleet`.
+metadata = { site = "demo", lang = "go" }
 
 [[thrall]]
 name = "gateway"

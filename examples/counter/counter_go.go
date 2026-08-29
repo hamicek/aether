@@ -20,8 +20,9 @@ func main() {
 		name = "counter-go"
 	}
 	def := thrall.Def[int]{
-		Name: name,
-		Init: func(_ *thrall.Ctx) (int, error) { return 0, nil },
+		Name:    name,
+		Version: "1.0.0",
+		Init:    func(_ *thrall.Ctx) (int, error) { return 0, nil },
 
 		HandleCall: map[string]thrall.CallFn[int]{
 			"get": func(_ json.RawMessage, state int, _ *thrall.Ctx) (any, int, error) {

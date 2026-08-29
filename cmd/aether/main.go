@@ -177,12 +177,15 @@ func describeCmd(argv []string) {
 	url := fs.String("url", "", "bus address (default: ."+endpointFile+")")
 	asJSON := fs.Bool("json", false, "print the raw registry entry as JSON")
 	ca, nkey := credFlags(fs)
+	// Parse the leading flags, take the thrall name, then parse any flags that trail it - so both
+	// `describe --json <name>` and `describe <name> --json` work (Go's flag stops at the first
+	// positional argument).
 	_ = fs.Parse(argv)
-
 	if fs.NArg() < 1 {
 		log.Fatal("usage: aether describe <thrall> [--url ...] [--json]")
 	}
 	name := fs.Arg(0)
+	_ = fs.Parse(fs.Args()[1:])
 
 	ep := resolveEndpoint(*url, "", *ca, *nkey)
 	nc := connect(ep)
