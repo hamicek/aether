@@ -80,9 +80,13 @@ type lordMetrics struct {
 
 	// labelsFor returns the label set for a per-thrall metric series - the name plus any allowlisted
 	// metadata labels the lord projects. The lord sets it after construction; it is nil in metric-only
-	// unit tests, where the bare name label is the whole set. It must be stable for a given name (the
-	// same set is used to write and to delete a series), which holds: the allowlist and a thrall's
-	// metadata are fixed for its lifetime.
+	// unit tests, where the bare name label is the whole set.
+	//
+	// The same set must write and delete a series (forget), which holds: the allowlist keys always
+	// come from the (immutable) manifest, so the label KEY set is stable for a name even after the
+	// child is gone; and forget is a dynamic-thrall-only path (stopChild/retireDynamic reject static
+	// thralls), while a dynamic child carries no metadata - so its allowlisted VALUES are empty at
+	// both write and delete. A static thrall (which could carry metadata) is never forgotten mid-run.
 	labelsFor func(name string) map[string]string
 
 	mu       sync.Mutex

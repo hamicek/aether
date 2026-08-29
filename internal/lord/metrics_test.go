@@ -262,3 +262,25 @@ func TestMetadataLabelsInExposition(t *testing.T) {
 		t.Errorf("forget must delete the enriched series, no orphan left\n%s", out)
 	}
 }
+
+// TestForgetAfterChildRemovedNoOrphan mirrors the production ordering: a dynamic thrall is removed
+// from l.children BEFORE forget (stopChild/retireDynamic), so labelsFor can no longer see the child.
+// A dynamic thrall carries no metadata, so the allowlisted values are empty at both write and delete
+// and the enriched series is still deleted - no orphan lingers with a frozen value.
+func TestForgetAfterChildRemovedNoOrphan(t *testing.T) {
+	l := newTestLord()
+	l.manifest = &Manifest{Observability: Observability{MetadataLabels: []string{"site"}}}
+	l.children = []*child{{spec: ThrallSpec{Name: "worker"}, dynamic: true}} // dynamic: no metadata
+	l.metrics.labelsFor = l.enrichedLabels
+
+	l.metrics.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 4})
+	if out := scrape(t, l); !strings.Contains(out, `aether_mailbox_depth{name="worker",site=""} 4`) {
+		t.Fatalf("setup: worker series missing\n%s", out)
+	}
+
+	l.children = nil // the child is gone from the supervision slice before forget runs
+	l.metrics.forget("worker")
+	if out := scrape(t, l); strings.Contains(out, `name="worker"`) {
+		t.Errorf("forget after child removal must leave no orphan series\n%s", out)
+	}
+}
