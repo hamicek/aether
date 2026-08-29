@@ -15,7 +15,7 @@ func (l *Lord) fleetHealth() fleet.Health {
 	tree := l.treeSnapshot()
 	thralls := make([]fleet.ThrallHealth, 0, len(tree.Thralls))
 	for _, t := range tree.Thralls {
-		thralls = append(thralls, fleet.ThrallHealth{
+		h := fleet.ThrallHealth{
 			Name:            t.Name,
 			Status:          t.Status,
 			Scope:           t.Scope,
@@ -32,7 +32,15 @@ func (l *Lord) fleetHealth() fleet.Health {
 			Processed:       t.Metrics.Processed,
 			RSSBytes:        t.Metrics.RSSBytes,
 			CPUPercent:      t.Metrics.CPUPercent,
-		})
+		}
+		if d := t.Metrics.Describe; d != nil {
+			h.Version = d.Version
+			h.CallOps = d.CallOps
+			h.CastOps = d.CastOps
+			h.LastError = d.LastError
+			h.LastErrorMs = d.LastErrorMs
+		}
+		thralls = append(thralls, h)
 	}
 	return fleet.Health{
 		App:        tree.App,

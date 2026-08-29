@@ -151,14 +151,18 @@ func psCmd(argv []string) {
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 
 	now := time.Now().UnixMilli()
-	fmt.Printf("%-14s %-8s %-10s %s\n", "NAME", "PID", "STATUS", "AGE")
+	fmt.Printf("%-14s %-8s %-10s %-10s %s\n", "NAME", "PID", "STATUS", "VERSION", "AGE")
 	for _, e := range list {
 		age := time.Duration(now-e.UpdatedMs) * time.Millisecond
 		pid := "-"
 		if e.PID > 0 {
 			pid = fmt.Sprintf("%d", e.PID)
 		}
-		fmt.Printf("%-14s %-8s %-10s %s\n", e.Name, pid, e.Status, age.Round(time.Second))
+		row := fmt.Sprintf("%-14s %-8s %-10s %-10s %s", e.Name, pid, e.Status, orDash(e.Version), age.Round(time.Second))
+		if e.LastError != "" {
+			row += "  ! " + truncate(e.LastError, 40)
+		}
+		fmt.Println(row)
 	}
 	if len(list) == 0 {
 		fmt.Println("(registry empty - is `aether up` running?)")
@@ -345,7 +349,28 @@ func printFleet(nodes []fleet.NodeView) {
 		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
 		fmt.Printf("%-16s %-24s %-6s %-14s %s ago\n",
 			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
+		// Per-thrall detail: the version and status that node reports, and a compact last-error
+		// marker when one is set - so a fleet-wide rollout or failure is visible without an ssh.
+		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+		for _, th := range sorted {
+			line := fmt.Sprintf("    %-14s %-10s %s", th.Name, th.Status, orDash(th.Version))
+			if th.LastError != "" {
+				line += "  ! " + truncate(th.LastError, 40)
+			}
+			fmt.Println(line)
+		}
 	}
+}
+
+// truncate shortens a string to at most n runes, appending an ellipsis when it had to cut, so a
+// long last-error message stays on one line in a table.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-3]) + "..."
 }
 
 // castCmd sends a fire-and-forget cast: `aether cast <name> <op> [json-payload]`.
