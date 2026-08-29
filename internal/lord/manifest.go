@@ -285,6 +285,14 @@ func (m *Manifest) validate() error {
 			if r.Thrall == "" || r.Op == "" {
 				return fmt.Errorf("edge.http %q: route %q: thrall and op are required", e.Name, key)
 			}
+			// The target must be a declared thrall - not an edge server, and not a typo. Edge routes
+			// are validated at load, before any thrall starts, so this turns a misspelt thrall =
+			// "countr" into a load-time error rather than a runtime timeout / unknown_op. A thrall
+			// spawned dynamically at runtime is not in the manifest, so a static route may only target
+			// a statically declared thrall - that is the intended constraint, not an oversight.
+			if kind, ok := seen[r.Thrall]; !ok || kind != "thrall" {
+				return fmt.Errorf("edge.http %q: route %q: thrall %q is not a declared thrall", e.Name, key, r.Thrall)
+			}
 			if r.Kind != "call" && r.Kind != "cast" {
 				return fmt.Errorf("edge.http %q: route %q: kind must be call or cast, got %q", e.Name, key, r.Kind)
 			}

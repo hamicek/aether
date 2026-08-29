@@ -76,6 +76,10 @@ func TestManifestEdgeValidation(t *testing.T) {
 		{
 			name: "ok",
 			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+
 [[edge.http]]
 name = "api"
 addr = ":8080"
@@ -99,6 +103,10 @@ route."GET /v" = { thrall = "c", op = "v" }
 		{
 			name: "duplicate addr across edge servers",
 			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+
 [[edge.http]]
 name = "api"
 addr = ":8080"
@@ -142,12 +150,40 @@ route."GET /v" = { op = "v" }
 		{
 			name: "bad kind",
 			body: `
+[[thrall]]
+name = "c"
+cmd  = "run"
+
 [[edge.http]]
 name = "api"
 addr = ":8080"
 route."GET /v" = { thrall = "c", op = "v", kind = "stream" }
 `,
 			wantErr: "kind must be call or cast",
+		},
+		{
+			name: "route targets an undeclared thrall (typo)",
+			body: `
+[[thrall]]
+name = "counter"
+cmd  = "run"
+
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."GET /v" = { thrall = "countr", op = "v" }
+`,
+			wantErr: "is not a declared thrall",
+		},
+		{
+			name: "route targets an edge server, not a thrall",
+			body: `
+[[edge.http]]
+name = "api"
+addr = ":8080"
+route."GET /v" = { thrall = "api", op = "v" }
+`,
+			wantErr: "is not a declared thrall",
 		},
 		{
 			name: "route key without method",
