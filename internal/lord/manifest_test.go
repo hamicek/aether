@@ -743,6 +743,7 @@ func TestManifestThrallMetadata(t *testing.T) {
 [[thrall]]
 name = "pump"
 cmd  = "run"
+expected_version = "1.4.0"
 metadata = { site = "A", plc = "10.0.0.5", criticality = "high" }
 `))
 	if err != nil {
@@ -751,6 +752,9 @@ metadata = { site = "A", plc = "10.0.0.5", criticality = "high" }
 	md := m.Thralls[0].Metadata
 	if md["site"] != "A" || md["plc"] != "10.0.0.5" || md["criticality"] != "high" {
 		t.Errorf("metadata = %v, want site/plc/criticality set", md)
+	}
+	if m.Thralls[0].ExpectedVersion != "1.4.0" {
+		t.Errorf("expected_version = %q, want 1.4.0", m.Thralls[0].ExpectedVersion)
 	}
 
 	_, err = LoadManifest(writeManifest(t, `

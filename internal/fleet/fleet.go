@@ -49,10 +49,11 @@ type ThrallHealth struct {
 	// Self-description carried across the fleet: the thrall's self-declared version and the
 	// operations it answers (from its heartbeat), the reason of its most recent failure, and the
 	// deployment metadata the operator declared in the manifest. All optional.
-	Version     string            `json:"version,omitempty"`
-	CallOps     []string          `json:"call_ops,omitempty"`
-	CastOps     []string          `json:"cast_ops,omitempty"`
-	LastError   string            `json:"last_error,omitempty"`
-	LastErrorMs int64             `json:"last_error_ms,omitempty"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Version         string            `json:"version,omitempty"`
+	ExpectedVersion string            `json:"expected_version,omitempty"`
+	CallOps         []string          `json:"call_ops,omitempty"`
+	CastOps         []string          `json:"cast_ops,omitempty"`
+	LastError       string            `json:"last_error,omitempty"`
+	LastErrorMs     int64             `json:"last_error_ms,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
 }

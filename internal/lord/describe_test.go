@@ -24,7 +24,7 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 		t.Fatalf("registry.Open: %v", err)
 	}
 	l := &Lord{log: obs.NewLogger(), id: "lord-test", reg: reg, metrics: newLordMetrics()}
-	l.children = []*child{{spec: ThrallSpec{Name: "counter", Metadata: map[string]string{"site": "A"}}}}
+	l.children = []*child{{spec: ThrallSpec{Name: "counter", Metadata: map[string]string{"site": "A"}, ExpectedVersion: "3.1.4"}}}
 
 	l.metrics.recordHeartbeat("counter", wire.HeartbeatMetrics{ProcessedTotal: 1, Describe: &wire.ThrallDescribe{
 		CallOps: []string{"get", "value"}, CastOps: []string{"inc"}, Version: "3.1.4"}})
@@ -39,6 +39,9 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 	}
 	if e.Metadata["site"] != "A" {
 		t.Errorf("metadata = %v, want site=A (from the manifest spec)", e.Metadata)
+	}
+	if e.ExpectedVersion != "3.1.4" {
+		t.Errorf("expected_version = %q, want 3.1.4 (from the manifest spec)", e.ExpectedVersion)
 	}
 	if len(e.CallOps) != 2 || e.CallOps[0] != "get" || e.CallOps[1] != "value" {
 		t.Errorf("call ops = %v, want [get value]", e.CallOps)
@@ -91,6 +94,56 @@ func TestCheckEdgeOpsWarnsOnUnknownOp(t *testing.T) {
 	l2.checkEdgeOps("counter", &wire.ThrallDescribe{Version: "1.0"})
 	if len(l2.edgeOpWarned) != 0 {
 		t.Errorf("a describe with no ops must not flag anything, got %v", l2.edgeOpWarned)
+	}
+}
+
+// TestCheckExpectedVersion proves the rollout mismatch alarm: it warns once when the reported
+// version differs from the manifest's expected_version (including a reported-empty version), stays
+// silent on a match or when no expectation is declared, and re-arms when the reported version
+// changes.
+func TestCheckExpectedVersion(t *testing.T) {
+	newLord := func(specs ...ThrallSpec) *Lord {
+		children := make([]*child, len(specs))
+		for i, s := range specs {
+			children[i] = &child{spec: s}
+		}
+		return &Lord{log: obs.NewLogger(), versionWarned: map[string]bool{}, children: children}
+	}
+
+	// Match -> no alarm.
+	l := newLord(ThrallSpec{Name: "counter", ExpectedVersion: "1.4.0"})
+	l.checkExpectedVersion("counter", &wire.ThrallDescribe{Version: "1.4.0"})
+	if len(l.versionWarned) != 0 {
+		t.Errorf("a matching version must not warn, got %v", l.versionWarned)
+	}
+
+	// Mismatch -> warned once, keyed by reported version.
+	l = newLord(ThrallSpec{Name: "counter", ExpectedVersion: "1.4.0"})
+	d := &wire.ThrallDescribe{Version: "1.3.0"}
+	l.checkExpectedVersion("counter", d)
+	l.checkExpectedVersion("counter", d) // idempotent
+	if !l.versionWarned["counter\x001.3.0"] || len(l.versionWarned) != 1 {
+		t.Errorf("a mismatch must warn once per reported version, got %v", l.versionWarned)
+	}
+	// A reported version that changes re-arms the alarm.
+	l.checkExpectedVersion("counter", &wire.ThrallDescribe{Version: "1.2.0"})
+	if !l.versionWarned["counter\x001.2.0"] {
+		t.Error("a changed reported version must re-warn")
+	}
+
+	// Reported-empty against a set expectation is itself a mismatch.
+	l = newLord(ThrallSpec{Name: "counter", ExpectedVersion: "1.4.0"})
+	l.checkExpectedVersion("counter", &wire.ThrallDescribe{})
+	l.checkExpectedVersion("counter", nil) // nil describe = reported empty, must not panic
+	if !l.versionWarned["counter\x00"] {
+		t.Errorf("an empty reported version against an expectation must warn, got %v", l.versionWarned)
+	}
+
+	// No expectation declared -> no check at all.
+	l = newLord(ThrallSpec{Name: "counter"})
+	l.checkExpectedVersion("counter", &wire.ThrallDescribe{Version: "9.9.9"})
+	if len(l.versionWarned) != 0 {
+		t.Errorf("a thrall without expected_version must not be checked, got %v", l.versionWarned)
 	}
 }
 

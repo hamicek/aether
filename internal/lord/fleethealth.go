@@ -33,6 +33,7 @@ func (l *Lord) fleetHealth() fleet.Health {
 			RSSBytes:        t.Metrics.RSSBytes,
 			CPUPercent:      t.Metrics.CPUPercent,
 			Metadata:        t.Metadata,
+			ExpectedVersion: t.ExpectedVersion,
 		}
 		if d := t.Metrics.Describe; d != nil {
 			h.Version = d.Version

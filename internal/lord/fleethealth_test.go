@@ -49,6 +49,7 @@ func TestFleetHealthCarriesDescribe(t *testing.T) {
 	eth := startEmbedded(t)
 	s := spec("counter", "permanent", "local")
 	s.Metadata = map[string]string{"site": "A", "plc": "10.0.0.5"}
+	s.ExpectedVersion = "2.8.0"
 	m := manifest(t, "demo", "one_for_one", s)
 	l, err := New(m, eth)
 	if err != nil {
@@ -76,6 +77,10 @@ func TestFleetHealthCarriesDescribe(t *testing.T) {
 	// Metadata is a manifest fact the lord attaches directly (never round-tripped through the thrall).
 	if th.Metadata["site"] != "A" || th.Metadata["plc"] != "10.0.0.5" {
 		t.Errorf("metadata = %v, want site=A plc=10.0.0.5", th.Metadata)
+	}
+	// expected_version rides the fleet too (reported 2.7.0 vs expected 2.8.0 = a mismatch a consumer can render).
+	if th.ExpectedVersion != "2.8.0" {
+		t.Errorf("expected_version = %q, want 2.8.0", th.ExpectedVersion)
 	}
 }
 
