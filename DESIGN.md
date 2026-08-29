@@ -5,7 +5,7 @@
 > and run a **lord** (supervisor). Not BEAM-scale (millions of processes), but **tens** of
 > processes that communicate reliably.
 
-Status: implemented core, actively evolving. Last updated 2026-08-23 (through v0.9.0).
+Status: implemented core, actively evolving. Last updated 2026-08-29 (through v0.10.0).
 
 ## Glossary
 
