@@ -869,9 +869,18 @@ func (l *Lord) sleep(d time.Duration) (stop bool) {
 }
 
 func (l *Lord) setStatus(name string, pid int, status string) {
-	if err := l.reg.Set(name, registry.Entry{
-		PID: pid, Node: l.id, Status: status, UpdatedMs: time.Now().UnixMilli(),
-	}); err != nil {
+	// registry.Set overwrites the whole entry, so re-attach the thrall's last-known
+	// self-description (from the heartbeat) on every status write. Manifest metadata is added here
+	// too, later.
+	entry := registry.Entry{PID: pid, Node: l.id, Status: status, UpdatedMs: time.Now().UnixMilli()}
+	if d := l.metrics.describeFor(name); d != nil {
+		entry.Version = d.Version
+		entry.CallOps = d.CallOps
+		entry.CastOps = d.CastOps
+		entry.LastError = d.LastError
+		entry.LastErrorMs = d.LastErrorMs
+	}
+	if err := l.reg.Set(name, entry); err != nil {
 		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))
 	}
 	l.metrics.setStatus(name, status)

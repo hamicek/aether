@@ -13,12 +13,23 @@ import (
 // Bucket is the name of the registry KV bucket.
 const Bucket = "aether_registry"
 
-// Entry = a record for a single thrall.
+// Entry = a record for a single thrall. Beyond liveness (pid/node/status), it carries the thrall's
+// self-description: the operations it answers and its self-declared version (from the heartbeat),
+// the reason of its most recent failure, and the deployment metadata the operator declared in the
+// manifest. The descriptive fields are optional so a thrall that reports nothing keeps a minimal
+// record and the KV JSON stays readable.
 type Entry struct {
 	PID       int    `json:"pid"`
 	Node      string `json:"node"`
-	Status    string `json:"status"` // starting | ready | down
+	Status    string `json:"status"` // starting | ready | down | stale
 	UpdatedMs int64  `json:"updated_ms"`
+
+	Version     string            `json:"version,omitempty"`
+	CallOps     []string          `json:"call_ops,omitempty"`
+	CastOps     []string          `json:"cast_ops,omitempty"`
+	LastError   string            `json:"last_error,omitempty"`
+	LastErrorMs int64             `json:"last_error_ms,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // NamedEntry = an Entry together with its key (the thrall's name) - for listing.
