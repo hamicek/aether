@@ -122,6 +122,14 @@ type ThrallSpec struct {
 	// "rebuild" + a retention bound is a config error (fail-fast); "audit" + a bound is fine (no
 	// warning). Unset keeps today's warning. Values: "" | "rebuild" | "audit".
 	EventLogUse string `toml:"event_log_use"`
+
+	// Metadata is free-form deployment tags for the thrall - site, PLC address, protocol, criticality
+	// - a fact about where and how this instance is deployed, which the operator owns and the code
+	// does not. The lord attaches it to the thrall's registry entry and fleet summary directly (it is
+	// not round-tripped through the thrall), so `aether ps` / `describe` / `fleet` and an application
+	// dashboard can key off it. It is deliberately NOT mapped to Prometheus labels: a high-cardinality
+	// value (a PLC address, an id) would explode the series count. Optional.
+	Metadata map[string]string `toml:"metadata"`
 }
 
 // fencingEnabled reports whether the thrall takes part in lord-liveness fencing (the default). An
@@ -256,6 +264,11 @@ func (m *Manifest) validate() error {
 		}
 		if t.EventLogUse == "rebuild" && (t.EventLogMaxMsgs > 0 || t.EventLogMaxAgeMs > 0) {
 			return fmt.Errorf("thrall %q: event_log_use = \"rebuild\" with a retention bound (event_log_max_msgs / event_log_max_age_ms) truncates the rebuild - there is no snapshot; drop the bound, or set event_log_use = \"audit\" if the log is not a rebuild source", t.Name)
+		}
+		// Deployment metadata: an empty key is a config typo (it renders as a blank tag) - reject it
+		// rather than carry a nameless value into the registry and dashboards.
+		if _, has := t.Metadata[""]; has {
+			return fmt.Errorf("thrall %q: metadata has an empty key", t.Name)
 		}
 	}
 	addrs := make(map[string]string) // addr -> edge server that bound it first

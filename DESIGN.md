@@ -874,6 +874,48 @@ with "lord = a local process manager"; the network-wide view across several lord
 mechanism - **fleet health** (§12, opt-in `[observability] fleet_health` + the `aether fleet` CLI),
 which aggregates the curated health summaries lords publish rather than reaching into each dashboard.
 
+**Self-description (what a thrall is).** A thrall answers "what operations do you support, what
+build are you, what last failed" without an ssh. Like the self-metrics, the description rides the
+heartbeat the thrall already sends: an optional `describe` block (`wire.ThrallDescribe`) carrying
+its ops, self-declared version and last error. The lord stores the last one it saw and folds it into
+the registry entry, so `aether ps` gains a version column, `aether describe <name>` prints the whole
+record, and `aether fleet` carries it network-wide. It compares to NATS Micro's endpoint/version/
+metadata INFO, but arrives without a services layer or a mandatory contract - four choices keep it
+aligned with the rest of the design:
+
+- **Ops are derived, not declared.** The SDK reports the keys of a thrall's handler maps, so a
+  handler stays "just a map of functions" (§11's spirit, and faithful to OTP - a genserver does not
+  declare its `handle_call` clauses either). This is the opposite of Micro, where the endpoint *is*
+  the contract; here declaration would cost the map-of-functions ergonomics for little gain. The
+  call and cast ops are kept apart (`call_ops` / `cast_ops`) so an `[[edge.http]]` route - itself a
+  call or a cast - is validated against the right set. That validation is necessarily asynchronous:
+  the manifest load can check a route's *target thrall* exists (§12b), but not its *op*, because
+  thralls start after the load. So when a thrall first describes itself the lord checks the routes
+  aimed at it and logs a warning (once) for an op it does not answer - a discovery, not a fatal
+  error.
+- **Push on the heartbeat, not a one-shot register or a pull.** The static fields (ops, version)
+  repeat on every beat. At this runtime's scale (tens of processes) the bytes are negligible, and it
+  buys self-healing: the lord always holds the current description, with no one-shot to miss on a
+  late subscribe or a lord restart, and no request/reply round-trip to add to `ctl`. The mutable
+  `last_error` needs a push channel anyway.
+- **Version lives with the code; metadata lives in the manifest.** Two different facts with two
+  different owners. The **version** is a code fact, declared on the thrall definition, so it answers
+  "what actually runs here" - a manifest-declared version would lie exactly when a wrong binary is
+  deployed against a right manifest, which is the rollout bug you most want to catch. **Metadata**
+  (site, PLC address, protocol, criticality) is a deployment fact the operator declares in
+  `[[thrall]] metadata`; the lord attaches it from the manifest and never round-trips it through the
+  thrall, which keeps it off the SDK surface entirely.
+- **Metadata is shown, not turned into Prometheus labels.** It appears in `ps` / `describe` /
+  `fleet` and could feed an application dashboard, but mapping it onto metric labels is left out on
+  purpose: a high-cardinality value (a PLC address, an id) would explode the series count. An
+  allowlisted low-cardinality subset is a possible follow-up.
+
+`last_error` resets on restart, like `processed_total` - it is process-local. On an *escalation* the
+thrall would die before its next scheduled beat, so it publishes one final "dying breath" heartbeat
+carrying the reason and flushes it before exiting, giving the lord the *why* of the crash rather
+than only the abnormal exit. It is best-effort (a hard `SIGKILL` skips it), and the reason is the
+same one the caller already receives on the reply.
+
 ---
 
 ## 14. Deliberately deferred (gaps in the design)

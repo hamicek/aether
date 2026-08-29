@@ -43,6 +43,42 @@ func TestFleetHealthBuilder(t *testing.T) {
 	}
 }
 
+// TestFleetHealthCarriesDescribe proves a thrall's self-description (version, ops, last error)
+// reaches the fleet summary, so a fleet-wide view shows what build runs and what last failed.
+func TestFleetHealthCarriesDescribe(t *testing.T) {
+	eth := startEmbedded(t)
+	s := spec("counter", "permanent", "local")
+	s.Metadata = map[string]string{"site": "A", "plc": "10.0.0.5"}
+	m := manifest(t, "demo", "one_for_one", s)
+	l, err := New(m, eth)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	l.metrics.recordHeartbeat("counter", wire.HeartbeatMetrics{ProcessedTotal: 5, Describe: &wire.ThrallDescribe{
+		CallOps: []string{"get"}, CastOps: []string{"inc"}, Version: "2.7.0",
+		LastError: "handler_error: boom", LastErrorMs: 1700000000000}})
+
+	h := l.fleetHealth()
+	if len(h.Thralls) != 1 {
+		t.Fatalf("thralls = %d, want 1", len(h.Thralls))
+	}
+	th := h.Thralls[0]
+	if th.Version != "2.7.0" {
+		t.Errorf("version = %q, want 2.7.0", th.Version)
+	}
+	if len(th.CallOps) != 1 || th.CallOps[0] != "get" || len(th.CastOps) != 1 || th.CastOps[0] != "inc" {
+		t.Errorf("ops = call %v cast %v, want [get] / [inc]", th.CallOps, th.CastOps)
+	}
+	if th.LastError != "handler_error: boom" || th.LastErrorMs != 1700000000000 {
+		t.Errorf("last error = %q @ %d, want the reported one", th.LastError, th.LastErrorMs)
+	}
+	// Metadata is a manifest fact the lord attaches directly (never round-tripped through the thrall).
+	if th.Metadata["site"] != "A" || th.Metadata["plc"] != "10.0.0.5" {
+		t.Errorf("metadata = %v, want site=A plc=10.0.0.5", th.Metadata)
+	}
+}
+
 // TestFleetHealthPublishes proves that with fleet_health on, the lord publishes its summary on the
 // fleet subject, carrying its identity.
 func TestFleetHealthPublishes(t *testing.T) {

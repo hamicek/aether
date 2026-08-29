@@ -123,6 +123,32 @@ def _heartbeat_interval() -> float:
     return ms / 1000.0
 
 
+def _describe_dict(call_ops, cast_ops, version, last_err=None) -> dict:
+    """Build a thrall's self-description (mirrors wire.ThrallDescribe). Empty fields are omitted to
+    match the Go omitempty wire form. last_err is a mutable {"msg", "ms"} holder, or None."""
+    d: dict = {}
+    if call_ops:
+        d["call_ops"] = call_ops
+    if cast_ops:
+        d["cast_ops"] = cast_ops
+    if version:
+        d["version"] = version
+    if last_err and last_err.get("msg"):
+        d["last_error"] = last_err["msg"]
+        d["last_error_ms"] = last_err["ms"]
+    return d
+
+
+async def _publish_heartbeat(nc, name, stats, describe=None) -> None:
+    """Publish one liveness beat carrying the thrall's metrics and, when a describe is supplied, its
+    self-description. Shared by the periodic loop and the crash-path dying breath."""
+    payload = stats.snapshot()
+    if describe is not None:
+        payload["describe"] = describe()
+    hb = {"v": 1, "kind": "hb", "to": name, "payload": payload, "ts": int(time.time() * 1000)}
+    await nc.publish(_sub_hb(name), _encode(hb))
+
+
 # --- singleton fencing (mirrors the Go/TS SDKs) ---
 # Lease/interval mirror internal/singleton.TTL (3s): the interval is the verification cadence,
 # the lease the grace after which an unverifiable lock is presumed lost.
@@ -561,12 +587,16 @@ class ThrallDef:
     idempotent: bool = False
     # idempotency_max bounds the dedup cache (0 = a sensible default). Ignored unless idempotent.
     idempotency_max: int = 0
+    # version is the thrall's self-declared build (e.g. "1.4.0"), reported in the heartbeat's
+    # self-description and shown by `aether ps` / `aether describe`. It lives with the code, so it
+    # answers "what actually runs here". Empty means unversioned.
+    version: str = ""
 
 
 def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None,
-               idempotent=False, idempotency_max=0) -> ThrallDef:
+               idempotent=False, idempotency_max=0, version="") -> ThrallDef:
     return ThrallDef(name, init, handle_call or {}, handle_cast or {}, terminate,
-                     idempotent, idempotency_max)
+                     idempotent, idempotency_max, version)
 
 
 async def _maybe(v):
@@ -613,6 +643,25 @@ async def start(defn: ThrallDef) -> None:
     # needs no lock of its own. None unless the thrall opts in.
     dedup = _DedupCache(defn.idempotency_max) if defn.idempotent else None
 
+    # The self-description attached to every heartbeat: ops derived from the handler maps (the
+    # developer declares nothing), the self-declared version, and the current last error.
+    call_ops = sorted(defn.handle_call.keys())
+    cast_ops = sorted(defn.handle_cast.keys())
+    last_err = {"msg": "", "ms": 0}
+
+    def _set_last_error(msg: str) -> None:
+        last_err["msg"] = msg
+        last_err["ms"] = int(time.time() * 1000)
+
+    def describe() -> dict:
+        return _describe_dict(call_ops, cast_ops, defn.version, last_err)
+
+    async def dying_breath() -> None:
+        """Publish one final heartbeat carrying the last error and flush it, so the lord learns WHY
+        the thrall escalated before it sees the process exit. Used only on the crash path."""
+        await _publish_heartbeat(nc, name, stats, describe)
+        await nc.flush()
+
     async def process_call(e: dict, msg) -> None:
         nonlocal state
         start = stats.begin()
@@ -639,13 +688,16 @@ async def start(defn: ThrallDef) -> None:
                     await msg.respond(_encode(_ok_reply(e, reply)))
                 except Escalate as esc:
                     # Reply the caller before we crash, so it learns of the restart instead of
-                    # hanging until timeout; flush so the reply leaves before the process exits.
+                    # hanging until timeout; the dying breath then flushes both the reply and the
+                    # final heartbeat (carrying the reason) before the process exits.
                     await msg.respond(_encode(_err_reply(e, "escalated", esc.reason)))
-                    await nc.flush()
+                    _set_last_error(f"escalated: {esc.reason}")
+                    await dying_breath()
                     ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
                     _exit_process(1)
                     return
                 except Exception as ex:  # noqa: BLE001
+                    _set_last_error(f"handler_error: {ex}")
                     await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
         finally:
             stats.end(start)
@@ -677,10 +729,13 @@ async def start(defn: ThrallDef) -> None:
                         # into a crash loop; a non-durable cast (ack_durable None) is dropped.
                         if ack_durable is not None:
                             await ack_durable()
+                        _set_last_error(f"escalated: {esc.reason}")
+                        await dying_breath()  # let the lord record the reason before the process dies
                         ctx.log.error("cast handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
                         _exit_process(1)
                         return
                     except Exception as ex:  # noqa: BLE001
+                        _set_last_error(f"handler_error: {ex}")
                         ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
         finally:
             stats.end(start)
@@ -732,8 +787,7 @@ async def start(defn: ThrallDef) -> None:
     async def heartbeat() -> None:
         interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
-            await nc.publish(_sub_hb(name), _encode(hb))
+            await _publish_heartbeat(nc, name, stats, describe)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -807,10 +861,20 @@ class FSM:
     init: Callable  # (ctx) -> data
     states: dict  # state -> State
     terminate: Optional[Callable] = None  # (reason, state, data)
+    # version: self-declared build, reported in the heartbeat's self-description. Empty = unversioned.
+    version: str = ""
 
 
-def def_fsm(name, initial, init, states, terminate=None) -> FSM:
-    return FSM(name, initial, init, states, terminate)
+def def_fsm(name, initial, init, states, terminate=None, version="") -> FSM:
+    return FSM(name, initial, init, states, terminate, version)
+
+
+def _fsm_describe(defn: "FSM") -> dict:
+    """Build an FSM's self-description: the union of every state's reaction ops (each dispatchable as
+    a call or a cast, so it appears in both sets), plus the reserved _state call op."""
+    events = sorted({op for st in defn.states.values() for op in st.on.keys()})
+    call_ops = sorted([*events, _FSM_STATE_OP])
+    return _describe_dict(call_ops, events, defn.version)
 
 
 class _Machine:
@@ -1000,8 +1064,7 @@ async def start_fsm(defn: FSM) -> None:
     async def heartbeat() -> None:
         interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "payload": m.snapshot(), "ts": int(time.time() * 1000)}
-            await nc.publish(_sub_hb(name), _encode(hb))
+            await _publish_heartbeat(nc, name, m, lambda: _fsm_describe(defn))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -1046,10 +1109,12 @@ class EventManager:
     name: str
     handlers: dict  # name -> Handler (insertion order = registration/dispatch order)
     terminate: Optional[Callable] = None  # (reason)
+    # version: self-declared build, reported in the heartbeat's self-description. Empty = unversioned.
+    version: str = ""
 
 
-def def_event(name, handlers, terminate=None) -> EventManager:
-    return EventManager(name, handlers, terminate)
+def def_event(name, handlers, terminate=None, version="") -> EventManager:
+    return EventManager(name, handlers, terminate, version)
 
 
 class _EventBus:
@@ -1165,8 +1230,9 @@ async def start_event(defn: EventManager) -> None:
     async def heartbeat() -> None:
         interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "payload": bus.snapshot(), "ts": int(time.time() * 1000)}
-            await nc.publish(_sub_hb(name), _encode(hb))
+            # An event manager fans every event out to all handlers, so it declares no per-op
+            # contract; its self-description carries only the version.
+            await _publish_heartbeat(nc, name, bus, lambda: _describe_dict([], [], defn.version))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:
@@ -1256,11 +1322,14 @@ class EdgeDef:
     # stop is an optional hook invoked ONLY on a drain, to unblock run (e.g. server shutdown). It is not
     # called when run returns/raises on its own.
     stop: Optional[Callable[[], Any]] = None
+    # version: self-declared build, reported in the heartbeat's self-description. An edge has no
+    # operations, so its description carries only the version. Empty = unversioned.
+    version: str = ""
 
 
-def def_edge(name="", init=None, run=None, stop=None) -> EdgeDef:
+def def_edge(name="", init=None, run=None, stop=None, version="") -> EdgeDef:
     """A typed identity/keyword helper mirroring def_thrall / def_fsm / def_event."""
-    return EdgeDef(name, init, run, stop)
+    return EdgeDef(name, init, run, stop, version)
 
 
 async def start_edge(defn: EdgeDef) -> None:
@@ -1322,8 +1391,8 @@ async def start_edge(defn: EdgeDef) -> None:
     async def heartbeat() -> None:
         interval = _heartbeat_interval()  # lord-configured interval (default 2.0s)
         while not stop.is_set():
-            hb = {"v": 1, "kind": "hb", "to": name, "payload": stats.snapshot(), "ts": int(time.time() * 1000)}
-            await nc.publish(_sub_hb(name), _encode(hb))
+            # An edge has no operations, so its self-description carries only the version.
+            await _publish_heartbeat(nc, name, stats, lambda: _describe_dict([], [], defn.version))
             try:
                 await asyncio.wait_for(stop.wait(), timeout=interval)
             except asyncio.TimeoutError:

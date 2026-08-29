@@ -41,6 +41,12 @@ CASES = {
     "hb_metrics": {"v": 1, "kind": "hb", "to": "counter",
                    "payload": {"mailbox_depth": 2, "mailbox_latency_ms": 1.5, "processed_total": 10},
                    "ts": 1700000000003},
+    "hb_describe": {"v": 1, "kind": "hb", "to": "counter",
+                    "payload": {"mailbox_depth": 0, "mailbox_latency_ms": 0, "processed_total": 3,
+                                "describe": {"call_ops": ["get", "value"], "cast_ops": ["inc", "reset"],
+                                             "version": "1.2.0", "last_error": "handler_error: boom",
+                                             "last_error_ms": 1700000000005}},
+                    "ts": 1700000000006},
     "ctl": {"v": 1, "kind": "ctl", "op": "drain"},
     "minimal": {"v": 1, "kind": "call"},
 }
@@ -58,6 +64,31 @@ class WireParity(unittest.TestCase):
             with self.subTest(case=name):
                 decoded = aether._decode(golden(name))
                 self.assertEqual(json.loads(aether._encode(decoded)), json.loads(golden(name)))
+
+    def test_describe_dict_omits_empty_fields(self):
+        # Empty fields are dropped to match the Go omitempty wire form.
+        self.assertEqual(aether._describe_dict([], [], ""), {})
+        self.assertEqual(aether._describe_dict(["get"], [], "1.0.0"),
+                         {"call_ops": ["get"], "version": "1.0.0"})
+        self.assertEqual(
+            aether._describe_dict(["get"], ["inc"], "1.0.0", {"msg": "handler_error: boom", "ms": 42}),
+            {"call_ops": ["get"], "cast_ops": ["inc"], "version": "1.0.0",
+             "last_error": "handler_error: boom", "last_error_ms": 42})
+
+    def test_fsm_describe(self):
+        # Mirrors the Go TestFSMDescribe: the union of reaction ops as call and cast, plus _state.
+        def _fn(ev, data, ctx):
+            return aether.Outcome(data=data)
+        defn = aether.FSM(
+            name="gate", initial="idle", init=lambda ctx: 0, version="2.0.0",
+            states={
+                "idle": aether.State(on={"start": aether.Reaction(fn=_fn)}),
+                "running": aether.State(on={"stop": aether.Reaction(fn=_fn), "start": aether.Reaction(fn=_fn)}),
+            })
+        d = aether._fsm_describe(defn)
+        self.assertEqual(d["call_ops"], ["_state", "start", "stop"])
+        self.assertEqual(d["cast_ops"], ["start", "stop"])
+        self.assertEqual(d["version"], "2.0.0")
 
     def test_subjects(self):
         app, name = "demo", "counter"

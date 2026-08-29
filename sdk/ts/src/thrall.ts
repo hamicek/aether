@@ -1,5 +1,5 @@
 import { AckPolicy, DeliverPolicy, nanos, type NatsConnection } from "nats";
-import { decode, encode, type Envelope } from "./envelope";
+import { decode, encode, type Envelope, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
 import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
@@ -98,6 +98,10 @@ export interface ThrallDef<S> {
   idempotent?: boolean;
   // idempotencyMax bounds the dedup cache (undefined/0 = a sensible default). Ignored unless idempotent.
   idempotencyMax?: number;
+  // version is the thrall's self-declared build (e.g. "1.4.0"), reported to the lord in the
+  // heartbeat's self-description and shown by `aether ps` / `aether describe`. It lives with the
+  // code, so it answers "what actually runs here". Optional; omitted means unversioned.
+  version?: string;
 }
 
 // defThrall is just a typed definition - the actual run is started by start().
@@ -160,6 +164,37 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     processed_total: stats.processed,
   });
 
+  // The last handler failure, reported in the self-description. Set from a handler, read by the
+  // heartbeat - JS is single-threaded, so a plain object needs no lock.
+  const lastErr = { msg: "", ms: 0 };
+  const setLastError = (msg: string) => {
+    lastErr.msg = msg;
+    lastErr.ms = Date.now();
+  };
+
+  // The self-description attached to every heartbeat: the ops (derived from the handler maps, so
+  // the developer declares nothing), the self-declared version and the current last error. Empty
+  // fields are omitted to match the Go omitempty wire form.
+  const callOps = Object.keys(def.handleCall ?? {}).sort();
+  const castOps = Object.keys(def.handleCast ?? {}).sort();
+  const describe = (): ThrallDescribe => {
+    const d: ThrallDescribe = {};
+    if (callOps.length) d.call_ops = callOps;
+    if (castOps.length) d.cast_ops = castOps;
+    if (def.version) d.version = def.version;
+    if (lastErr.msg) {
+      d.last_error = lastErr.msg;
+      d.last_error_ms = lastErr.ms;
+    }
+    return d;
+  };
+  // dyingBreath publishes one final heartbeat carrying the last error and flushes it, so the lord
+  // learns WHY a thrall escalated before it sees the process exit. Used only on the crash path.
+  const dyingBreath = () => {
+    publishHeartbeat(nc, name, snapshot, describe);
+    return nc.flush();
+  };
+
   // handleCall/handleCast over the serialized mailbox (shared by the core and durable branches).
   // beginJob runs at enqueue time (before the serialized job), so mailbox_depth counts messages
   // waiting in the promise chain - matching the Go/Python SDKs, where begin() runs before the
@@ -194,13 +229,16 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           const esc = asEscalate(err);
           if (esc) {
             // Reply the caller before we crash, so it learns of the restart instead of
-            // hanging until timeout; flush so the reply leaves before the process exits.
+            // hanging until timeout; the dying breath then flushes both the reply and the final
+            // heartbeat (carrying the reason) before the process exits.
             respond(encode(errReply(e, "escalated", esc.reason)));
-            await nc.flush();
+            setLastError(`escalated: ${esc.reason}`);
+            await dyingBreath();
             log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
             exitProcess(1);
             return;
           }
+          setLastError(`handler_error: ${String(err)}`);
           respond(encode(errReply(e, "handler_error", String(err))));
         }
       } finally {
@@ -235,10 +273,13 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
             // Ack the poison cast before crashing so JetStream does not redeliver it into a
             // crash loop; a non-durable cast (no ackDurable) is simply dropped, as it is today.
             if (ackDurable) await ackDurable();
+            setLastError(`escalated: ${esc.reason}`);
+            await dyingBreath(); // let the lord record the reason before the process dies
             log.error("cast handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
             exitProcess(1);
             return;
           }
+          setLastError(`handler_error: ${String(err)}`);
           log.error("cast handler failed", { op: e.op, err: String(err) });
         }
       } finally {
@@ -271,7 +312,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     }
   })();
 
-  startHeartbeat(nc, name, snapshot);
+  startHeartbeat(nc, name, snapshot, describe);
   await startFencingIfSingleton(nc, name, log);
   await startLordLivenessFencing(nc, name, log);
 }
@@ -367,11 +408,27 @@ export function errReply(req: Envelope, type: string, message: string): Envelope
   };
 }
 
-export function startHeartbeat(nc: NatsConnection, name: string, snapshot: () => unknown): void {
-  const tick = () => {
-    const hb: Envelope = { v: 1, kind: "hb", to: name, payload: snapshot(), ts: Date.now() };
-    nc.publish(subjects.hb(name), encode(hb));
-  };
+// publishHeartbeat sends one liveness beat carrying the thrall's metrics and, when a describe is
+// supplied, its self-description. Shared by the periodic loop and the crash-path dying breath.
+export function publishHeartbeat(
+  nc: NatsConnection,
+  name: string,
+  snapshot: () => unknown,
+  describe?: () => ThrallDescribe,
+): void {
+  const payload: Record<string, unknown> = { ...(snapshot() as Record<string, unknown>) };
+  if (describe) payload.describe = describe();
+  const hb: Envelope = { v: 1, kind: "hb", to: name, payload, ts: Date.now() };
+  nc.publish(subjects.hb(name), encode(hb));
+}
+
+export function startHeartbeat(
+  nc: NatsConnection,
+  name: string,
+  snapshot: () => unknown,
+  describe?: () => ThrallDescribe,
+): void {
+  const tick = () => publishHeartbeat(nc, name, snapshot, describe);
   tick();
   const timer = setInterval(tick, heartbeatIntervalMs()); // lord-configured interval (default 2s)
   timer.unref?.();

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,6 +48,8 @@ func main() {
 		up(os.Args[2:])
 	case "ps":
 		psCmd(os.Args[2:])
+	case "describe":
+		describeCmd(os.Args[2:])
 	case "events":
 		eventsCmd(os.Args[2:])
 	case "fleet":
@@ -148,18 +151,105 @@ func psCmd(argv []string) {
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
 
 	now := time.Now().UnixMilli()
-	fmt.Printf("%-14s %-8s %-10s %s\n", "NAME", "PID", "STATUS", "AGE")
+	fmt.Printf("%-14s %-8s %-10s %-10s %s\n", "NAME", "PID", "STATUS", "VERSION", "AGE")
 	for _, e := range list {
 		age := time.Duration(now-e.UpdatedMs) * time.Millisecond
 		pid := "-"
 		if e.PID > 0 {
 			pid = fmt.Sprintf("%d", e.PID)
 		}
-		fmt.Printf("%-14s %-8s %-10s %s\n", e.Name, pid, e.Status, age.Round(time.Second))
+		row := fmt.Sprintf("%-14s %-8s %-10s %-10s %s", e.Name, pid, e.Status, orDash(e.Version), age.Round(time.Second))
+		if e.LastError != "" {
+			row += "  ! " + truncate(e.LastError, 40)
+		}
+		fmt.Println(row)
 	}
 	if len(list) == 0 {
 		fmt.Println("(registry empty - is `aether up` running?)")
 	}
+}
+
+// describeCmd prints one thrall's full self-description from the registry: the operations it
+// answers (call vs cast), its self-declared version, its deployment metadata and the reason of its
+// most recent failure. It answers "what is this thrall, and what build runs here" without an ssh.
+func describeCmd(argv []string) {
+	fs := flag.NewFlagSet("describe", flag.ExitOnError)
+	url := fs.String("url", "", "bus address (default: ."+endpointFile+")")
+	asJSON := fs.Bool("json", false, "print the raw registry entry as JSON")
+	ca, nkey := credFlags(fs)
+	// Parse the leading flags, take the thrall name, then parse any flags that trail it - so both
+	// `describe --json <name>` and `describe <name> --json` work (Go's flag stops at the first
+	// positional argument).
+	_ = fs.Parse(argv)
+	if fs.NArg() < 1 {
+		log.Fatal("usage: aether describe <thrall> [--url ...] [--json]")
+	}
+	name := fs.Arg(0)
+	_ = fs.Parse(fs.Args()[1:])
+
+	ep := resolveEndpoint(*url, "", *ca, *nkey)
+	nc := connect(ep)
+	defer nc.Close()
+
+	reg, err := registry.Open(nc)
+	if err != nil {
+		log.Fatalf("registry: %v", err)
+	}
+	entry, ok, err := reg.Get(name)
+	if err != nil {
+		log.Fatalf("get %q: %v", name, err)
+	}
+	if !ok {
+		log.Fatalf("no thrall named %q in the registry (is `aether up` running?)", name)
+	}
+
+	if *asJSON {
+		out, err := json.MarshalIndent(struct {
+			Name string `json:"name"`
+			registry.Entry
+		}{Name: name, Entry: entry}, "", "  ")
+		if err != nil {
+			log.Fatalf("marshal: %v", err)
+		}
+		fmt.Println(string(out))
+		return
+	}
+
+	fmt.Printf("%-12s %s\n", "name", name)
+	fmt.Printf("%-12s %s\n", "status", entry.Status)
+	if entry.PID > 0 {
+		fmt.Printf("%-12s %d\n", "pid", entry.PID)
+	}
+	fmt.Printf("%-12s %s\n", "node", entry.Node)
+	fmt.Printf("%-12s %s\n", "version", orDash(entry.Version))
+	fmt.Printf("%-12s %s\n", "call ops", orDash(strings.Join(entry.CallOps, ", ")))
+	fmt.Printf("%-12s %s\n", "cast ops", orDash(strings.Join(entry.CastOps, ", ")))
+	if len(entry.Metadata) > 0 {
+		keys := make([]string, 0, len(entry.Metadata))
+		for k := range entry.Metadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			label := ""
+			if i == 0 {
+				label = "metadata"
+			}
+			fmt.Printf("%-12s %s = %s\n", label, k, entry.Metadata[k])
+		}
+	}
+	if entry.LastError != "" {
+		when := time.UnixMilli(entry.LastErrorMs).Format("2006-01-02 15:04:05")
+		fmt.Printf("%-12s %s (%s)\n", "last error", entry.LastError, when)
+	}
+}
+
+// orDash renders an empty string as a dash, so a blank field reads as "none" rather than a gap.
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 // eventsCmd prints the live lifecycle stream from aether._lord.events (until Ctrl-C).
@@ -262,7 +352,28 @@ func printFleet(nodes []fleet.NodeView) {
 		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
 		fmt.Printf("%-16s %-24s %-6s %-14s %s ago\n",
 			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
+		// Per-thrall detail: the version and status that node reports, and a compact last-error
+		// marker when one is set - so a fleet-wide rollout or failure is visible without an ssh.
+		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+		for _, th := range sorted {
+			line := fmt.Sprintf("    %-14s %-10s %s", th.Name, th.Status, orDash(th.Version))
+			if th.LastError != "" {
+				line += "  ! " + truncate(th.LastError, 40)
+			}
+			fmt.Println(line)
+		}
 	}
+}
+
+// truncate shortens a string to at most n runes, appending an ellipsis when it had to cut, so a
+// long last-error message stays on one line in a table.
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-3]) + "..."
 }
 
 // castCmd sends a fire-and-forget cast: `aether cast <name> <op> [json-payload]`.
@@ -407,6 +518,6 @@ func writeEndpoint(ep endpoint) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: aether <up|ps|events|fleet|cast|call|down> ...")
+	fmt.Fprintln(os.Stderr, "usage: aether <up|ps|describe|events|fleet|cast|call|down> ...")
 	os.Exit(2)
 }

@@ -160,6 +160,8 @@ type dashboardThrall struct {
 	Dynamic  bool                 `json:"dynamic"`
 	Live     bool                 `json:"live"`
 	Metrics  thrallMetricSnapshot `json:"metrics"`
+	// Metadata is the operator-declared deployment tags from the manifest (site, PLC, criticality).
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
 // treeSnapshot builds the read-only view from the lord's in-memory state: the manifest, the
@@ -193,6 +195,7 @@ func (l *Lord) treeSnapshot() dashboardTree {
 			Dynamic:  ch.dynamic,
 			Live:     ch.live.Load(),
 			Metrics:  m,
+			Metadata: ch.spec.Metadata,
 		})
 	}
 

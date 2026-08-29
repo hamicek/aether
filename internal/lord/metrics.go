@@ -60,16 +60,17 @@ type thrallRaw struct {
 
 // thrallMetricSnapshot is the read-only per-thrall view the observer dashboard consumes.
 type thrallMetricSnapshot struct {
-	Status         string  `json:"status"`
-	MailboxDepth   int     `json:"mailbox_depth"`
-	MailboxLatMs   float64 `json:"mailbox_latency_ms"`
-	Processed      uint64  `json:"processed"`
-	DurableBacklog float64 `json:"durable_backlog"`
-	Restarts       uint64  `json:"restarts"`
-	GaveUp         uint64  `json:"gave_up"`
-	HeartbeatMiss  uint64  `json:"heartbeat_misses"`
-	RSSBytes       int64   `json:"rss_bytes"`
-	CPUPercent     float64 `json:"cpu_percent"`
+	Status         string               `json:"status"`
+	MailboxDepth   int                  `json:"mailbox_depth"`
+	MailboxLatMs   float64              `json:"mailbox_latency_ms"`
+	Processed      uint64               `json:"processed"`
+	DurableBacklog float64              `json:"durable_backlog"`
+	Restarts       uint64               `json:"restarts"`
+	GaveUp         uint64               `json:"gave_up"`
+	HeartbeatMiss  uint64               `json:"heartbeat_misses"`
+	RSSBytes       int64                `json:"rss_bytes"`
+	CPUPercent     float64              `json:"cpu_percent"`
+	Describe       *wire.ThrallDescribe `json:"describe,omitempty"`
 }
 
 // lordMetrics owns the runtime metric registry and the derived per-status gauge. It tracks each
@@ -77,9 +78,10 @@ type thrallMetricSnapshot struct {
 type lordMetrics struct {
 	reg *obs.Metrics
 
-	mu     sync.Mutex
-	status map[string]string     // thrall name -> last status
-	raw    map[string]*thrallRaw // thrall name -> latest raw values
+	mu       sync.Mutex
+	status   map[string]string               // thrall name -> last status
+	raw      map[string]*thrallRaw           // thrall name -> latest raw values
+	describe map[string]*wire.ThrallDescribe // thrall name -> latest self-description
 }
 
 func newLordMetrics() *lordMetrics {
@@ -97,7 +99,8 @@ func newLordMetrics() *lordMetrics {
 	reg.Gauge(metricThrallCPU, "thrall CPU usage in percent (summed over its process group)")
 
 	reg.Set(metricUp, nil, 1)
-	lm := &lordMetrics{reg: reg, status: map[string]string{}, raw: map[string]*thrallRaw{}}
+	lm := &lordMetrics{reg: reg, status: map[string]string{}, raw: map[string]*thrallRaw{},
+		describe: map[string]*wire.ThrallDescribe{}}
 	lm.recompute()
 	return lm
 }
@@ -137,9 +140,19 @@ func (lm *lordMetrics) snapshot() map[string]thrallMetricSnapshot {
 			s.RSSBytes = r.rssBytes
 			s.CPUPercent = r.cpuPercent
 		}
+		s.Describe = lm.describe[n]
 		out[n] = s
 	}
 	return out
+}
+
+// describeFor returns the last self-description reported by a thrall, or nil if it has reported
+// none yet. The returned value is immutable (each heartbeat replaces the pointer), so the caller
+// may read it without holding the lock.
+func (lm *lordMetrics) describeFor(name string) *wire.ThrallDescribe {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	return lm.describe[name]
 }
 
 // setStatus records a thrall's new status and refreshes the per-status gauge.
@@ -156,6 +169,7 @@ func (lm *lordMetrics) forget(name string) {
 	lm.mu.Lock()
 	delete(lm.status, name)
 	delete(lm.raw, name)
+	delete(lm.describe, name)
 	lm.recompute()
 	lm.mu.Unlock()
 
@@ -206,6 +220,11 @@ func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	r.mailboxDepth = hm.MailboxDepth
 	r.mailboxLatMs = hm.MailboxLatencyMs
 	r.processed = hm.ProcessedTotal
+	// Keep the last self-description. A heartbeat that carries none (an older SDK) must not erase
+	// what an earlier beat reported, so only a present describe replaces the stored one.
+	if hm.Describe != nil {
+		lm.describe[name] = hm.Describe
+	}
 	lm.mu.Unlock()
 
 	labels := map[string]string{"name": name}

@@ -36,6 +36,10 @@ func goldenCases() map[string]Envelope {
 		"hb": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000002},
 		"hb_metrics": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000003,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 2, MailboxLatencyMs: 1.5, ProcessedTotal: 10})},
+		"hb_describe": {V: 1, Kind: KindHB, To: "counter", TS: 1700000000006,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{ProcessedTotal: 3, Describe: &ThrallDescribe{
+				CallOps: []string{"get", "value"}, CastOps: []string{"inc", "reset"}, Version: "1.2.0",
+				LastError: "handler_error: boom", LastErrorMs: 1700000000005}})},
 		"ctl":     {V: 1, Kind: KindCtl, Op: "drain"},
 		"minimal": {V: 1, Kind: KindCall},
 	}
@@ -76,6 +80,29 @@ func TestEnvelopeGolden(t *testing.T) {
 		}
 		if got := string(data); got != strings.TrimSpace(string(want)) {
 			t.Errorf("%s: envelope drift\n got: %s\nwant: %s", name, got, strings.TrimSpace(string(want)))
+		}
+	}
+}
+
+// TestHeartbeatDescribeOmitEmpty guards the backward-compatible shape of the heartbeat payload:
+// a metrics-only heartbeat (older SDK, or one before a failure) must not carry a "describe" key,
+// and a describe must drop its own empty fields so an idle thrall reports no last_error.
+func TestHeartbeatDescribeOmitEmpty(t *testing.T) {
+	metricsOnly, err := json.Marshal(HeartbeatMetrics{MailboxDepth: 1, ProcessedTotal: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(metricsOnly), "describe") {
+		t.Errorf("metrics-only heartbeat unexpectedly contains describe: %s", metricsOnly)
+	}
+
+	noError, err := json.Marshal(HeartbeatMetrics{Describe: &ThrallDescribe{CallOps: []string{"get"}, Version: "1.0.0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"cast_ops", "last_error", "last_error_ms"} {
+		if strings.Contains(string(noError), field) {
+			t.Errorf("describe without %s unexpectedly contains it: %s", field, noError)
 		}
 	}
 }

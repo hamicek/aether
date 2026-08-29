@@ -39,6 +39,9 @@ type EdgeDef struct {
 	// http.Server.Shutdown, which unblocks a Run blocked in Serve. It is not called when Run exits on
 	// its own, so it is an unblocker, not a place for resource cleanup (do that at the end of Run).
 	Stop func()
+	// Version is the edge's self-declared build, reported in the heartbeat's self-description (see
+	// thrall.Def.Version). An edge has no operations, so its description carries only the version.
+	Version string
 }
 
 // StartEdge connects an edge thrall to the ether and runs its lifecycle. It mirrors Start / StartFSM
@@ -114,7 +117,9 @@ func StartEdge(def EdgeDef) error {
 	}
 
 	// The edge has no mailbox, so it reports zero self-metrics - the shape the lord's reaper expects.
-	go heartbeat(nc, name, &mailboxStats{}, stop)
+	go heartbeat(nc, name, &mailboxStats{}, func() *wire.ThrallDescribe {
+		return &wire.ThrallDescribe{Version: def.Version}
+	}, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return fail(err)

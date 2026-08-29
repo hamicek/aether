@@ -31,6 +31,9 @@ export interface EdgeDef {
   // stop is an optional hook invoked ONLY on a drain, to unblock run (e.g. server.close()). It is not
   // called when run resolves/throws on its own.
   stop?: () => void | Promise<void>;
+  // version is the edge's self-declared build, reported in the heartbeat's self-description (see
+  // ThrallDef.version). An edge has no operations, so its description carries only the version.
+  version?: string;
 }
 
 // defEdge is a typed identity helper.
@@ -117,7 +120,7 @@ export async function startEdge(def: EdgeDef): Promise<void> {
     }
   })();
 
-  startHeartbeat(nc, name, zeroMetrics);
+  startHeartbeat(nc, name, zeroMetrics, () => (def.version ? { version: def.version } : {}));
   try {
     await startFencingIfSingleton(nc, name, log);
     await startLordLivenessFencing(nc, name, log);

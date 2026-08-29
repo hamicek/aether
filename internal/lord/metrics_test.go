@@ -34,6 +34,34 @@ func scrape(t *testing.T, l *Lord) string {
 	return string(body)
 }
 
+// TestRecordHeartbeatStoresDescribe proves the lord keeps a thrall's last self-description, and
+// that a later heartbeat carrying none (an older SDK) does not erase it.
+func TestRecordHeartbeatStoresDescribe(t *testing.T) {
+	lm := newLordMetrics()
+
+	lm.recordHeartbeat("counter", wire.HeartbeatMetrics{ProcessedTotal: 1, Describe: &wire.ThrallDescribe{
+		CallOps: []string{"get"}, CastOps: []string{"inc"}, Version: "1.2.0"}})
+	d := lm.describeFor("counter")
+	if d == nil || d.Version != "1.2.0" {
+		t.Fatalf("describe = %+v, want version 1.2.0", d)
+	}
+	if got := lm.snapshot()["counter"].Describe; got == nil || got.Version != "1.2.0" {
+		t.Errorf("snapshot describe = %+v, want it carried through", got)
+	}
+
+	// A metrics-only heartbeat must not clear the last-known description.
+	lm.recordHeartbeat("counter", wire.HeartbeatMetrics{ProcessedTotal: 2})
+	if d := lm.describeFor("counter"); d == nil || d.Version != "1.2.0" {
+		t.Errorf("describe after a describe-less beat = %+v, want it preserved", d)
+	}
+
+	// forget drops it, as it does the metrics, so a retired dynamic thrall leaves nothing behind.
+	lm.forget("counter")
+	if d := lm.describeFor("counter"); d != nil {
+		t.Errorf("describe after forget = %+v, want nil", d)
+	}
+}
+
 func TestMetricsEndpointExposesBaseline(t *testing.T) {
 	l := newTestLord()
 	out := scrape(t, l)

@@ -72,6 +72,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
 | **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a view of every lord across the bus, cluster, or leaf sites (opt-in, mechanism not domain; supervision stays node-local) - see [Observability](#observability) |
+| **Self-description** | ✅ | Every thrall reports its ops (derived from its handler maps), self-declared version, and last error on the heartbeat; `aether describe` shows it, and `[[thrall]] metadata` adds operator deployment tags - see [Observability](#observability) |
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
@@ -141,7 +142,8 @@ aether_<app>_<name>          # JetStream stream for the durable mailbox (dots ->
 
 ```bash
 aether up -f <manifest>          # bring up the ether + the lord per the manifest
-aether ps [--url <nats>]         # a table of thrall status from the KV registry
+aether ps [--url <nats>]         # a table of thrall status (+ version) from the KV registry
+aether describe <name> [--json]  # one thrall's full self-description: ops, version, metadata, last error
 aether events [--url <nats>]     # the live lifecycle stream
 aether fleet [--url <nats>] [--watch]  # network-wide fleet health across lords (opt-in)
 aether cast <name> <op> [json]   # send a cast to a thrall
@@ -598,6 +600,42 @@ SITE_A { exports: [ { stream: "aether._fleet.sitea.>" } ] }   # matches the spok
 fleet_health             = true    # publish this lord's health summary (off by default)
 fleet_health_interval_ms = 5000    # publish cadence (default 5000)
 ```
+
+**Self-description (what a thrall is, and what build runs).** Every thrall reports a
+self-description on its heartbeat, so you can ask what it is without an ssh: the operations it
+answers, its self-declared version, and the reason of its most recent failure. `aether describe
+<name>` prints it; `aether ps` shows a version column and a compact last-error marker; `aether fleet`
+shows the version and last error per thrall across the network.
+
+```bash
+aether describe counter
+# name         counter
+# status       ready
+# version      1.4.0
+# call ops     get, value
+# cast ops     inc, reset
+# metadata     site = A
+# last error   handler_error: bad payload (2026-08-29 14:03:11)
+```
+
+Three choices make it honest and cheap:
+
+- **Ops are derived, not declared.** The SDK reports the keys of a thrall's handler maps
+  (`call_ops` / `cast_ops`), so a handler stays "just a map of functions" - you declare nothing.
+  The two sets are kept apart so an `[[edge.http]]` route (itself a call or a cast) is validated
+  against the right one: a route pointing at an op the thrall does not answer is logged as a warning
+  once the thrall reports itself (the load-time check in [HTTP edge](#http-edge-ingress) only knows
+  the target thrall exists, not its ops, because thralls start after the manifest loads).
+- **Version lives with the code.** Declare it on the thrall (`version` on the Go `Def` / TS
+  `ThrallDef` / Python `def_thrall`), so it answers "what actually runs here" - a manifest can go
+  stale against the deployed binary exactly when you need the truth. `last_error` rides the same
+  channel and resets on restart, like the processed counter; on an escalation the thrall sends a
+  final "dying breath" heartbeat carrying the reason before it exits.
+- **Metadata is the operator's, not the code's.** A `[[thrall]]` can carry `metadata = { site =
+  "A", plc = "10.0.0.5" }` - a deployment fact. The lord attaches it from the manifest (it does not
+  round-trip through the thrall) and shows it in `ps` / `describe` / `fleet`. It is deliberately kept
+  out of the Prometheus labels, where a high-cardinality value (a PLC address, an id) would explode
+  the series count.
 
 ## Quickstart
 

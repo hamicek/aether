@@ -6,7 +6,7 @@
 // call/cast - the envelope is unchanged.
 
 import type { NatsConnection } from "nats";
-import { decode, encode, type Envelope } from "./envelope";
+import { decode, encode, type Envelope, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv } from "./connection";
 import { useConnection, call, cast, startChild, stopChild, orNewTrace } from "./client";
@@ -63,6 +63,20 @@ export interface FSMDef<D> {
   init: (ctx: Ctx) => Promise<D> | D;
   states: Record<string, State<D>>;
   terminate?: (reason: string, state: string, data: D) => void | Promise<void>;
+  // version is the machine's self-declared build, reported in the heartbeat's self-description
+  // (see ThrallDef.version). Optional; omitted means unversioned.
+  version?: string;
+}
+
+// fsmDescribe builds an FSM's self-description: the union of every state's reaction ops (each is
+// dispatchable as a call or a cast, so it appears in both sets), plus the reserved _state call op.
+// The developer declares no operations - they are the reaction keys already present in the states.
+export function fsmDescribe<D>(def: FSMDef<D>): ThrallDescribe {
+  const events = [...new Set(Object.values(def.states).flatMap((s) => Object.keys(s.on)))].sort();
+  const d: ThrallDescribe = { call_ops: [...events, FSM_STATE_OP].sort() };
+  if (events.length) d.cast_ops = events;
+  if (def.version) d.version = def.version;
+  return d;
 }
 
 // Machine is the serialized state-machine core, independent of NATS (so it is unit-testable).
@@ -274,7 +288,7 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
     }
   })();
 
-  startHeartbeat(nc, name, () => machine.snapshot());
+  startHeartbeat(nc, name, () => machine.snapshot(), () => fsmDescribe(def));
   await startFencingIfSingleton(nc, name, log);
   await startLordLivenessFencing(nc, name, log);
 }
