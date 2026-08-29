@@ -159,6 +159,9 @@ func psCmd(argv []string) {
 			pid = fmt.Sprintf("%d", e.PID)
 		}
 		row := fmt.Sprintf("%-14s %-8s %-10s %-10s %s", e.Name, pid, e.Status, orDash(e.Version), age.Round(time.Second))
+		if versionMismatch(e.Version, e.ExpectedVersion) {
+			row += "  ! version mismatch (want " + e.ExpectedVersion + ")"
+		}
 		if e.LastError != "" {
 			row += "  ! " + truncate(e.LastError, 40)
 		}
@@ -222,6 +225,12 @@ func describeCmd(argv []string) {
 	}
 	fmt.Printf("%-12s %s\n", "node", entry.Node)
 	fmt.Printf("%-12s %s\n", "version", orDash(entry.Version))
+	if entry.ExpectedVersion != "" {
+		fmt.Printf("%-12s %s\n", "expected", entry.ExpectedVersion)
+		if versionMismatch(entry.Version, entry.ExpectedVersion) {
+			fmt.Printf("%-12s rollout mismatch: running %s, expected %s\n", "!", orDash(entry.Version), entry.ExpectedVersion)
+		}
+	}
 	fmt.Printf("%-12s %s\n", "call ops", orDash(strings.Join(entry.CallOps, ", ")))
 	fmt.Printf("%-12s %s\n", "cast ops", orDash(strings.Join(entry.CastOps, ", ")))
 	if len(entry.Metadata) > 0 {
@@ -242,6 +251,12 @@ func describeCmd(argv []string) {
 		when := time.UnixMilli(entry.LastErrorMs).Format("2006-01-02 15:04:05")
 		fmt.Printf("%-12s %s (%s)\n", "last error", entry.LastError, when)
 	}
+}
+
+// versionMismatch reports a rollout mismatch: the operator declared an expected version and the
+// reported version differs from it (a reported-empty version against a set expectation counts).
+func versionMismatch(reported, expected string) bool {
+	return expected != "" && reported != expected
 }
 
 // orDash renders an empty string as a dash, so a blank field reads as "none" rather than a gap.
@@ -358,6 +373,9 @@ func printFleet(nodes []fleet.NodeView) {
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 		for _, th := range sorted {
 			line := fmt.Sprintf("    %-14s %-10s %s", th.Name, th.Status, orDash(th.Version))
+			if versionMismatch(th.Version, th.ExpectedVersion) {
+				line += "  ! version mismatch (want " + th.ExpectedVersion + ")"
+			}
 			if th.LastError != "" {
 				line += "  ! " + truncate(th.LastError, 40)
 			}

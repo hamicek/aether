@@ -87,3 +87,24 @@ func TestResolveEndpointPrecedence(t *testing.T) {
 		t.Fatalf("env should fill when the file omits creds: got CA=%q nkey=%q", ep.CA, ep.NkeySeed)
 	}
 }
+
+// TestVersionMismatch covers the rollout-mismatch predicate used by ps/describe/fleet: a mismatch
+// requires a declared expectation and a differing reported version (a reported-empty version
+// against a set expectation counts); no expectation is never a mismatch.
+func TestVersionMismatch(t *testing.T) {
+	cases := []struct {
+		reported, expected string
+		want               bool
+	}{
+		{"1.4.0", "1.4.0", false}, // match
+		{"1.3.0", "1.4.0", true},  // differs
+		{"", "1.4.0", true},       // reports nothing, expected set
+		{"1.4.0", "", false},      // no expectation declared
+		{"", "", false},           // neither
+	}
+	for _, c := range cases {
+		if got := versionMismatch(c.reported, c.expected); got != c.want {
+			t.Errorf("versionMismatch(%q, %q) = %v, want %v", c.reported, c.expected, got, c.want)
+		}
+	}
+}
