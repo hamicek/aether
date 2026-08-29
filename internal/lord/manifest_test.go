@@ -173,7 +173,8 @@ name = "api"
 addr = ":8080"
 route."GET /v" = { thrall = "countr", op = "v" }
 `,
-			wantErr: "is not a declared thrall",
+			// The error names the declared thralls so a typo is diagnosed without scrolling the manifest.
+			wantErr: `is not a declared thrall (declared: counter)`,
 		},
 		{
 			name: "route targets an edge server, not a thrall",
@@ -183,7 +184,8 @@ name = "api"
 addr = ":8080"
 route."GET /v" = { thrall = "api", op = "v" }
 `,
-			wantErr: "is not a declared thrall",
+			// No thralls declared at all -> the hint says so rather than listing an empty set.
+			wantErr: `is not a declared thrall (no thralls are declared)`,
 		},
 		{
 			name: "route key without method",
