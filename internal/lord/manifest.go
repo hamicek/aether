@@ -311,7 +311,7 @@ func (m *Manifest) validate() error {
 			// spawned dynamically at runtime is not in the manifest, so a static route may only target
 			// a statically declared thrall - that is the intended constraint, not an oversight.
 			if kind, ok := seen[r.Thrall]; !ok || kind != "thrall" {
-				return fmt.Errorf("edge.http %q: route %q: thrall %q is not a declared thrall", e.Name, key, r.Thrall)
+				return fmt.Errorf("edge.http %q: route %q: thrall %q is not a declared thrall (%s)", e.Name, key, r.Thrall, declaredThrallsHint(m.Thralls))
 			}
 			if r.Kind != "call" && r.Kind != "cast" {
 				return fmt.Errorf("edge.http %q: route %q: kind must be call or cast, got %q", e.Name, key, r.Kind)
@@ -319,6 +319,20 @@ func (m *Manifest) validate() error {
 		}
 	}
 	return nil
+}
+
+// declaredThrallsHint lists the manifest's thrall names (in declaration order) for a "did you mean"
+// hint when an edge route targets a name that is not one of them - so a typo is diagnosed without
+// scrolling back through the manifest. Falls back to a plain note when no thralls are declared.
+func declaredThrallsHint(thralls []ThrallSpec) string {
+	if len(thralls) == 0 {
+		return "no thralls are declared"
+	}
+	names := make([]string, 0, len(thralls))
+	for _, t := range thralls {
+		names = append(names, t.Name)
+	}
+	return "declared: " + strings.Join(names, ", ")
 }
 
 // validateRouteKey checks a route key of the form "METHOD /path" (e.g. "POST /increment").
