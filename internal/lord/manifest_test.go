@@ -736,6 +736,34 @@ event_log_use = "audit"
 	}
 }
 
+// TestManifestThrallMetadata proves deployment metadata parses off a thrall and that an empty key
+// (a config typo) is rejected at load.
+func TestManifestThrallMetadata(t *testing.T) {
+	m, err := LoadManifest(writeManifest(t, `
+[[thrall]]
+name = "pump"
+cmd  = "run"
+metadata = { site = "A", plc = "10.0.0.5", criticality = "high" }
+`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	md := m.Thralls[0].Metadata
+	if md["site"] != "A" || md["plc"] != "10.0.0.5" || md["criticality"] != "high" {
+		t.Errorf("metadata = %v, want site/plc/criticality set", md)
+	}
+
+	_, err = LoadManifest(writeManifest(t, `
+[[thrall]]
+name = "pump"
+cmd  = "run"
+metadata = { "" = "oops" }
+`))
+	if err == nil || !strings.Contains(err.Error(), "empty key") {
+		t.Fatalf("empty metadata key: got %v, want an 'empty key' error", err)
+	}
+}
+
 // writeFile writes body to name inside dir (helper for schema-alongside-manifest tests).
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()

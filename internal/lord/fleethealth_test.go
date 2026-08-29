@@ -47,7 +47,9 @@ func TestFleetHealthBuilder(t *testing.T) {
 // reaches the fleet summary, so a fleet-wide view shows what build runs and what last failed.
 func TestFleetHealthCarriesDescribe(t *testing.T) {
 	eth := startEmbedded(t)
-	m := manifest(t, "demo", "one_for_one", spec("counter", "permanent", "local"))
+	s := spec("counter", "permanent", "local")
+	s.Metadata = map[string]string{"site": "A", "plc": "10.0.0.5"}
+	m := manifest(t, "demo", "one_for_one", s)
 	l, err := New(m, eth)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -70,6 +72,10 @@ func TestFleetHealthCarriesDescribe(t *testing.T) {
 	}
 	if th.LastError != "handler_error: boom" || th.LastErrorMs != 1700000000000 {
 		t.Errorf("last error = %q @ %d, want the reported one", th.LastError, th.LastErrorMs)
+	}
+	// Metadata is a manifest fact the lord attaches directly (never round-tripped through the thrall).
+	if th.Metadata["site"] != "A" || th.Metadata["plc"] != "10.0.0.5" {
+		t.Errorf("metadata = %v, want site=A plc=10.0.0.5", th.Metadata)
 	}
 }
 

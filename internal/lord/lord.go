@@ -869,9 +869,9 @@ func (l *Lord) sleep(d time.Duration) (stop bool) {
 }
 
 func (l *Lord) setStatus(name string, pid int, status string) {
-	// registry.Set overwrites the whole entry, so re-attach the thrall's last-known
-	// self-description (from the heartbeat) on every status write. Manifest metadata is added here
-	// too, later.
+	// registry.Set overwrites the whole entry, so re-attach the thrall's descriptive fields on
+	// every status write: its self-description (last-known, from the heartbeat) and its manifest
+	// metadata (a deployment fact the lord owns, so it never round-trips through the thrall).
 	entry := registry.Entry{PID: pid, Node: l.id, Status: status, UpdatedMs: time.Now().UnixMilli()}
 	if d := l.metrics.describeFor(name); d != nil {
 		entry.Version = d.Version
@@ -879,6 +879,9 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 		entry.CastOps = d.CastOps
 		entry.LastError = d.LastError
 		entry.LastErrorMs = d.LastErrorMs
+	}
+	if ch := l.childByName(name); ch != nil {
+		entry.Metadata = ch.spec.Metadata
 	}
 	if err := l.reg.Set(name, entry); err != nil {
 		l.log.Error("registry set failed", slog.String("name", name), slog.Any("err", err))

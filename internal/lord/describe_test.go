@@ -19,6 +19,7 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 		t.Fatalf("registry.Open: %v", err)
 	}
 	l := &Lord{log: obs.NewLogger(), id: "lord-test", reg: reg, metrics: newLordMetrics()}
+	l.children = []*child{{spec: ThrallSpec{Name: "counter", Metadata: map[string]string{"site": "A"}}}}
 
 	l.metrics.recordHeartbeat("counter", wire.HeartbeatMetrics{ProcessedTotal: 1, Describe: &wire.ThrallDescribe{
 		CallOps: []string{"get", "value"}, CastOps: []string{"inc"}, Version: "3.1.4"}})
@@ -30,6 +31,9 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 	}
 	if e.Version != "3.1.4" {
 		t.Errorf("version = %q, want 3.1.4", e.Version)
+	}
+	if e.Metadata["site"] != "A" {
+		t.Errorf("metadata = %v, want site=A (from the manifest spec)", e.Metadata)
 	}
 	if len(e.CallOps) != 2 || e.CallOps[0] != "get" || e.CallOps[1] != "value" {
 		t.Errorf("call ops = %v, want [get value]", e.CallOps)
