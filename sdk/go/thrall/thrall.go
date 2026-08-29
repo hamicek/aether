@@ -189,6 +189,29 @@ func Start[S any](def Def[S]) error {
 	var mu sync.Mutex
 	stats := &mailboxStats{}
 
+	// The last handler failure, reported in the self-description. It has its own lock because the
+	// heartbeat goroutine reads it while a handler writes it under the mailbox lock.
+	lastErr := &lastError{}
+
+	// The self-description attached to every heartbeat: the static ops/version plus the current
+	// last error, read fresh per beat so a failure shows up on the next beat.
+	staticDescribe := wire.ThrallDescribe{
+		CallOps: opNames(def.HandleCall),
+		CastOps: opNames(def.HandleCast),
+		Version: def.Version,
+	}
+	describe := func() *wire.ThrallDescribe {
+		d := staticDescribe
+		d.LastError, d.LastErrorMs = lastErr.get()
+		return &d
+	}
+	// dyingBreath publishes one final heartbeat carrying the last error and flushes it, so the lord
+	// learns WHY a thrall escalated before it sees the process exit. Used only on the crash path.
+	dyingBreath := func() {
+		publishHeartbeat(nc, name, stats, describe)
+		_ = nc.Flush()
+	}
+
 	// Optional in-memory dedup by idempotency key. Accessed only under mu (the mailbox lock),
 	// so it needs no lock of its own. Nil unless the thrall opts in.
 	var dedup *dedupCache
@@ -229,12 +252,14 @@ func Start[S any](def Def[S]) error {
 			// Reply the caller before we crash, so it learns of the restart instead of
 			// hanging until timeout; flush so the reply leaves before the process exits.
 			_ = msg.Respond(mustJSON(errReply(e, "escalated", esc.Reason)))
-			_ = nc.Flush()
+			lastErr.set("escalated: " + esc.Reason)
+			dyingBreath() // let the lord record the reason before the process dies
 			log.Error("handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
 			exitProcess(1)
 			return
 		}
 		if herr != nil {
+			lastErr.set("handler_error: " + herr.Error())
 			_ = msg.Respond(mustJSON(errReply(e, "handler_error", herr.Error())))
 			return
 		}
@@ -280,11 +305,14 @@ func Start[S any](def Def[S]) error {
 			if ackDurable != nil {
 				ackDurable()
 			}
+			lastErr.set("escalated: " + esc.Reason)
+			dyingBreath() // let the lord record the reason before the process dies
 			log.Error("cast handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
 			exitProcess(1)
 			return
 		}
 		if herr != nil {
+			lastErr.set("handler_error: " + herr.Error())
 			log.Error("cast handler failed", slog.String("op", e.Op), slog.Any("err", herr))
 			return
 		}
@@ -342,17 +370,7 @@ func Start[S any](def Def[S]) error {
 		return err
 	}
 
-	// The self-description reported on every heartbeat. Ops and version are static (built once);
-	// the last-error fields stay zero here and are filled in by later work.
-	describe := wire.ThrallDescribe{
-		CallOps: opNames(def.HandleCall),
-		CastOps: opNames(def.HandleCast),
-		Version: def.Version,
-	}
-	go heartbeat(nc, name, stats, func() *wire.ThrallDescribe {
-		d := describe
-		return &d
-	}, stop)
+	go heartbeat(nc, name, stats, describe, stop)
 
 	if err := startFencingIfSingleton(nc, name, log, stop); err != nil {
 		return err
@@ -552,17 +570,41 @@ func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.R
 	return reply.Payload, nil
 }
 
+// lastError holds the reason of a thrall's most recent handler failure. It has its own lock because
+// the heartbeat goroutine reads it while a handler (under the mailbox lock) writes it.
+type lastError struct {
+	mu  sync.Mutex
+	msg string
+	ms  int64
+}
+
+func (e *lastError) set(msg string) {
+	e.mu.Lock()
+	e.msg, e.ms = msg, time.Now().UnixMilli()
+	e.mu.Unlock()
+}
+
+func (e *lastError) get() (string, int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.msg, e.ms
+}
+
+// publishHeartbeat sends one liveness beat carrying the thrall's metrics and self-description.
+// Shared by the periodic loop and the crash-path dying breath. describe may return nil to attach none.
+func publishHeartbeat(nc *nats.Conn, name string, stats *mailboxStats, describe func() *wire.ThrallDescribe) {
+	m := stats.snapshot()
+	m.Describe = describe()
+	hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli(),
+		Payload: mustMarshal(m)}
+	_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
+}
+
 // heartbeat publishes the thrall's liveness beat at the lord-configured interval. describe returns
 // the self-description to attach to each beat (a fresh value per tick, so a mutable field such as the
 // last error is picked up as it changes); it may return nil to attach none.
 func heartbeat(nc *nats.Conn, name string, stats *mailboxStats, describe func() *wire.ThrallDescribe, stop <-chan struct{}) {
-	tick := func() {
-		m := stats.snapshot()
-		m.Describe = describe()
-		hb := wire.Envelope{V: 1, Kind: wire.KindHB, To: name, TS: time.Now().UnixMilli(),
-			Payload: mustMarshal(m)}
-		_ = nc.Publish(wire.Heartbeat(name), mustJSON(hb))
-	}
+	tick := func() { publishHeartbeat(nc, name, stats, describe) }
 	tick()
 	// Beat at the interval the lord injected (AETHER_HEARTBEAT_INTERVAL_MS); default 2s. The lord
 	// derives its reaper threshold from the same value, so they never drift.

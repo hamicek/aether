@@ -3,6 +3,7 @@ package lord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -45,6 +46,9 @@ func TestMain(m *testing.M) {
 func runProbe() {
 	def := thrall.Def[int]{
 		// Name empty -> taken from AETHER_NAME injected by the lord.
+		// Version is self-declared: it rides the heartbeat's self-description, so a test (and
+		// `aether ps` / `describe`) can read the build without asking the process directly.
+		Version: "probe-1.0",
 		Init: func(ctx *thrall.Ctx) (int, error) {
 			_ = ctx.NATS.Publish("test.probe.started", []byte(ctx.Name))
 			_ = ctx.NATS.Flush()
@@ -67,6 +71,11 @@ func runProbe() {
 		HandleCast: map[string]thrall.CastFn[int]{
 			"inc":   func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { return s + 1, nil },
 			"crash": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { os.Exit(1); return s, nil },
+			// fail returns a plain (non-escalating) handler error: the thrall keeps running, so its
+			// last error is reported on the next heartbeat rather than as a dying breath.
+			"fail": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) {
+				return s, errors.New("cast handler boom")
+			},
 			// escalate is the typed let-it-crash path: returning Escalate self-terminates the
 			// thrall abnormally, so the lord restarts it per policy (contrast with `crash`,
 			// which reaches for a raw os.Exit).

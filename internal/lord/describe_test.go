@@ -1,7 +1,12 @@
 package lord
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/obs"
 	"github.com/hamicek/aether/internal/registry"
@@ -46,5 +51,74 @@ func TestSetStatusWritesDescribeToRegistry(t *testing.T) {
 	l.setStatus("counter", 4321, "stale")
 	if e, _, _ := reg.Get("counter"); e.Version != "3.1.4" || len(e.CallOps) != 2 {
 		t.Errorf("description lost on a later status write: %+v", e)
+	}
+}
+
+// TestProbeReportsVersionAndLastError drives a real re-exec'd thrall end-to-end: its self-declared
+// version reaches the registry over the heartbeat, and a plain (non-fatal) handler error is
+// reported as last_error on a later beat while the thrall keeps running.
+func TestProbeReportsVersionAndLastError(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	reg, err := registry.Open(nc)
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	waitFor(t, 5*time.Second, "version and ops in the registry", func() bool {
+		e, ok, _ := reg.Get("probe")
+		return ok && e.Version == "probe-1.0" && len(e.CallOps) > 0
+	})
+
+	cast(t, nc, app, "probe", "fail")
+	waitFor(t, 5*time.Second, "last error reported on a heartbeat", func() bool {
+		e, ok, _ := reg.Get("probe")
+		return ok && strings.Contains(e.LastError, "cast handler boom")
+	})
+}
+
+// TestEscalateEmitsDyingBreath proves the crash path publishes a final heartbeat carrying the
+// escalation reason before the process exits. The test watches the thrall's heartbeat subject
+// directly, so it observes the dying breath regardless of how fast the lord reaps and restarts the
+// process (the registry copy is transient - a restart resets last_error, like processed_total).
+func TestEscalateEmitsDyingBreath(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	got := make(chan string, 8)
+	sub, err := nc.Subscribe(wire.Heartbeat("probe"), func(m *nats.Msg) {
+		var e wire.Envelope
+		if json.Unmarshal(m.Data, &e) != nil {
+			return
+		}
+		var hm wire.HeartbeatMetrics
+		if json.Unmarshal(e.Payload, &hm) != nil || hm.Describe == nil || hm.Describe.LastError == "" {
+			return
+		}
+		select {
+		case got <- hm.Describe.LastError:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	cast(t, nc, app, "probe", "escalate")
+
+	select {
+	case le := <-got:
+		if !strings.Contains(le, "cast asked to crash") {
+			t.Fatalf("dying-breath last_error = %q, want the escalate reason", le)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no dying-breath heartbeat carrying the escalate reason")
 	}
 }
