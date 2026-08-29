@@ -24,6 +24,8 @@ restart = "permanent"
 scope   = "local"
 # Deployment metadata (operator-owned): shown by `aether describe counter-go` / `ps` / `fleet`.
 metadata = { site = "demo", lang = "go" }
+# The build the operator expects here; a mismatch with the thrall's reported version is flagged.
+expected_version = "1.0.0"
 
 [[thrall]]
 name = "gateway"

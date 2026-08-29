@@ -904,7 +904,13 @@ aligned with the rest of the design:
   deployed against a right manifest, which is the rollout bug you most want to catch. **Metadata**
   (site, PLC address, protocol, criticality) is a deployment fact the operator declares in
   `[[thrall]] metadata`; the lord attaches it from the manifest and never round-trips it through the
-  thrall, which keeps it off the SDK surface entirely.
+  thrall, which keeps it off the SDK surface entirely. The same split gives the manifest a companion
+  `expected_version`: the version the operator *intends* to run. The lord compares it against the
+  reported version and raises a **rollout mismatch** (a warning logged once per reported version,
+  plus a marker in `ps` / `describe` / `fleet`) when they differ - catching the wrong-binary case the
+  self-declared version alone only exposes if you read both numbers by eye. The mismatch is *derived*
+  at render time (reported vs expected), never a stored flag, so it self-heals the moment the two
+  line up; like the edge-route op check it is asynchronous, since a thrall reports only after startup.
 - **Metadata is shown, not turned into Prometheus labels.** It appears in `ps` / `describe` /
   `fleet` and could feed an application dashboard, but mapping it onto metric labels is left out on
   purpose: a high-cardinality value (a PLC address, an id) would explode the series count. An
