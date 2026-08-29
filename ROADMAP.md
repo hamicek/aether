@@ -60,7 +60,13 @@ Still open:
 structured logs across the lord and all SDKs, a Prometheus `/metrics` endpoint (thrall count by
 status, restarts, gave-ups, heartbeat misses, mailbox depth/latency, processed, durable backlog),
 heartbeat miss detection (a `stale` status), and `trace` correlation propagated across call/cast
-hops for cross-process tracing.
+hops for cross-process tracing. Each thrall also reports a **self-description** on its heartbeat -
+the operations it answers (derived from its handler maps, so nothing is declared), its self-declared
+version, and its last error - which the lord folds into the registry and the fleet summary;
+`aether describe <name>` prints the whole record, `aether ps` gains a version column, and a
+`[[thrall]] metadata` block adds operator-owned deployment tags (site, PLC, criticality). An edge
+route whose op the target thrall does not report is flagged once the thrall describes itself
+(the manifest-load check already rejects an edge route whose target thrall is not declared).
 
 Still open:
 
