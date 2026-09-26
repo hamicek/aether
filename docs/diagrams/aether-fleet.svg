@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 420" role="img" aria-label="A hub connects to three leaf sites. Each site is a single binary bound to its own NATS account, so the sites cannot see each other. The hub still aggregates a fleet-wide health view.">
+  <rect x="0" y="0" width="700" height="420" rx="16" fill="#0E141D" stroke="#202B39"/>
+
+  <!-- title -->
+  <text x="28" y="40" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="19" font-weight="700" fill="#E7EDF4">Hub and spoke fleet</text>
+  <text x="28" y="61" font-family="system-ui,sans-serif" font-size="12.5" fill="#6B7787">Isolated sites, one fleet-wide view</text>
+
+  <!-- hub -->
+  <rect x="285" y="86" width="130" height="58" rx="10" fill="#18212E" stroke="#56A6FF" stroke-width="2"/>
+  <text x="350" y="114" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="15" font-weight="700" fill="#E7EDF4">hub</text>
+  <text x="350" y="132" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10.5" fill="#3FE0C8">aether fleet</text>
+
+  <!-- leaf links -->
+  <line x1="342" y1="144" x2="122" y2="230" stroke="#56A6FF" stroke-width="1.5" opacity="0.8"/>
+  <line x1="350" y1="144" x2="350" y2="230" stroke="#56A6FF" stroke-width="1.5" opacity="0.8"/>
+  <line x1="358" y1="144" x2="578" y2="230" stroke="#56A6FF" stroke-width="1.5" opacity="0.8"/>
+  <text x="360" y="196" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#56A6FF">leaf link · data plane only</text>
+
+  <!-- sites -->
+  <!-- site A -->
+  <g>
+    <rect x="24" y="232" width="196" height="156" rx="12" fill="#121A24" stroke="#56A6FF" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="40" y="256" font-family="ui-monospace,Menlo,monospace" font-size="11" font-weight="700" fill="#56A6FF">site A · leaf</text>
+    <text x="40" y="270" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">single binary · own account</text>
+    <rect x="90" y="284" width="64" height="26" rx="6" fill="#18212E" stroke="#56A6FF" stroke-width="1.5"/>
+    <text x="122" y="301" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#E7EDF4">lord</text>
+    <rect x="42" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="80" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+    <rect x="126" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="164" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+  </g>
+  <!-- site B -->
+  <g>
+    <rect x="252" y="232" width="196" height="156" rx="12" fill="#121A24" stroke="#56A6FF" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="268" y="256" font-family="ui-monospace,Menlo,monospace" font-size="11" font-weight="700" fill="#56A6FF">site B · leaf</text>
+    <text x="268" y="270" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">single binary · own account</text>
+    <rect x="318" y="284" width="64" height="26" rx="6" fill="#18212E" stroke="#56A6FF" stroke-width="1.5"/>
+    <text x="350" y="301" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#E7EDF4">lord</text>
+    <rect x="270" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="308" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+    <rect x="354" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="392" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+  </g>
+  <!-- site C -->
+  <g>
+    <rect x="480" y="232" width="196" height="156" rx="12" fill="#121A24" stroke="#56A6FF" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <text x="496" y="256" font-family="ui-monospace,Menlo,monospace" font-size="11" font-weight="700" fill="#56A6FF">site C · leaf</text>
+    <text x="496" y="270" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">single binary · own account</text>
+    <rect x="546" y="284" width="64" height="26" rx="6" fill="#18212E" stroke="#56A6FF" stroke-width="1.5"/>
+    <text x="578" y="301" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#E7EDF4">lord</text>
+    <rect x="498" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="536" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+    <rect x="582" y="330" width="76" height="34" rx="6" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+    <text x="620" y="351" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#9AA8B8">thrall</text>
+  </g>
+
+  <!-- isolation markers between sites -->
+  <g>
+    <circle cx="236" cy="300" r="11" fill="#0E141D" stroke="#E0B341" stroke-width="1.5"/>
+    <line x1="229" y1="307" x2="243" y2="293" stroke="#E0B341" stroke-width="1.5"/>
+  </g>
+  <g>
+    <circle cx="464" cy="300" r="11" fill="#0E141D" stroke="#E0B341" stroke-width="1.5"/>
+    <line x1="457" y1="307" x2="471" y2="293" stroke="#E0B341" stroke-width="1.5"/>
+  </g>
+
+  <!-- caption -->
+  <text x="350" y="408" text-anchor="middle" font-family="system-ui,sans-serif" font-size="11" fill="#6B7787">Each site is its own NATS account: a hard boundary, not careful code. Sites cannot see each other; the hub still sees fleet health.</text>
+</svg>

@@ -5,6 +5,10 @@
 A polyglot distributed actor/OTP runtime over NATS. A **lord** (supervisor) spawns
 **thralls** (genservers) as OS processes and lets them communicate in the **ether** (NATS).
 
+**Docs and landing page: https://hamicek.github.io/aether/**
+
+![The aether model: a lord supervises thralls in Go, TypeScript and Python; they communicate over the ether bus with call and cast](docs/diagrams/aether-model.svg)
+
 ## What it's for
 
 You have a handful of long-running programs - a device driver, a worker pool, an API gateway, a
@@ -32,6 +36,8 @@ adopting Erlang, a sidecar, or Kubernetes.
 Typical shapes: protocol/device drivers feeding a gateway (IoT / edge / SCADA-style), a pool of
 workers behind an ingress, or edge sites that must keep running while disconnected from a central hub.
 **Concrete shapes and runnable examples: [USE-CASES.md](./USE-CASES.md).**
+
+![Edge / SCADA site: devices behind a protocol feed a driver, which feeds a site thrall on a serialized mailbox; a threshold alarm reads it and an SSE edge pushes live to a browser, all supervised by the lord](docs/diagrams/aether-scada.svg)
 
 **It is not a BEAM replacement:** if you need millions of cheap in-VM actors in one language, reach
 for Erlang/Elixir. aether is **OTP-inspired, not OTP** - it trades that scale for real OS-process
@@ -473,6 +479,8 @@ out even if it has not yet self-terminated. Runnable demo in all three languages
 [`examples/fencing-token/`](./examples/fencing-token/).
 
 ## Multi-node and isolation
+
+![Hub and spoke fleet: a hub connects three leaf sites, each a single binary bound to its own NATS account so the sites cannot see each other, while the hub still aggregates a fleet-wide health view](docs/diagrams/aether-fleet.svg)
 
 One lord runs one app on one NATS node - that boundary is deliberate ([one lord per
 app](#manifest-example) is enforced at startup). To run

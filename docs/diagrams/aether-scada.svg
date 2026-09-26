@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 400" role="img" aria-label="An edge or SCADA site: devices behind a protocol feed a driver, which feeds a site thrall on a serialized mailbox; a threshold alarm reads it and an SSE edge pushes live to a browser. The lord supervises the aether processes.">
+  <defs>
+    <marker id="arrowSc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5F6D7E"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="400" rx="16" fill="#0E141D" stroke="#202B39"/>
+
+  <!-- title -->
+  <text x="28" y="40" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="19" font-weight="700" fill="#E7EDF4">Edge / SCADA site</text>
+  <text x="28" y="61" font-family="system-ui,sans-serif" font-size="12.5" fill="#6B7787">Drivers feed a site process; alarms push live to the browser</text>
+
+  <!-- supervision bracket over the aether-supervised parts -->
+  <path d="M168,150 L168,134 L718,134 L718,150" fill="none" stroke="#56A6FF" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.7"/>
+  <text x="443" y="126" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#56A6FF">lord · supervises + restarts</text>
+
+  <!-- devices (external, not supervised) -->
+  <rect x="24" y="168" width="118" height="72" rx="10" fill="#121A24" stroke="#2C3A4C" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="83" y="199" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">devices</text>
+  <text x="83" y="216" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">Modbus · OPC-UA</text>
+  <text x="83" y="228" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">MQTT</text>
+  <text x="83" y="256" text-anchor="middle" font-family="system-ui,sans-serif" font-size="10" fill="#5F6D7E">external</text>
+
+  <!-- driver -->
+  <rect x="168" y="168" width="118" height="72" rx="10" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+  <text x="227" y="196" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">driver</text>
+  <text x="227" y="213" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">custom edge</text>
+  <text x="227" y="225" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">owns the socket</text>
+
+  <!-- site thrall (emphasized) -->
+  <rect x="312" y="168" width="118" height="72" rx="10" fill="#131B26" stroke="#56A6FF" stroke-width="2"/>
+  <text x="371" y="192" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">site thrall</text>
+  <text x="371" y="209" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#9AA8B8">serialized mailbox</text>
+  <text x="371" y="221" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#9AA8B8">holds state · no locks</text>
+
+  <!-- threshold alarm -->
+  <rect x="456" y="168" width="118" height="72" rx="10" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+  <text x="515" y="192" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">threshold</text>
+  <text x="515" y="208" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">alarm</text>
+  <text x="515" y="225" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">watch → emit</text>
+
+  <!-- sse edge -->
+  <rect x="600" y="168" width="118" height="72" rx="10" fill="#18212E" stroke="#2C3A4C" stroke-width="1.5"/>
+  <text x="659" y="196" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" font-weight="700" fill="#E7EDF4">SSE edge</text>
+  <text x="659" y="213" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">live push</text>
+
+  <!-- browser -->
+  <rect x="600" y="308" width="118" height="52" rx="10" fill="#121A24" stroke="#3FE0C8" stroke-width="1.5"/>
+  <text x="659" y="332" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="12" font-weight="700" fill="#3FE0C8">browser</text>
+  <text x="659" y="347" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#6B7787">HMI</text>
+
+  <!-- flow arrows -->
+  <line x1="144" y1="204" x2="164" y2="204" stroke="#5F6D7E" stroke-width="1.5" marker-end="url(#arrowSc)"/>
+  <line x1="288" y1="204" x2="308" y2="204" stroke="#5F6D7E" stroke-width="1.5" marker-end="url(#arrowSc)"/>
+  <line x1="432" y1="204" x2="452" y2="204" stroke="#5F6D7E" stroke-width="1.5" marker-end="url(#arrowSc)"/>
+  <line x1="576" y1="204" x2="596" y2="204" stroke="#5F6D7E" stroke-width="1.5" marker-end="url(#arrowSc)"/>
+  <line x1="659" y1="240" x2="659" y2="304" stroke="#5F6D7E" stroke-width="1.5" marker-end="url(#arrowSc)"/>
+
+  <!-- arrow labels -->
+  <text x="154" y="196" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#5F6D7E">50k/s</text>
+  <text x="298" y="196" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#5F6D7E">cast</text>
+  <text x="442" y="196" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#5F6D7E">reads</text>
+  <text x="586" y="196" text-anchor="middle" font-family="system-ui,sans-serif" font-size="9" fill="#5F6D7E">alarm</text>
+
+  <!-- measured callout -->
+  <text x="28" y="384" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#56A6FF">measured: 50,000 values/s, no loss  ·  alarm p99 &lt; 1 ms</text>
+  <text x="732" y="384" text-anchor="end" font-family="system-ui,sans-serif" font-size="10" fill="#5F6D7E">domain sits on top of the runtime</text>
+</svg>
