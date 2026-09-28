@@ -12,7 +12,7 @@ import type { NatsConnection } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv } from "./connection";
-import { useConnection, call, cast, startChild, stopChild, orNewTrace } from "./client";
+import { useConnection, call, cast, castConfirmed, startChild, stopChild, orNewTrace } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent } from "./rebuild";
 import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
@@ -141,6 +141,7 @@ export async function startEvent(def: EventManagerDef): Promise<void> {
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),

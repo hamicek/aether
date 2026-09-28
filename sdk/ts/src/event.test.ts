@@ -15,6 +15,7 @@ function testCtx(): Ctx {
     singletonEpoch: 0,
     call: (() => Promise.resolve(undefined)) as Ctx["call"],
     cast: () => {},
+    castConfirmed: async () => {},
     append: async () => {},
     startChild: async () => "",
     stopChild: async () => {},

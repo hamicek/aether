@@ -2,7 +2,7 @@ import { AckPolicy, DeliverPolicy, nanos, type NatsConnection } from "nats";
 import { decode, encode, type Envelope, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
-import { useConnection, startChild, stopChild, call, cast, orNewTrace, type SpawnSpec, type CallOpts } from "./client";
+import { useConnection, startChild, stopChild, call, cast, castConfirmed, orNewTrace, type SpawnSpec, type CallOpts, type CastConfirmedOpts } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
@@ -75,6 +75,9 @@ export interface Ctx {
   singletonEpoch: number;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
   cast: (target: string, op: string, payload?: unknown, opts?: { idempotencyKey?: string }) => void;
+  // castConfirmed resolves only once the cast is durably stored in the target's mailbox; see
+  // castConfirmed in client.ts. Mirrors the Go SDK ctx.CastConfirmed.
+  castConfirmed: (target: string, op: string, payload?: unknown, opts?: Omit<CastConfirmedOpts, "trace">) => Promise<void>;
   // append persists a domain event to this thrall's event log (opt-in event_log). Rebuild
   // replays it in init. Mirrors the Go SDK ctx.Append. Pass dedupKey to deduplicate the event
   // within the stream's duplicate window (Nats-Msg-Id).
@@ -128,6 +131,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
     cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
+    castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),
     stopChild: (childName, opts) => stopChild(nc, childName, opts),
