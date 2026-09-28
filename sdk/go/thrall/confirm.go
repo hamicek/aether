@@ -34,7 +34,9 @@ type mailboxKey struct {
 // knownMailboxes caches mailboxes confirmed to exist, so a sender pays the stream lookup once per
 // target rather than on every message. Only a positive answer is cached: a target provisioned as
 // durable later must work immediately. A mailbox deleted after it was cached makes the publish
-// fail (no stream acknowledges it), never succeed silently.
+// fail (no stream acknowledges it), never succeed silently. Entries are never evicted, so a closed
+// connection stays referenced; that is bounded by connections x targets, and a thrall holds one
+// connection for its lifetime, so it is not worth a weak-reference scheme.
 var knownMailboxes sync.Map // mailboxKey -> struct{}
 
 func doCastConfirmed(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration, idem string) error {

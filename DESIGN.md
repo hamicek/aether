@@ -706,7 +706,9 @@ target's mailbox stream acknowledged the write.
   so another stream capturing the subject cannot confirm it.
 
 Confirmation covers the hop *into* the stream. Delivery *out of* it stays at-least-once, so
-handlers still have to be idempotent.
+handlers still have to be idempotent. Like durable delivery itself, the confirmed cast is
+node-local: the mailbox is looked up in the sender's JetStream domain, and durable delivery across
+leaf nodes is deliberately deferred (§11b, §14).
 
 How long the mailbox survives then depends on **where JetStream stores it**, which is
 a deployment choice, not a thrall concern:
