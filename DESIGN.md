@@ -685,6 +685,29 @@ guaranteed under redelivery: an `AckWait` timeout or a crash re-queues a cast, w
 then arrive after later ones. That is the honest reading of at-least-once - **idempotent
 handlers, not ordering, are the correctness contract** (§13c).
 
+**Where the guarantee starts: the confirmed cast.** A plain `cast` is a core publish, so
+mailbox durability begins only once the stream has stored the message. A cast sent while the
+bus is unreachable (or after the client's reconnect buffer overflows) is lost, and the sender is
+not told. When the sender must know, it uses a **confirmed cast** (Go `CastConfirmed`, TS
+`castConfirmed`, Python `cast_confirmed`): a JetStream publish that returns only after the
+target's mailbox stream acknowledged the write.
+
+- **Success means stored; an error means *maybe not stored*.** The caller decides whether to
+  retry; the SDK does not retry on its own.
+- **Retry with the same idempotency key.** The key is sent as `Nats-Msg-Id`, so a message that
+  did land before an unclear failure (a lost ack, a timeout) is stored once. This holds within the
+  mailbox's duplicate window, the JetStream default of 2 minutes (the lord does not set it for the
+  mailbox); a retry after that can store a duplicate.
+- **A target without a mailbox fails with `ErrNotDurable` / `NotDurableError`, and nothing is
+  sent.** The SDK looks the stream up first (cached per connection once found), because a
+  JetStream publish to a non-durable thrall would reach its core subscription, get processed and
+  never be acknowledged - and the retry would process it a second time.
+- **Only the target's own stream may acknowledge.** The publish carries the expected stream name,
+  so another stream capturing the subject cannot confirm it.
+
+Confirmation covers the hop *into* the stream. Delivery *out of* it stays at-least-once, so
+handlers still have to be idempotent.
+
 How long the mailbox survives then depends on **where JetStream stores it**, which is
 a deployment choice, not a thrall concern:
 

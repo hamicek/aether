@@ -80,6 +80,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a view of every lord across the bus, cluster, or leaf sites (opt-in, mechanism not domain; supervision stays node-local) - see [Observability](#observability) |
 | **Self-description** | ✅ | Every thrall reports its ops (derived from its handler maps), self-declared version, and last error on the heartbeat; `aether describe` shows it, and `[[thrall]] metadata` adds operator deployment tags - see [Observability](#observability) |
 | **Durable mailbox** | ✅ | `durable=true` -> casts survive a thrall crash (JetStream). TS + Python + Go. What survives a *restart*: see [Durability](#durability) |
+| **Confirmed cast** | ✅ | send returns only once the durable mailbox stored the message, so the sender learns about a loss. TS + Python + Go. See [Confirmed cast](#confirmed-cast) |
 | **Event-sourced rebuild** | ✅ | `event_log=true` -> `Append` events to a retention log, `Rebuild` state from it in init - **state survives a restart** by replaying the log, not a snapshot. See [Event-sourced rebuild](#event-sourced-rebuild) |
 | **External NATS** | ✅ | `mode="external"` is purely a config switch - the same stack against a real cluster |
 | **Embedded leaf spoke** | ✅ | `[nats.leaf]` -> the embedded bus joins a hub as a leaf node, bound into its site's account with its own JetStream domain; a single-binary site, no spoke NATS config - see [Multi-node](#multi-node-and-isolation) |
@@ -395,6 +396,30 @@ durable mailbox survives depends on where JetStream stores it:
 Use `store_dir` for a single-host deployment that must keep the mailbox across restarts (see
 `examples/counter/aether-durable-persistent.toml`); use external NATS when durability must be
 independent of the application host. Full model: [DESIGN.md §13](./DESIGN.md).
+
+### Confirmed cast
+
+The mailbox protects a cast only once the stream has stored it: a plain `cast` is fire-and-forget,
+so one sent while the bus is unreachable is lost without the sender knowing. When losing data is
+not acceptable (sensor readings, payments), send a **confirmed cast** to the durable thrall. It
+returns only after the target's mailbox stored the message; an error means it may not be stored,
+and you retry with the same idempotency key (deduplicated within the mailbox's 2-minute window).
+A target that is not durable fails with `ErrNotDurable` / `NotDurableError` and nothing is sent.
+
+```go
+err := thrall.CastConfirmed("sink", "sample", s, 5*time.Second, thrall.WithIdempotencyKey(s.ID))
+```
+
+```ts
+await ctx.castConfirmed("sink", "sample", s, { idempotencyKey: s.id });
+```
+
+```python
+await ctx.cast_confirmed("sink", "sample", s, idempotency_key=s["id"])
+```
+
+Delivery from the mailbox to the handler stays at-least-once, so handlers must be idempotent.
+Details: [DESIGN.md §13](./DESIGN.md).
 
 ## Event-sourced rebuild
 
