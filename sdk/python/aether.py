@@ -15,12 +15,13 @@ import os
 import ssl
 import sys
 import time
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import nats
-from nats.js.errors import KeyNotFoundError
+from nats.js.errors import KeyNotFoundError, NotFoundError
 
 
 # --- structured logging (mirrors internal/obs and the TS SDK log.ts) ---
@@ -334,6 +335,72 @@ def _decode(data: bytes) -> dict:
     return json.loads(data)
 
 
+def _cast_envelope(trace: str, target: str, op: str, payload: Any,
+                   idempotency_key: str | None) -> dict:
+    """The envelope shared by the plain and the confirmed cast."""
+    e = {"v": 1, "id": _next_id(), "trace": trace, "kind": "cast", "to": target, "op": op,
+         "payload": payload if payload is not None else {}, "ts": int(time.time() * 1000)}
+    if idempotency_key:
+        e["idem"] = idempotency_key
+    return e
+
+
+# --- confirmed cast (mirrors sdk/go/thrall/confirm.go and the TS castConfirmed) ---
+#
+# A plain cast is a core publish: the sender learns nothing about whether the durable mailbox
+# stored it, so a message sent while the bus is unreachable is lost without the sender knowing.
+# A confirmed cast publishes through JetStream and returns only after the target's mailbox
+# stream acknowledged the write.
+
+class NotDurableError(Exception):
+    """A confirmed cast whose target has no durable mailbox. Nothing is sent: a JetStream publish
+    to such a target would reach its core subscription, be processed and never be acknowledged,
+    so the sender would time out, retry and get it processed twice."""
+
+    def __init__(self, target: str):
+        super().__init__(f'confirmed cast to "{target}": target has no durable mailbox')
+        self.target = target
+
+
+# JetStream API error code for "stream not found" (nats-py raises the generic NotFoundError).
+_STREAM_NOT_FOUND = 10059
+
+# Mailboxes confirmed to exist, per connection (whether a stream exists is a property of the
+# cluster a connection talks to). Only a positive answer is cached, so a target provisioned as
+# durable later works immediately; a mailbox deleted after it was cached makes the publish fail,
+# never succeed silently.
+_known_mailboxes: weakref.WeakKeyDictionary[Any, set[str]] = weakref.WeakKeyDictionary()
+
+
+async def _send_confirmed_cast(nc: Any, app: str, trace: str, target: str, op: str, payload: Any,
+                               timeout: float, idempotency_key: str | None) -> None:
+    deadline = time.monotonic() + timeout
+    stream = _stream(app, target)
+    await _ensure_mailbox(nc, stream, target, deadline)
+    e = _cast_envelope(trace, target, op, payload, idempotency_key)
+    headers = {_DEDUP_HEADER: idempotency_key} if idempotency_key else None
+    # stream= makes the server reject the write unless the target's mailbox is the one storing it.
+    await nc.jetstream().publish(_sub_cast(app, target), _encode(e), timeout=_remaining(deadline),
+                                 stream=stream, headers=headers)
+
+
+async def _ensure_mailbox(nc: Any, stream: str, target: str, deadline: float) -> None:
+    known = _known_mailboxes.setdefault(nc, set())
+    if stream in known:
+        return
+    try:
+        await nc.jetstream(timeout=_remaining(deadline)).stream_info(stream)
+    except NotFoundError as err:
+        if err.err_code == _STREAM_NOT_FOUND:
+            raise NotDurableError(target) from err
+        raise
+    known.add(stream)
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.001, deadline - time.monotonic())
+
+
 _id_seq = 0
 
 
@@ -547,12 +614,18 @@ class Ctx:
                    idempotency_key: str | None = None) -> None:
         """Trace-propagating fire-and-forget to another thrall (GenServer.cast). idempotency_key:
         on an idempotent thrall a duplicate cast with the same key is skipped. See AE-077."""
-        e = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "cast",
-             "to": target, "op": op, "payload": payload if payload is not None else {},
-             "ts": int(time.time() * 1000)}
-        if idempotency_key:
-            e["idem"] = idempotency_key
+        e = _cast_envelope(_or_new_trace(self.trace), target, op, payload, idempotency_key)
         await self.nats.publish(_sub_cast(self.app, target), _encode(e))
+
+    async def cast_confirmed(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
+                             idempotency_key: str | None = None) -> None:
+        """Trace-propagating cast to a durable thrall that returns only once the message is durably
+        stored in the target's mailbox. Returning means stored; an exception means the message may
+        not be stored and the caller decides whether to retry (with the same idempotency_key, so a
+        retry of a message that did land is deduplicated). A target without a durable mailbox
+        raises NotDurableError. timeout bounds the whole send. Mirrors the Go SDK CastConfirmed."""
+        await _send_confirmed_cast(self.nats, self.app, _or_new_trace(self.trace), target, op,
+                                   payload, timeout, idempotency_key)
 
     async def append(self, event: Any, dedup_key: str | None = None) -> None:
         """Persist a domain event to this thrall's event log (a JetStream publish that waits for

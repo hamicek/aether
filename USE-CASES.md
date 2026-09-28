@@ -60,6 +60,11 @@ replaying the log, not from a snapshot - "the log is truth").
 **Runs:** [`examples/counter/aether-durable.toml`](./examples/counter) (durable mailbox) +
 [`examples/eventsourced`](./examples/eventsourced) (state survives a restart by replay).
 
+**Send tasks with a confirmed cast** (`CastConfirmed` / `castConfirmed` / `cast_confirmed`): the
+mailbox protects a task only once the stream has stored it, and a plain cast sent while the bus is
+unreachable is lost without the producer knowing. The confirmed cast returns only after the mailbox
+stored the task, so the producer can retry instead ([README](./README.md#confirmed-cast)).
+
 **Two mechanisms sharpen it** for at-least-once delivery: mark the worker `Idempotent` so a
 redelivered task is deduplicated (a duplicate cast is skipped, a duplicate call returns the first
 reply - [DESIGN.md §13c](./DESIGN.md)), and return `Escalate(reason)` from the handler to let a

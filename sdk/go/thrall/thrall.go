@@ -496,6 +496,24 @@ func (c *Ctx) Cast(target, op string, payload any, opts ...SendOption) error {
 	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, applySendOpts(opts).idem)
 }
 
+// CastConfirmed is a cast to a durable thrall that returns only once the message is durably
+// stored in the target's mailbox. A nil error means stored; any error means the message may not
+// be stored and the caller decides whether to retry (with the same WithIdempotencyKey, so a retry
+// of a message that did land is deduplicated). A target without a durable mailbox fails with
+// ErrNotDurable and nothing is sent. Mints a fresh trace; from within a handler use
+// Ctx.CastConfirmed. See confirm.go.
+func CastConfirmed(target, op string, payload any, timeout time.Duration, opts ...SendOption) error {
+	if sharedConn == nil {
+		return fmt.Errorf("no connection - call Start() first")
+	}
+	return doCastConfirmed(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout, applySendOpts(opts).idem)
+}
+
+// CastConfirmed is the trace-propagating confirmed cast from inside a handler.
+func (c *Ctx) CastConfirmed(target, op string, payload any, timeout time.Duration, opts ...SendOption) error {
+	return doCastConfirmed(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout, applySendOpts(opts).idem)
+}
+
 func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration, idem string) (json.RawMessage, error) {
 	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
 	msg, err := nc.Request(wire.Call(app, target), mustJSON(req), timeout)
@@ -513,8 +531,12 @@ func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout t
 }
 
 func doCast(nc *nats.Conn, app, trace, target, op string, payload any, idem string) error {
-	e := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	return nc.Publish(wire.Cast(app, target), mustJSON(e))
+	return nc.Publish(wire.Cast(app, target), mustJSON(newCastEnvelope(trace, target, op, payload, idem)))
+}
+
+// newCastEnvelope builds the envelope shared by the plain and the confirmed cast.
+func newCastEnvelope(trace, target, op string, payload any, idem string) wire.Envelope {
+	return wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
 }
 
 // newTrace mints a fresh correlation id for an edge (a message that starts a new operation).

@@ -1,4 +1,4 @@
-import type { NatsConnection } from "nats";
+import type { NatsConnection, NatsError } from "nats";
 import { decode, encode, type Envelope } from "./envelope";
 import { subjects } from "./subjects";
 
@@ -67,8 +67,90 @@ export async function call<R = unknown>(
 // cast = fire-and-forget (GenServer.cast). Pass opts.trace to propagate a trace (Ctx.cast
 // does this); omitted -> a fresh trace is minted.
 export function cast(target: string, op: string, payload: unknown = {}, opts: { trace?: string; idempotencyKey?: string } = {}): void {
-  const e: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), idem: opts.idempotencyKey, kind: "cast", to: target, op, payload, ts: Date.now() };
-  conn().publish(subjects.cast(app(), target), encode(e));
+  conn().publish(subjects.cast(app(), target), encode(castEnvelope(target, op, payload, opts)));
+}
+
+// castEnvelope builds the envelope shared by the plain and the confirmed cast.
+function castEnvelope(target: string, op: string, payload: unknown, opts: { trace?: string; idempotencyKey?: string }): Envelope {
+  return { v: 1, id: nextId(), trace: orNewTrace(opts.trace), idem: opts.idempotencyKey, kind: "cast", to: target, op, payload, ts: Date.now() };
+}
+
+export interface CastConfirmedOpts {
+  // Upper bound for the whole send (mailbox lookup + stored ack). Default 5000, like call.
+  timeoutMs?: number;
+  trace?: string;
+  // Stable idempotency key, also sent as Nats-Msg-Id: a retry carrying the same key lands once
+  // in the mailbox within its duplicate window.
+  idempotencyKey?: string;
+}
+
+// NotDurableError = a confirmed cast whose target has no durable mailbox. Nothing is sent: a
+// JetStream publish to such a target would reach its core subscription, be processed and never
+// be acknowledged, so the sender would time out, retry and get it processed twice.
+export class NotDurableError extends Error {
+  constructor(readonly target: string) {
+    super(`confirmed cast to "${target}": target has no durable mailbox`);
+    this.name = "NotDurableError";
+  }
+}
+
+// JetStream API error code for "stream not found" (nats.js exposes no named constant for it).
+const STREAM_NOT_FOUND = 10059;
+
+// Mailboxes confirmed to exist, per connection (whether a stream exists is a property of the
+// cluster a connection talks to). Only a positive answer is cached, so a target provisioned as
+// durable later works immediately; a mailbox deleted after it was cached makes the publish fail,
+// never succeed silently.
+const knownMailboxes = new WeakMap<NatsConnection, Set<string>>();
+
+// castConfirmed = a cast to a durable thrall that resolves only once the message is durably
+// stored in the target's mailbox. Resolving means stored; a rejection means the message may not
+// be stored and the caller decides whether to retry (with the same idempotencyKey, so a retry of
+// a message that did land is deduplicated). A target without a mailbox rejects with
+// NotDurableError. Mirrors the Go SDK CastConfirmed.
+export async function castConfirmed(target: string, op: string, payload: unknown = {}, opts: CastConfirmedOpts = {}): Promise<void> {
+  await sendConfirmedCast(conn(), app(), target, op, payload, opts);
+}
+
+// sendConfirmedCast is castConfirmed over an explicit connection and app.
+export async function sendConfirmedCast(
+  nc: NatsConnection,
+  appName: string,
+  target: string,
+  op: string,
+  payload: unknown,
+  opts: CastConfirmedOpts,
+): Promise<void> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 5000);
+  const stream = subjects.stream(appName, target);
+  await ensureMailbox(nc, stream, target, deadline);
+  await nc.jetstream().publish(subjects.cast(appName, target), encode(castEnvelope(target, op, payload, opts)), {
+    // Only the target's mailbox may acknowledge the write, never another stream on the subject.
+    expect: { streamName: stream },
+    timeout: remainingMs(deadline),
+    ...(opts.idempotencyKey ? { msgID: opts.idempotencyKey } : {}),
+  });
+}
+
+async function ensureMailbox(nc: NatsConnection, stream: string, target: string, deadline: number): Promise<void> {
+  if (knownMailboxes.get(nc)?.has(stream)) return;
+  const jsm = await nc.jetstreamManager({ timeout: remainingMs(deadline) });
+  try {
+    await jsm.streams.info(stream);
+  } catch (err) {
+    if ((err as NatsError).api_error?.err_code === STREAM_NOT_FOUND) throw new NotDurableError(target);
+    throw err;
+  }
+  let known = knownMailboxes.get(nc);
+  if (!known) {
+    known = new Set();
+    knownMailboxes.set(nc, known);
+  }
+  known.add(stream);
+}
+
+function remainingMs(deadline: number): number {
+  return Math.max(1, deadline - Date.now());
 }
 
 // SpawnSpec = the request to spawn a child at runtime. Mirrors internal/wire.SpawnSpec:
