@@ -1,0 +1,32 @@
+{
+  "name": "aether-cluster-pane",
+  "version": "0.1.0",
+  "description": "Live pane beside the chat showing what is running on the aether bus: processes, held ports and dashboard reachability.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "ports": {
+      "type": "string",
+      "title": "Watched ports",
+      "default": "4222",
+      "description": "TCP ports to watch for listeners, comma or space separated (for example: 4222 7447)."
+    },
+    "dashboards": {
+      "type": "string",
+      "title": "Dashboard URLs",
+      "default": "",
+      "description": "Dashboard URLs to ping for reachability, comma or space separated. Empty means none are pinged."
+    },
+    "refreshSeconds": {
+      "type": "number",
+      "title": "Refresh interval (seconds)",
+      "default": 5,
+      "description": "How often the pane refreshes, in seconds (minimum 1)."
+    },
+    "processMatch": {
+      "type": "string",
+      "title": "Process match",
+      "default": "aether up",
+      "description": "Substring that identifies an aether runtime process in its command line."
+    }
+  }
+}
