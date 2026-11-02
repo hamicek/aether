@@ -26,26 +26,33 @@ const snapshot = atom(
   { shape: 'snapshot-1' },
 )
 
-const probeDashboard = async (
+const DASHBOARD_TIMEOUT_MS = 4000
+
+const probeDashboard = (
   $: EngineInterface,
   url: string,
 ): Promise<DashboardStatus> => {
-  try {
-    const res = await $.http.fetch(url)
-    return {
+  const fetched: Promise<DashboardStatus> = $.http
+    .fetch(url)
+    .then(res => ({
       url,
-      state: res.ok ? 'ok' : 'http',
+      state: (res.ok ? 'ok' : 'http') as DashboardStatus['state'],
       status: res.status,
       detail: null,
-    }
-  } catch (err) {
-    return {
+    }))
+    .catch(err => ({
       url,
-      state: 'down',
+      state: 'down' as const,
       status: null,
       detail: err instanceof Error ? err.message : String(err),
-    }
-  }
+    }))
+  // A hung endpoint must not freeze the whole refresh: race the fetch against a
+  // bound. The losing fetch is left to settle on its own and ignored.
+  const timedOut: Promise<DashboardStatus> = $.clock
+    .sleep(DASHBOARD_TIMEOUT_MS)
+    .then(() => ({ url, state: 'down' as const, status: null, detail: 'timed out' }))
+
+  return Promise.race([fetched, timedOut])
 }
 
 const agoLabel = (refreshedAt: number | null, now: number): string => {
