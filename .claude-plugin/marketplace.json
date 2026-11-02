@@ -1,0 +1,11 @@
+{
+  "name": "aether",
+  "owner": { "name": "hamicek" },
+  "description": "Developer mods for working with the aether runtime.",
+  "plugins": [
+    {
+      "name": "aether-cluster-pane",
+      "source": "./tools/cluster-pane"
+    }
+  ]
+}
