@@ -40,17 +40,23 @@ For an embedded-NATS stack the port is often ephemeral (printed in
 `.aether-endpoint`); point `ports` at the external NATS port or the dashboard
 port you actually want to watch.
 
-## Running it during development
+## Installing it
 
-Load the mod straight from this folder for one session:
+The aether repo ships a marketplace manifest at `.claude-plugin/marketplace.json`,
+so the mod installs for good - in every session, no dev-mod symlinking - with:
+
+```bash
+/plugin install aether-cluster-pane --marketplace hamicek/aether
+```
+
+Then open the pane with the `/aether-cluster` command (it also opens on its own
+when the session starts).
+
+To run it straight from this folder for a single session during development:
 
 ```bash
 claude --plugin-dir tools/cluster-pane
 ```
-
-Then open the pane with the `/aether-cluster` command (it also opens on its own
-when the session starts). To install it for good, add the repo as a marketplace
-and `/plugin install aether-cluster-pane`.
 
 ## Tests
 
