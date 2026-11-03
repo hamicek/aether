@@ -51,6 +51,18 @@ jobs:
       - run: python -m unittest discover -p '*_test.py'
         working-directory: sdk/python
 
+  # The C# client's unit and wire-parity tests contact no broker (they read the shared golden
+  # fixtures), so this job needs only the .NET SDK.
+  csharp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - run: dotnet test
+        working-directory: sdk/csharp
+
   # The generated contract types (examples/payload-contract/gen) are derived from the schemas.
   # Regenerate into a temp dir and fail if it differs from what is committed, so a schema change
   # without a regeneration cannot merge. See PAYLOAD-CONTRACT.md (AE-042 §5).

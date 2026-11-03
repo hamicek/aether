@@ -70,7 +70,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | Area | Status | Detail |
 |---|---|---|
 | **Spawn** | ✅ | The lord starts thralls as OS processes, injects the `AETHER_*` env, watches their exit code |
-| **Polyglot SDK** | ✅ | **TS/Bun**, **Python**, **Go** - the same wire contract, indistinguishable to the lord |
+| **Polyglot SDK** | ✅ | **TS/Bun**, **Python**, **Go** - the same wire contract, indistinguishable to the lord. A thin **C#** client (consume + cast + durable mailbox) for data-processing thralls - see `sdk/csharp` and `examples/csharp-consumer` |
 | **Messaging** | ✅ | `call` (sync request/reply), `cast` (fire-and-forget), a serialized mailbox |
 | **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
@@ -116,6 +116,7 @@ internal/
 sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM + defEvent/startEvent, call, cast
 sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm + def_event/start_event/run_event
 sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine) + thrall.EventManager/StartEvent (event manager)
+sdk/csharp/           Aether: thin C# client (envelope + subjects + Cast + Consume/durable mailbox + heartbeat), not a full SDK
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
 examples/fsm/         state-machine (FSM) behaviour demo - a turnstile
 examples/eventbus/    event-manager (gen_event) behaviour demo - one event, many handlers
@@ -128,6 +129,7 @@ examples/tracing/     trace propagation across call/cast hops
 examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a resource
 examples/hub-spoke-spike/ multi-node hub + isolated sites (leaf nodes) - see Multi-node below
 examples/nats-leaf/    embedded spoke joined to a hub via [nats.leaf] - single-binary site
+examples/csharp-consumer/ polyglot roundtrip Go -> C# -> Go: a C# transformer on the thin C# client
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 scripts/durable-perf.sh durable cast drain throughput harness (out of CI) - examples/durable-perf/
 ```
