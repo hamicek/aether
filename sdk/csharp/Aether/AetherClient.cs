@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using NATS.Client.Core;
+using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 
 namespace Aether;
 
@@ -73,25 +75,94 @@ public sealed class AetherClient : IAsyncDisposable
         return _nats.PublishAsync(Subjects.Cast(App, target), Json.Encode(envelope), cancellationToken: ct);
     }
 
-    // Consume subscribes to a subject and yields each decoded envelope until cancellation. The
-    // caller reads env.Payload for the data and env.Trace to propagate the correlation id onward.
-    // For reading a durable JetStream stream, use Connection to bind a JetStream consumer directly.
+    // IsDurable reports whether the lord started this thrall with a durable mailbox (AETHER_DURABLE=1),
+    // in which case its casts are captured by a JetStream stream the lord provisions.
+    public bool IsDurable => Environment.GetEnvironmentVariable("AETHER_DURABLE") == "1";
+
+    // ConsumeMailbox reads this thrall's own cast mailbox - the natural entry point for a consumer
+    // the lord spawned. A durable thrall reads its JetStream mailbox stream with explicit ack (casts
+    // that arrived while it was down are drained on return); a non-durable one reads the live subject
+    // over core NATS. The handler receives each decoded envelope; it runs before the ack, so a
+    // durable message is not acked until the handler returns. At-least-once: the handler must be
+    // idempotent (mirrors the Go/TS/Python durable contract).
+    public Task ConsumeMailboxAsync(Func<Envelope, CancellationToken, Task> handler, CancellationToken ct = default)
+        => IsDurable
+            ? ConsumeDurableAsync(handler, ct)
+            : ConsumeCoreAsync(Subjects.Cast(App, Name), handler, ct);
+
+    // ConsumeAsync subscribes to a subject over core NATS and yields each decoded envelope until
+    // cancellation - an ad-hoc tap for a live subject. For a thrall's own mailbox prefer
+    // ConsumeMailbox, which also handles the durable case.
     public async IAsyncEnumerable<Envelope> ConsumeAsync(string subject,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         await foreach (var msg in _nats.SubscribeAsync<byte[]>(subject, cancellationToken: ct))
         {
-            if (msg.Data is null)
-            {
-                continue;
-            }
-            var envelope = Json.Decode<Envelope>(msg.Data);
+            var envelope = Decode(msg.Data);
             if (envelope is not null)
             {
                 yield return envelope;
             }
         }
     }
+
+    private async Task ConsumeCoreAsync(string subject, Func<Envelope, CancellationToken, Task> handler, CancellationToken ct)
+    {
+        await foreach (var msg in _nats.SubscribeAsync<byte[]>(subject, cancellationToken: ct))
+        {
+            var envelope = Decode(msg.Data);
+            if (envelope is not null)
+            {
+                await handler(envelope, ct);
+            }
+        }
+    }
+
+    // ConsumeDurableAsync binds a durable pull consumer to this thrall's mailbox stream and drains it
+    // with explicit, in-order ack - the C# mirror of the Go SDK's consumeDurableCast. The lord
+    // provisions the stream before it spawns the thrall; a brief retry covers the startup race.
+    private async Task ConsumeDurableAsync(Func<Envelope, CancellationToken, Task> handler, CancellationToken ct)
+    {
+        var js = new NatsJSContext(_nats);
+        var stream = Subjects.Stream(App, Name);
+        var config = new ConsumerConfig(Name)
+        {
+            FilterSubject = Subjects.Cast(App, Name),
+            AckPolicy = ConsumerConfigAckPolicy.Explicit,
+            DeliverPolicy = ConsumerConfigDeliverPolicy.All,
+        };
+
+        var consumer = await CreateConsumerWithRetryAsync(js, stream, config, ct);
+
+        await foreach (var msg in consumer.ConsumeAsync<byte[]>(cancellationToken: ct))
+        {
+            var envelope = Decode(msg.Data);
+            if (envelope is not null)
+            {
+                await handler(envelope, ct);
+            }
+            await msg.AckAsync(cancellationToken: ct);
+        }
+    }
+
+    private static async Task<INatsJSConsumer> CreateConsumerWithRetryAsync(
+        NatsJSContext js, string stream, ConsumerConfig config, CancellationToken ct)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await js.CreateOrUpdateConsumerAsync(stream, config, ct);
+            }
+            catch (NatsJSApiException) when (attempt < 20)
+            {
+                // The lord may not have provisioned the stream yet at startup; back off and retry.
+                await Task.Delay(TimeSpan.FromMilliseconds(250), ct);
+            }
+        }
+    }
+
+    private static Envelope? Decode(byte[]? data) => data is null ? null : Json.Decode<Envelope>(data);
 
     // NewCast builds the cast envelope exactly as the Go SDK's newCastEnvelope does: v=1, a fresh id,
     // the trace and optional idem, kind=cast, the target and op, the payload, and a millisecond

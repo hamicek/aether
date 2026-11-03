@@ -1,0 +1,32 @@
+# Polyglot roundtrip: Go -> C# -> Go, with the C# thrall built on the thin C# client.
+#
+#   source (Go)       casts raw {celsius} to the transformer
+#   transformer (C#)  consumes its durable mailbox, converts to Fahrenheit, casts {celsius,fahrenheit}
+#   printer (Go)      consumes the transformed reading and prints it
+#
+# transformer and printer are durable, so casts are captured in JetStream and the demo does not
+# depend on startup order. Run it with ./run.sh (builds the Go thralls, publishes the C# app).
+app = "demo"
+strategy = "one_for_one"
+
+[nats]
+mode = "embedded"
+
+[[thrall]]
+name = "source"
+cmd  = "./bin/source"
+restart = "permanent"
+
+[[thrall]]
+name = "transformer"
+cmd  = "dotnet Transformer/publish/Transformer.dll"
+restart = "permanent"
+durable = true
+metadata = { lang = "csharp" }
+
+[[thrall]]
+name = "printer"
+cmd  = "./bin/printer"
+restart = "permanent"
+durable = true
+metadata = { lang = "go" }
