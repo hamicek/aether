@@ -1046,6 +1046,25 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   connections up, an nkey rotation closes a connection using the removed key (it reconnects with the
   new one), and structural changes (listen, role set) still need a restart. Still open: mutual TLS -
   the last increment of the same arc.
+- **Cross-node placement and scheduling - deliberately outside aether.** Which node runs what,
+  re-placement on node failure, capacity-aware scheduling and scaling an instance count across nodes
+  are **not** aether's job: they are scheduling *policy*, the deployer / orchestrator's domain, not a
+  thin mechanism over NATS. aether stays one lord per node supervising local OS processes (§11b), and
+  it does not distribute code - `ctx.StartChild` runs a `cmd` that must already exist on the node
+  (§12), so placement without code distribution would be half a feature anyway. Making the lord hold
+  fleet topology would also make it a second source of truth, which §12/AE-030 rejected even for a
+  single node. An external placement authority composes only aether's **existing** public surfaces:
+  the fleet view (`aether._fleet.>` + `aether fleet`, §12) as its world-view, the per-node control
+  channel (`aether._lord.ctl`, §12) as actuation, and the registry + liveness (KV `name -> {node,
+  pid, status}`, heartbeats, the lord-liveness lease) for detection - exactly the external control
+  plane §12 already anticipates. The isolation boundary (§11b) applies: supervision (`aether._lord.>`,
+  including `ctl`) is never exported across leaf accounts, so actuation reaches only a node the
+  authority connects to directly, whereas the fleet view *is* exported and crosses the boundary - the
+  authority sees the whole fleet centrally but cannot drive another site's supervision through the hub.
+  **Guardrail:** aether must not grow a fleet-wide desired-state store,
+  a scheduler, cross-node state migration, or a cross-node authority over lords; if a deployer needs
+  the runtime to carry new placement semantics (in `internal/wire`, the lord, or the SDK run-loop),
+  that is a red flag to evaluate as a core change, not add quietly. Decision record: bundle AE-085.
 
 Note: several items listed as future work in earlier drafts are now implemented - JetStream durable
 mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`, §12; these are
