@@ -167,7 +167,10 @@ NATS load-balances. The reply subject is not handled by hand - NATS request/repl
 ## 7. Wire envelope (JSON)
 
 One envelope for everything; `kind` distinguishes the type, `op` is "which handler function". The
-authoritative shape lives in `internal/wire/envelope.go`; the TS and Python SDKs mirror it.
+authoritative shape lives in `internal/wire/envelope.go`; the TS and Python SDKs mirror it. A thin
+**C# client** (`sdk/csharp`) mirrors the same wire shape (envelope, subjects, heartbeat) for a
+consume + cast role - a data-processing thrall that reads its (optionally durable) mailbox and casts
+results on - deliberately not a full SDK (no behaviours); parity is held by the shared golden fixtures.
 
 **Call (request):**
 ```json

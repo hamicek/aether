@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="Aether.Tests/Aether.Tests.csproj" />
+  <Project Path="Aether/Aether.csproj" />
+</Solution>

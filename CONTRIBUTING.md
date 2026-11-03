@@ -9,6 +9,7 @@ still open.
 - **Go** 1.23+ (the runtime, lord, CLI, embedded NATS server)
 - **Bun** (the TypeScript SDK and example thralls)
 - **Python** 3.10+ with `nats-py` (the Python SDK)
+- **.NET** 10+ (the thin C# client, `sdk/csharp`) - `mise use dotnet@latest` if you use mise
 
 ## Build
 
@@ -39,23 +40,27 @@ cd sdk/ts && bun test
 
 # Python SDK (nats-py is the SDK's own dependency; no broker is contacted)
 cd sdk/python && python -m unittest wire_parity_test
+
+# C# client (unit + wire parity; no broker is contacted)
+cd sdk/csharp && dotnet test
 ```
 
 ## The wire contract is the one thing that must stay in sync
 
-The wire contract (JSON envelope and subject conventions) has three hand-mirrored
+The wire contract (JSON envelope and subject conventions) has four hand-mirrored
 implementations: Go (`internal/wire`, the source of truth), TypeScript
-(`sdk/ts/src/{envelope,subjects}.ts`) and Python (`sdk/python/aether.py`).
+(`sdk/ts/src/{envelope,subjects}.ts`), Python (`sdk/python/aether.py`) and the thin C# client
+(`sdk/csharp/Aether/{Envelope,Subjects}.cs`).
 
 **Go is authoritative.** When you change the envelope or a subject:
 
 1. Update `internal/wire` first.
-2. Regenerate the golden fixtures shared by all three parity suites:
+2. Regenerate the golden fixtures shared by all parity suites:
    ```bash
    go test ./internal/wire -run TestEnvelopeGolden -update
    ```
-3. Mirror the change in the TypeScript and Python SDKs.
-4. Run all three parity suites (above); they will fail if any side drifts.
+3. Mirror the change in the TypeScript, Python and C# SDKs.
+4. Run all parity suites (above); they will fail if any side drifts.
 
 ## Commit conventions
 
