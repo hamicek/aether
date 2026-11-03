@@ -49,29 +49,25 @@ public static class Heartbeat
 
     // RunAsync publishes a heartbeat immediately (so the lord sees the thrall ready at once) and then
     // on every interval tick until cancellation. `snapshot` supplies the current metrics each beat.
+    // Cancellation (the lord stopping the thrall) is a normal shutdown: both the publish and the tick
+    // wait honor the token, so the whole loop is wrapped to end quietly rather than throw - a stopped
+    // heartbeat must not turn a clean stop into a non-zero exit the lord would read as a crash.
     public static async Task RunAsync(AetherClient client, Func<HeartbeatMetrics> snapshot, CancellationToken ct)
     {
         var subject = Subjects.Heartbeat(client.Name);
         using var timer = new PeriodicTimer(IntervalFromEnv());
-        do
-        {
-            var envelope = New(client.Name, snapshot());
-            await client.Connection.PublishAsync(subject, Json.Encode(envelope), cancellationToken: ct);
-        }
-        while (await WaitQuietly(timer, ct));
-    }
-
-    // WaitForNextTickAsync throws on cancellation; a stopped heartbeat is a normal shutdown, not an
-    // error, so we swallow the cancellation and end the loop.
-    private static async Task<bool> WaitQuietly(PeriodicTimer timer, CancellationToken ct)
-    {
         try
         {
-            return await timer.WaitForNextTickAsync(ct);
+            do
+            {
+                var envelope = New(client.Name, snapshot());
+                await client.Connection.PublishAsync(subject, Json.Encode(envelope), cancellationToken: ct);
+            }
+            while (await timer.WaitForNextTickAsync(ct));
         }
         catch (OperationCanceledException)
         {
-            return false;
+            // Normal shutdown: the lord asked the thrall to stop.
         }
     }
 }
