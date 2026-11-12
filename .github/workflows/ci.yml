@@ -80,3 +80,17 @@ jobs:
       - run: ./codegen.sh "$RUNNER_TEMP/gen"
         working-directory: examples/payload-contract
       - run: diff -ru examples/payload-contract/gen "$RUNNER_TEMP/gen"
+
+  # The session-type automata (examples/session-scada/gen/automaton) are projected from the
+  # *.protocol.yaml sources. Regenerate into a temp dir and fail if it differs from what is committed,
+  # so a protocol change without a regeneration cannot merge. The generator also exits non-zero on an
+  # ill-formed or non-dual protocol, so this job doubles as the well-formedness gate (AE-090, Tier 1).
+  protocol-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+      - run: go run ./tools/protocol-gen examples/session-scada "$RUNNER_TEMP/session-scada"
+      - run: diff -ru examples/session-scada/gen/automaton "$RUNNER_TEMP/session-scada/gen/automaton"
