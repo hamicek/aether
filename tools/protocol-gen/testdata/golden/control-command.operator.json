@@ -1,0 +1,56 @@
+{
+  "protocol": "ControlCommand",
+  "role": "operator",
+  "start": "s1",
+  "states": {
+    "end": {
+      "final": true
+    },
+    "s1": {
+      "on": {
+        "command": {
+          "dir": "send",
+          "kind": "call",
+          "next": "s2"
+        }
+      }
+    },
+    "s2": {
+      "on": {
+        "authorized": {
+          "dir": "recv",
+          "kind": "reply",
+          "next": "s3"
+        },
+        "rejected": {
+          "dir": "recv",
+          "kind": "reply",
+          "next": "end"
+        }
+      }
+    },
+    "s3": {
+      "on": {
+        "execute": {
+          "dir": "send",
+          "kind": "call",
+          "next": "s4"
+        }
+      }
+    },
+    "s4": {
+      "on": {
+        "confirmed": {
+          "dir": "recv",
+          "kind": "reply",
+          "next": "end"
+        },
+        "failed": {
+          "dir": "recv",
+          "kind": "reply",
+          "next": "end"
+        }
+      }
+    }
+  }
+}

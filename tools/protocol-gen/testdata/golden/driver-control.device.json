@@ -1,0 +1,47 @@
+{
+  "protocol": "DriverControl",
+  "role": "device",
+  "start": "s1",
+  "states": {
+    "end": {
+      "final": true
+    },
+    "s1": {
+      "on": {
+        "health": {
+          "dir": "recv",
+          "kind": "call",
+          "next": "s3"
+        },
+        "write": {
+          "dir": "recv",
+          "kind": "call",
+          "next": "s2"
+        }
+      }
+    },
+    "s2": {
+      "on": {
+        "applied": {
+          "dir": "send",
+          "kind": "reply",
+          "next": "s1"
+        },
+        "fault": {
+          "dir": "send",
+          "kind": "reply",
+          "next": "end"
+        }
+      }
+    },
+    "s3": {
+      "on": {
+        "status": {
+          "dir": "send",
+          "kind": "reply",
+          "next": "s1"
+        }
+      }
+    }
+  }
+}
