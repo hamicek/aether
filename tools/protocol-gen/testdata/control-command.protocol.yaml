@@ -1,0 +1,35 @@
+# Control command lifecycle (safety-critical, request/reply).
+# requested -> authorized -> sent -> confirmed | failed.
+# The structure enforces that "confirmed" cannot precede "authorized": confirmed only exists in
+# the sub-flow reached after the device authorizes. Every call demands a mandatory reply.
+protocol: ControlCommand
+roles: [operator, device]
+start: operator
+flow:
+  - from: operator
+    to: device
+    kind: call
+    op: command
+    payload: command.schema.json
+    reply:
+      choice:
+        - op: authorized
+          payload: authorized.schema.json
+          then:
+            flow:
+              - from: operator
+                to: device
+                kind: call
+                op: execute
+                payload: execute.schema.json
+                reply:
+                  choice:
+                    - op: confirmed
+                      payload: confirmed.schema.json
+                      then: end
+                    - op: failed
+                      payload: failed.schema.json
+                      then: end
+        - op: rejected
+          payload: rejected.schema.json
+          then: end

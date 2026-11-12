@@ -1,0 +1,33 @@
+# Driver control loop (command/ack, the SCADA scan-cycle shape that motivates recursion, §15).
+# Each round the collector chooses one command (internal choice); the device answers (external
+# choice). A reading/telemetry stream is deliberately NOT modelled here: a cast with no counterpart
+# is a broadcast, which is a payload-contract shape, not a session (design.md §15).
+protocol: DriverControl
+roles: [collector, device]
+start: collector
+flow:
+  - rec: Loop
+    body:
+      - choose:
+          - from: collector
+            to: device
+            kind: call
+            op: write
+            payload: write.schema.json
+            reply:
+              choice:
+                - op: applied
+                  payload: applied.schema.json
+                  then: { goto: Loop }
+                - op: fault
+                  payload: fault.schema.json
+                  then: end
+          - from: collector
+            to: device
+            kind: call
+            op: health
+            reply:
+              choice:
+                - op: status
+                  payload: status.schema.json
+                  then: { goto: Loop }

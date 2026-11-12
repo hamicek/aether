@@ -8,6 +8,7 @@ require (
 	github.com/nats-io/nats.go v1.37.0
 	github.com/nats-io/nkeys v0.4.7
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	sigs.k8s.io/yaml v1.4.0
 )
 
 require (
