@@ -11,6 +11,7 @@
         "command": {
           "dir": "recv",
           "kind": "call",
+          "payload": "command.schema.json",
           "next": "s2"
         }
       }
@@ -20,11 +21,13 @@
         "authorized": {
           "dir": "send",
           "kind": "reply",
+          "payload": "authorized.schema.json",
           "next": "s3"
         },
         "rejected": {
           "dir": "send",
           "kind": "reply",
+          "payload": "rejected.schema.json",
           "next": "end"
         }
       }
@@ -34,6 +37,7 @@
         "execute": {
           "dir": "recv",
           "kind": "call",
+          "payload": "execute.schema.json",
           "next": "s4"
         }
       }
@@ -43,11 +47,13 @@
         "confirmed": {
           "dir": "send",
           "kind": "reply",
+          "payload": "confirmed.schema.json",
           "next": "end"
         },
         "failed": {
           "dir": "send",
           "kind": "reply",
+          "payload": "failed.schema.json",
           "next": "end"
         }
       }

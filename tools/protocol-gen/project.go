@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/hamicek/aether/sdk/go/session"
+)
 
 // endState is the reserved name of the single terminal state every automaton carries.
 const endState = "end"
@@ -10,20 +14,20 @@ const endState = "end"
 // branches flip direction; a choose (internal choice) and a reply (external choice) both fan several
 // ops out of one state; a rec/goto pair becomes a back-edge. Gotos are emitted as sentinels and
 // resolved once, at the end, so a label used before its rec body finishes projecting still binds.
-func Project(p *Protocol, role string) (*Automaton, error) {
-	pr := &projector{proto: p, role: role, states: map[string]*AutoState{}, labels: map[string]string{}}
-	pr.states[endState] = &AutoState{Final: true, On: map[string]Edge{}}
+func Project(p *Protocol, role string) (*session.Automaton, error) {
+	pr := &projector{proto: p, role: role, states: map[string]*session.AutoState{}, labels: map[string]string{}}
+	pr.states[endState] = &session.AutoState{Final: true, On: map[string]session.Edge{}}
 	start := pr.seq(p.Flow, endState)
 	if err := pr.resolveGotos(); err != nil {
 		return nil, err
 	}
-	return &Automaton{Protocol: p.Protocol, Role: role, Start: start, States: pr.states}, nil
+	return &session.Automaton{Protocol: p.Protocol, Role: role, Start: start, States: pr.states}, nil
 }
 
 type projector struct {
 	proto  *Protocol
 	role   string
-	states map[string]*AutoState
+	states map[string]*session.AutoState
 	labels map[string]string // rec label -> entry state name (filled as bodies are projected)
 	n      int
 }
@@ -33,10 +37,10 @@ func (pr *projector) fresh() string {
 	return fmt.Sprintf("s%d", pr.n)
 }
 
-func (pr *projector) state(name string) *AutoState {
+func (pr *projector) state(name string) *session.AutoState {
 	st, ok := pr.states[name]
 	if !ok {
-		st = &AutoState{On: map[string]Edge{}}
+		st = &session.AutoState{On: map[string]session.Edge{}}
 		pr.states[name] = st
 	}
 	return st
@@ -75,31 +79,31 @@ func (pr *projector) step(s Step, after string) string {
 // emit adds one message's leading edge to state st, and for a call also the following reply state.
 // The call/reply pair flips direction: the caller sends the call and receives the reply, the callee
 // the other way around.
-func (pr *projector) emit(st *AutoState, s Step, after string) {
+func (pr *projector) emit(st *session.AutoState, s Step, after string) {
 	dir := pr.dir(s.From)
 	if s.Kind == "cast" {
-		st.On[s.Op] = Edge{Dir: dir, Kind: "cast", Next: after}
+		st.On[s.Op] = session.Edge{Dir: dir, Kind: "cast", Payload: s.Payload, Next: after}
 		return
 	}
 	reply := pr.fresh()
-	st.On[s.Op] = Edge{Dir: dir, Kind: "call", Next: reply}
+	st.On[s.Op] = session.Edge{Dir: dir, Kind: "call", Payload: s.Payload, Next: reply}
 
-	replyDir := dirSend
+	replyDir := session.DirSend
 	if s.From == pr.role {
-		replyDir = dirRecv // the caller receives its reply
+		replyDir = session.DirRecv // the caller receives its reply
 	}
 	rst := pr.state(reply)
 	for _, b := range s.Reply.Choice {
-		rst.On[b.Op] = Edge{Dir: replyDir, Kind: "reply", Next: pr.thenTarget(b.Then, after)}
+		rst.On[b.Op] = session.Edge{Dir: replyDir, Kind: "reply", Payload: b.Payload, Next: pr.thenTarget(b.Then, after)}
 	}
 }
 
 // dir is send when this role is the sender of the message, receive otherwise.
 func (pr *projector) dir(from string) string {
 	if from == pr.role {
-		return dirSend
+		return session.DirSend
 	}
-	return dirRecv
+	return session.DirRecv
 }
 
 // thenTarget resolves a branch continuation to a state name. A goto becomes a sentinel ("@label")

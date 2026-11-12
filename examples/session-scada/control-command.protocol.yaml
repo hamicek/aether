@@ -1,0 +1,40 @@
+# Control command lifecycle - the safety-critical SCADA handshake (pharos).
+#
+#   requested -> authorized -> sent -> confirmed | failed
+#
+# Rules this type enforces as a shared contract:
+#   - a command is a call, so it demands a mandatory reply (no silent drop);
+#   - "confirmed" cannot precede "authorized": confirmed exists only in the sub-flow reached after
+#     the device authorizes, so a confirm-before-authorize is not even expressible;
+#   - rejection ends the conversation cleanly.
+protocol: ControlCommand
+roles: [operator, device]
+start: operator
+flow:
+  - from: operator
+    to: device
+    kind: call
+    op: command
+    payload: command.schema.json
+    reply:
+      choice:
+        - op: authorized
+          payload: authorized.schema.json
+          then:
+            flow:
+              - from: operator
+                to: device
+                kind: call
+                op: execute
+                payload: execute.schema.json
+                reply:
+                  choice:
+                    - op: confirmed
+                      payload: confirmed.schema.json
+                      then: end
+                    - op: failed
+                      payload: failed.schema.json
+                      then: end
+        - op: rejected
+          payload: rejected.schema.json
+          then: end

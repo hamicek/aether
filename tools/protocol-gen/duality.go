@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/hamicek/aether/sdk/go/session"
 )
 
 // CheckDuality projects both roles and verifies the two local types are dual: at every paired phase
@@ -24,7 +26,7 @@ func CheckDuality(p *Protocol) error {
 	return dual(p.Protocol, a, b)
 }
 
-func dual(name string, a, b *Automaton) error {
+func dual(name string, a, b *session.Automaton) error {
 	type pair struct{ x, y string }
 	visited := map[pair]bool{}
 
@@ -65,10 +67,10 @@ func dual(name string, a, b *Automaton) error {
 }
 
 func opposite(x, y string) bool {
-	return (x == dirSend && y == dirRecv) || (x == dirRecv && y == dirSend)
+	return (x == session.DirSend && y == session.DirRecv) || (x == session.DirRecv && y == session.DirSend)
 }
 
-func opList(s *AutoState) string {
+func opList(s *session.AutoState) string {
 	ops := make([]string, 0, len(s.On))
 	for op := range s.On {
 		ops = append(ops, op)

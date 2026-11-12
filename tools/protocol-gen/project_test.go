@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/hamicek/aether/sdk/go/session"
+)
 
 func TestProjectControlCommand(t *testing.T) {
 	p := readFixture(t, "control-command.protocol.yaml")
@@ -11,27 +15,27 @@ func TestProjectControlCommand(t *testing.T) {
 	}
 	start := op.States[op.Start]
 	cmd := start.On["command"]
-	if cmd.Dir != dirSend || cmd.Kind != "call" {
+	if cmd.Dir != session.DirSend || cmd.Kind != "call" {
 		t.Fatalf("operator start: want send call, got %+v", cmd)
 	}
 	reply := op.States[cmd.Next]
-	if a := reply.On["authorized"]; a.Dir != dirRecv || a.Kind != "reply" {
+	if a := reply.On["authorized"]; a.Dir != session.DirRecv || a.Kind != "reply" {
 		t.Fatalf("authorized: want recv reply, got %+v", a)
 	}
-	if rj := reply.On["rejected"]; rj.Dir != dirRecv || !op.States[rj.Next].Final {
+	if rj := reply.On["rejected"]; rj.Dir != session.DirRecv || !op.States[rj.Next].Final {
 		t.Fatalf("rejected should be recv and end, got %+v", rj)
 	}
 	// "confirmed" lives only in the sub-flow after "authorized" - it cannot precede it structurally.
 	afterAuth := op.States[reply.On["authorized"].Next]
 	exec := afterAuth.On["execute"]
-	if exec.Dir != dirSend || exec.Kind != "call" {
+	if exec.Dir != session.DirSend || exec.Kind != "call" {
 		t.Fatalf("execute: want send call, got %+v", exec)
 	}
 	if _, bad := afterAuth.On["confirmed"]; bad {
 		t.Fatalf("confirmed must not be legal before execute")
 	}
 	execReply := op.States[exec.Next]
-	if c := execReply.On["confirmed"]; c.Dir != dirRecv || !op.States[c.Next].Final {
+	if c := execReply.On["confirmed"]; c.Dir != session.DirRecv || !op.States[c.Next].Final {
 		t.Fatalf("confirmed should be recv and end, got %+v", c)
 	}
 
@@ -41,10 +45,10 @@ func TestProjectControlCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	dcmd := dev.States[dev.Start].On["command"]
-	if dcmd.Dir != dirRecv || dcmd.Kind != "call" {
+	if dcmd.Dir != session.DirRecv || dcmd.Kind != "call" {
 		t.Fatalf("device command: want recv call, got %+v", dcmd)
 	}
-	if da := dev.States[dcmd.Next].On["authorized"]; da.Dir != dirSend {
+	if da := dev.States[dcmd.Next].On["authorized"]; da.Dir != session.DirSend {
 		t.Fatalf("device authorized: want send, got %+v", da)
 	}
 }
@@ -58,7 +62,7 @@ func TestProjectDriverLoopBackEdge(t *testing.T) {
 	// The rec body opens with a choose, so the start state offers both commands.
 	start := col.States[col.Start]
 	write := start.On["write"]
-	if write.Dir != dirSend || write.Kind != "call" {
+	if write.Dir != session.DirSend || write.Kind != "call" {
 		t.Fatalf("collector write: want send call, got %+v", write)
 	}
 	if _, ok := start.On["health"]; !ok {

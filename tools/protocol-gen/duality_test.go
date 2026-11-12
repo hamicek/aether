@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/hamicek/aether/sdk/go/session"
 )
 
 func TestDualityFixtures(t *testing.T) {
@@ -18,13 +20,13 @@ func TestDualityFixtures(t *testing.T) {
 // (A single protocol.yaml can never produce this, which is exactly why the checker is the guard for
 // separately authored role types.)
 func TestDualityRejectsSameDirection(t *testing.T) {
-	a := &Automaton{Protocol: "P", Role: "a", Start: "s", States: map[string]*AutoState{
-		"s":   {On: map[string]Edge{"x": {Dir: dirSend, Kind: "cast", Next: "end"}}},
-		"end": {Final: true, On: map[string]Edge{}},
+	a := &session.Automaton{Protocol: "P", Role: "a", Start: "s", States: map[string]*session.AutoState{
+		"s":   {On: map[string]session.Edge{"x": {Dir: session.DirSend, Kind: "cast", Next: "end"}}},
+		"end": {Final: true, On: map[string]session.Edge{}},
 	}}
-	b := &Automaton{Protocol: "P", Role: "b", Start: "s", States: map[string]*AutoState{
-		"s":   {On: map[string]Edge{"x": {Dir: dirSend, Kind: "cast", Next: "end"}}},
-		"end": {Final: true, On: map[string]Edge{}},
+	b := &session.Automaton{Protocol: "P", Role: "b", Start: "s", States: map[string]*session.AutoState{
+		"s":   {On: map[string]session.Edge{"x": {Dir: session.DirSend, Kind: "cast", Next: "end"}}},
+		"end": {Final: true, On: map[string]session.Edge{}},
 	}}
 	if err := dual("P", a, b); err == nil || !strings.Contains(err.Error(), "not dual") {
 		t.Fatalf("want not-dual error, got %v", err)
@@ -33,13 +35,13 @@ func TestDualityRejectsSameDirection(t *testing.T) {
 
 // A pair that disagrees on the offered op set must be rejected too.
 func TestDualityRejectsDifferentOps(t *testing.T) {
-	a := &Automaton{Protocol: "P", Role: "a", Start: "s", States: map[string]*AutoState{
-		"s":   {On: map[string]Edge{"x": {Dir: dirSend, Kind: "cast", Next: "end"}}},
-		"end": {Final: true, On: map[string]Edge{}},
+	a := &session.Automaton{Protocol: "P", Role: "a", Start: "s", States: map[string]*session.AutoState{
+		"s":   {On: map[string]session.Edge{"x": {Dir: session.DirSend, Kind: "cast", Next: "end"}}},
+		"end": {Final: true, On: map[string]session.Edge{}},
 	}}
-	b := &Automaton{Protocol: "P", Role: "b", Start: "s", States: map[string]*AutoState{
-		"s":   {On: map[string]Edge{"y": {Dir: dirRecv, Kind: "cast", Next: "end"}}},
-		"end": {Final: true, On: map[string]Edge{}},
+	b := &session.Automaton{Protocol: "P", Role: "b", Start: "s", States: map[string]*session.AutoState{
+		"s":   {On: map[string]session.Edge{"y": {Dir: session.DirRecv, Kind: "cast", Next: "end"}}},
+		"end": {Final: true, On: map[string]session.Edge{}},
 	}}
 	if err := dual("P", a, b); err == nil {
 		t.Fatalf("want op-set mismatch error, got nil")

@@ -16,6 +16,7 @@
         "write": {
           "dir": "send",
           "kind": "call",
+          "payload": "write.schema.json",
           "next": "s2"
         }
       }
@@ -25,11 +26,13 @@
         "applied": {
           "dir": "recv",
           "kind": "reply",
+          "payload": "applied.schema.json",
           "next": "s1"
         },
         "fault": {
           "dir": "recv",
           "kind": "reply",
+          "payload": "fault.schema.json",
           "next": "end"
         }
       }
@@ -39,6 +42,7 @@
         "status": {
           "dir": "recv",
           "kind": "reply",
+          "payload": "status.schema.json",
           "next": "s1"
         }
       }

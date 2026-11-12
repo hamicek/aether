@@ -1,0 +1,37 @@
+# Driver control loop - the command/ack scan cycle between a collector and a field device (pharos).
+#
+# Each round the collector chooses one command (internal choice, +{}); the device answers (external
+# choice, &{}). A write may apply (loop again) or fault (stop); a health check reports and loops.
+#
+# Deliberately NOT modelled here: the device's reading/telemetry stream. A cast with no counterpart
+# is a broadcast, whose *shape* is a payload contract, not a conversation - typing it as a session
+# would be a category error (design.md §15). Session types cover the control plane, not the data plane.
+protocol: DriverControl
+roles: [collector, device]
+start: collector
+flow:
+  - rec: Loop
+    body:
+      - choose:
+          - from: collector
+            to: device
+            kind: call
+            op: write
+            payload: write.schema.json
+            reply:
+              choice:
+                - op: applied
+                  payload: applied.schema.json
+                  then: { goto: Loop }
+                - op: fault
+                  payload: fault.schema.json
+                  then: end
+          - from: collector
+            to: device
+            kind: call
+            op: health
+            reply:
+              choice:
+                - op: status
+                  payload: status.schema.json
+                  then: { goto: Loop }
