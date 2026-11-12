@@ -1068,6 +1068,20 @@ See [ROADMAP.md](./ROADMAP.md) for the maintained list. In short:
   a scheduler, cross-node state migration, or a cross-node authority over lords; if a deployer needs
   the runtime to carry new placement semantics (in `internal/wire`, the lord, or the SDK run-loop),
   that is a red flag to evaluate as a core change, not add quietly. Decision record: bundle AE-085.
+- **Session types (typed protocols) beyond the CI slice** - a session type is a contract for a
+  *conversation* between two thralls (the order, direction and mandatory replies), layered over the
+  payload contract (which types one message's shape). The Tier 1 **CI slice is implemented** (AE-090):
+  a binary `*.protocol.yaml` is projected onto a per-role automaton and checked at build time -
+  well-formedness (every call has a mandatory reply, the conversation can terminate), duality of the
+  two role projections (well-formedness of the *contract*, not of a running system), drift against the
+  committed automata, and a name-existence conformance lint against a thrall's `ThrallDescribe`.
+  Runnable example: `examples/session-scada/` (the pharos control-command and driver-control loops).
+  **Deferred:** the runtime **monitor** (Tier 2) that would interpret the same automaton to enforce
+  ordering live and catch an out-of-order or forgotten message at its first occurrence - the CI slice
+  is a design-time contract only, and the transport stays untyped (`json.RawMessage`). Also deferred:
+  typestate stubs, a `Sess` correlation header for multi-step cast sessions, and multiparty (3+ role)
+  protocols, which decompose into binary links per hop. The pi-calculus is only the semantic
+  justification (a subject is a channel, a request/reply inbox a one-shot channel), not an API.
 
 Note: several items listed as future work in earlier drafts are now implemented - JetStream durable
 mailboxes (`durable`), within-app singletons with thrall-level fencing (`scope`, §12; these are
