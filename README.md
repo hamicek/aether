@@ -130,6 +130,7 @@ examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a 
 examples/hub-spoke-spike/ multi-node hub + isolated sites (leaf nodes) - see Multi-node below
 examples/nats-leaf/    embedded spoke joined to a hub via [nats.leaf] - single-binary site
 examples/csharp-consumer/ polyglot roundtrip Go -> C# -> Go: a C# transformer on the thin C# client
+examples/session-scada/ typed protocols (session types) between thralls - CI slice (AE-090)
 scripts/soak.sh       run the soak/chaos suite (out of CI)
 scripts/durable-perf.sh durable cast drain throughput harness (out of CI) - examples/durable-perf/
 ```

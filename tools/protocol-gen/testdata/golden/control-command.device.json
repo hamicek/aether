@@ -1,0 +1,62 @@
+{
+  "protocol": "ControlCommand",
+  "role": "device",
+  "start": "s1",
+  "states": {
+    "end": {
+      "final": true
+    },
+    "s1": {
+      "on": {
+        "command": {
+          "dir": "recv",
+          "kind": "call",
+          "payload": "command.schema.json",
+          "next": "s2"
+        }
+      }
+    },
+    "s2": {
+      "on": {
+        "authorized": {
+          "dir": "send",
+          "kind": "reply",
+          "payload": "authorized.schema.json",
+          "next": "s3"
+        },
+        "rejected": {
+          "dir": "send",
+          "kind": "reply",
+          "payload": "rejected.schema.json",
+          "next": "end"
+        }
+      }
+    },
+    "s3": {
+      "on": {
+        "execute": {
+          "dir": "recv",
+          "kind": "call",
+          "payload": "execute.schema.json",
+          "next": "s4"
+        }
+      }
+    },
+    "s4": {
+      "on": {
+        "confirmed": {
+          "dir": "send",
+          "kind": "reply",
+          "payload": "confirmed.schema.json",
+          "next": "end"
+        },
+        "failed": {
+          "dir": "send",
+          "kind": "reply",
+          "payload": "failed.schema.json",
+          "next": "end"
+        }
+      }
+    }
+  }
+}
