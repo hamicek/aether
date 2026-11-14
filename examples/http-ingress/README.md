@@ -49,11 +49,35 @@ curl --Host--> [http-ingress]  --aether.web.blog.call (http_request)-->  [blog w
 - The `blog` web thrall is a plain genserver started with `thrall.StartWeb` - it implements only an
   HTTP handler and never binds a port.
 
+## Dynamic routing (site-registry)
+
+The static `routes.json` is one of two route providers. The other resolves each `Host` dynamically
+against the commons **`site-registry`** thrall over NATS, so sites can be published and retired at
+runtime without restarting the ingress:
+
+```bash
+../../bin/http-ingress -registry                       # resolve via site-registry instead of -routes
+#   -registry-subject aether.ae.site-registry.call      # the resolve call subject (default shown)
+#   -registry-scope   public                            # this ingress's reach: public | vpn
+#   -registry-ttl     5s                                # cache a resolved route this long
+```
+
+- The provider calls the registry's `resolve` op (`host` + the ingress's `scope`) and routes to the
+  returned thrall. Reuse is over the **wire contract**, not a code import - the registry lives in the
+  private `ae-commons` repo and is reached purely by its NATS envelope.
+- **Caching:** resolve is a call per request, so results are cached for `-registry-ttl`. A registry
+  outage (timeout / no responders) denies that one request but is never cached, so it cannot latch a
+  host into a stale "not found".
+- **Scope:** a `public` ingress sees only public sites; a `vpn` ingress sees both. The scope travels
+  in the resolve request and the public/vpn filter stays in the registry, so the ingress keeps its
+  default-deny behaviour unchanged.
+
 ## Boundaries (deliberate)
 
-- **Route table is pluggable.** The ingress takes a `RouteProvider` (host -> thrall). This example
-  ships the static-file provider (`LoadStaticRoutes`); a dynamic `site-registry` provider that lets
-  sites be published at runtime is a later, separate concern (it implements the same interface).
+- **Route table is pluggable.** The ingress takes a `RouteProvider` (host -> thrall). It ships two:
+  the static-file provider (`-routes`, `LoadStaticRoutes`) and the dynamic `site-registry` provider
+  (`-registry`, `NewRegistryRoutes`) above. Both sit behind the same interface and keep the same
+  default-deny behaviour.
 - **Dumb forwarder.** No path routing, no middleware, no business logic in the ingress - all of that
   lives in the web thrall. TLS, certificates and rate limiting belong in a reverse proxy in front.
 - Request bodies are size-capped before they enter the ether; a reply with no status is treated as an
