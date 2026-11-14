@@ -634,11 +634,14 @@ forwards the whole request, so adding a site is a route-table entry, not a new e
 in `internal/wire` (Go = source of truth; `HTTPRequest`/`HTTPResponse` with a base64 body for binary
 safety and `http.Header`-shaped headers), mirrored in the TS and Python SDKs with golden-fixture parity.
 Each SDK ships a helper (`StartWeb` / `startWeb` / `start_web`) so the author writes only the handler,
-plus ergonomic response constructors (HTML/text/JSON). This is the basis for exposing a web over the
-ether without writing a web server; the generic host->subject ingress that drives it is the sibling
-component (default-deny route table, pluggable static/dynamic feeders). It does not replace models A/B:
-use `[[edge.http]]` to put HTTP in front of an existing thrall's operations, and the web thrall when the
-thrall itself is the web app.
+plus ergonomic response constructors (HTML/text/JSON). The generic host->subject ingress that drives
+it is implemented as an **optional component** (`examples/http-ingress/`, implemented AE-092): a dumb
+forwarder on `thrall.StartEdge` that maps the `Host` header to a thrall and forwards the request over
+NATS, writing the reply back. It is **default-deny** (only hosts in its route table are reachable) and
+the route table sits behind a pluggable `RouteProvider` - a static file now, a dynamic site-registry
+provider later, behind the same interface. It does not replace models A/B: use `[[edge.http]]` to put
+HTTP in front of an existing thrall's operations, and the web thrall + ingress when the thrall itself
+is the web app.
 
 **Live push to the browser (implemented, SSE).** The reverse flow: ether -> browser. A frontend opens a
 connection and the edge pushes events out to it as they cross the ether. `thrall.SSEStream` (Go SDK) is
