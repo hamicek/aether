@@ -21,10 +21,10 @@ import (
 // the small resolve request/reply types below MIRROR its contract.md (contract version 1.0.0) rather
 // than importing it. The contract is the source of truth; keep these in sync with it.
 
-// defaultRegistrySubject is the site-registry resolve call subject for the family's default
+// DefaultRegistrySubject is the site-registry resolve call subject for the family's default
 // deployment (app "ae", name "site-registry"): aether.ae.site-registry.call. A product running the
 // registry in another app overrides it.
-const defaultRegistrySubject = "aether.ae.site-registry.call"
+const DefaultRegistrySubject = "aether.ae.site-registry.call"
 
 // defaultRegistryTimeout bounds how long a single resolve call waits for the registry before the
 // lookup is treated as a transport failure (which denies this request but is not cached).
@@ -98,11 +98,13 @@ type cacheEntry struct {
 	expires time.Time
 }
 
-// RegistryOptions configure a RegistryRoutes. Zero values fall back to sane defaults. Now is an
-// injection seam for tests (TTL expiry without sleeping) and defaults to time.Now.
+// RegistryOptions configure a RegistryRoutes. Zero values fall back to sane defaults. Scope is a
+// plain string ("public" | "vpn", default public) so the main package can set it straight from a
+// flag; it is validated in NewRegistryRoutes. Now is an injection seam for tests (TTL expiry without
+// sleeping) and defaults to time.Now.
 type RegistryOptions struct {
 	Subject string
-	Scope   scope
+	Scope   string
 	TTL     time.Duration
 	Timeout time.Duration
 	Log     *slog.Logger
@@ -113,19 +115,20 @@ type RegistryOptions struct {
 // on an invalid scope so a misconfigured ingress is caught at startup rather than silently denying
 // (or over-admitting) every request, mirroring LoadStaticRoutes's startup validation.
 func NewRegistryRoutes(nc *nats.Conn, opts RegistryOptions) (*RegistryRoutes, error) {
-	if opts.Scope == "" {
-		opts.Scope = scopePublic
+	sc := scope(opts.Scope)
+	if sc == "" {
+		sc = scopePublic
 	}
-	if !opts.Scope.valid() {
+	if !sc.valid() {
 		return nil, fmt.Errorf("ingress: registry scope %q is not %q or %q", opts.Scope, scopePublic, scopeVPN)
 	}
 	if opts.Subject == "" {
-		opts.Subject = defaultRegistrySubject
+		opts.Subject = DefaultRegistrySubject
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = defaultRegistryTimeout
 	}
-	return newRegistryRoutes(natsResolver(nc, opts.Subject, opts.Scope, opts.Timeout), opts), nil
+	return newRegistryRoutes(natsResolver(nc, opts.Subject, sc, opts.Timeout), opts), nil
 }
 
 // newRegistryRoutes wraps an authoritative resolver in the caching RouteProvider, applying the
