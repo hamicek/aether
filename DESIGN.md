@@ -624,6 +624,22 @@ custom logic around the call is model B. Input validation follows the same line 
 declaratively (a JSON schema on a route: `route."..." = { ..., schema = "..." }`, rejecting a bad body
 with a 400 before it reaches the ether), model B validates in code.
 
+**Web thrall: "a thrall IS the web server" (http wire contract, implemented AE-091).** Models A and B
+both keep HTTP *at the edge* - the edge owns the socket and the thrall behind it never sees HTTP, it
+answers a domain op (`value`, `increment`). The inverse model pushes HTTP *to the thrall*: a single
+`http_request` contract carries the whole request/response over NATS, so a web thrall is an ordinary
+genserver whose one operation is `http_request -> http_response` and that does its own path routing. It
+never owns a socket or a port; a **dumb, generic ingress** maps the `Host` header to a subject and
+forwards the whole request, so adding a site is a route-table entry, not a new edge. The contract lives
+in `internal/wire` (Go = source of truth; `HTTPRequest`/`HTTPResponse` with a base64 body for binary
+safety and `http.Header`-shaped headers), mirrored in the TS and Python SDKs with golden-fixture parity.
+Each SDK ships a helper (`StartWeb` / `startWeb` / `start_web`) so the author writes only the handler,
+plus ergonomic response constructors (HTML/text/JSON). This is the basis for exposing a web over the
+ether without writing a web server; the generic host->subject ingress that drives it is the sibling
+component (default-deny route table, pluggable static/dynamic feeders). It does not replace models A/B:
+use `[[edge.http]]` to put HTTP in front of an existing thrall's operations, and the web thrall when the
+thrall itself is the web app.
+
 **Live push to the browser (implemented, SSE).** The reverse flow: ether -> browser. A frontend opens a
 connection and the edge pushes events out to it as they cross the ether. `thrall.SSEStream` (Go SDK) is
 the plumbing an edge runs inside `StartEdge`: it holds browser SSE connections, forwards ether events,
