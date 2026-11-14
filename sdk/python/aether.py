@@ -10,6 +10,7 @@ single asyncio lock = a serialized mailbox.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import ssl
@@ -884,6 +885,144 @@ async def start(defn: ThrallDef) -> None:
 def run(defn: ThrallDef) -> None:
     """Convenient entry point: asyncio.run(start(defn))."""
     asyncio.run(start(defn))
+
+
+# --- Web thrall (HTTP wire contract, mirrors internal/wire/http.go and the TS SDK) ---
+# A web thrall is an ordinary genserver whose single operation is a whole HTTP request/response
+# (op http_request); it never owns a socket. A separate ingress translates HTTP <-> envelope and
+# calls it over NATS. The body is a base64 string (the Go source carries it as []byte, which
+# marshals to base64), so the contract is binary-safe and identical across languages. Headers
+# mirror http.Header (a key maps to one or more values). Query is the raw query string without the
+# leading '?'.
+
+OP_HTTP_REQUEST = "http_request"
+
+
+@dataclass
+class HTTPRequest:
+    method: str
+    path: str
+    query: str = ""
+    headers: dict[str, list[str]] = field(default_factory=dict)
+    body: str = ""  # base64
+
+    @staticmethod
+    def from_wire(d: dict) -> "HTTPRequest":
+        return HTTPRequest(
+            method=d.get("method", ""),
+            path=d.get("path", ""),
+            query=d.get("query", "") or "",
+            headers=d.get("headers", {}) or {},
+            body=d.get("body", "") or "",
+        )
+
+    def to_wire(self) -> dict:
+        out: dict = {"method": self.method, "path": self.path}
+        if self.query:
+            out["query"] = self.query
+        if self.headers:
+            out["headers"] = self.headers
+        if self.body:
+            out["body"] = self.body
+        return out
+
+    def body_bytes(self) -> bytes:
+        return base64.b64decode(self.body) if self.body else b""
+
+    def body_text(self) -> str:
+        return self.body_bytes().decode("utf-8")
+
+
+@dataclass
+class HTTPResponse:
+    status: int
+    headers: dict[str, list[str]] = field(default_factory=dict)
+    body: str = ""  # base64
+
+    @staticmethod
+    def from_wire(d: dict) -> "HTTPResponse":
+        return HTTPResponse(
+            status=d.get("status", 0),
+            headers=d.get("headers", {}) or {},
+            body=d.get("body", "") or "",
+        )
+
+    def to_wire(self) -> dict:
+        out: dict = {"status": self.status}
+        if self.headers:
+            out["headers"] = self.headers
+        if self.body:
+            out["body"] = self.body
+        return out
+
+    def body_bytes(self) -> bytes:
+        return base64.b64decode(self.body) if self.body else b""
+
+    def body_text(self) -> str:
+        return self.body_bytes().decode("utf-8")
+
+
+def header(key: str, value: str) -> dict[str, list[str]]:
+    """Build a single-value header map, the common case when constructing a response."""
+    return {key: [value]}
+
+
+def _encode_body(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def text_response(status: int, text: str) -> HTTPResponse:
+    """A plain-text response with a text/plain content type."""
+    return HTTPResponse(status, header("Content-Type", "text/plain; charset=utf-8"), _encode_body(text))
+
+
+def html_response(status: int, html: str) -> HTTPResponse:
+    """An HTML response with a text/html content type."""
+    return HTTPResponse(status, header("Content-Type", "text/html; charset=utf-8"), _encode_body(html))
+
+
+def json_response(status: int, value: Any) -> HTTPResponse:
+    """A JSON response with an application/json content type. The body is compact JSON, matching
+    the Go JSONResponse byte form."""
+    body = json.dumps(value, separators=(",", ":"))
+    return HTTPResponse(status, header("Content-Type", "application/json"), _encode_body(body))
+
+
+# WebHandler shape: (req: HTTPRequest, state, ctx) -> (resp: HTTPResponse, new_state). It mirrors
+# the call shape, so a web thrall can hold state across requests, serialized by the mailbox.
+WebHandler = Callable[["HTTPRequest", Any, "Ctx"], Any]
+
+
+def _web_call_handler(handle: WebHandler) -> CallHandler:
+    """Adapt an HTTP handler to a thrall call handler: decode the http_request payload into an
+    HTTPRequest, run the handler, and return the HTTPResponse as the reply. Factored out so it is
+    unit-testable without a NATS connection."""
+    async def _handler(payload: Any, state: Any, ctx: "Ctx"):
+        req = HTTPRequest.from_wire(payload or {})
+        resp, next_state = await _maybe(handle(req, state, ctx))
+        return resp.to_wire(), next_state
+
+    return _handler
+
+
+def def_web(name="", init=None, handle=None, version="") -> ThrallDef:
+    """Build a ThrallDef that answers http_request with the given handler. Only handle is required;
+    init is optional (state defaults to None, the common stateless case)."""
+    if handle is None:
+        raise ValueError(f"web thrall {name}: handle is required")
+    init_fn = init if init is not None else (lambda ctx: None)
+    return def_thrall(name=name, init=init_fn,
+                      handle_call={OP_HTTP_REQUEST: _web_call_handler(handle)}, version=version)
+
+
+async def start_web(name="", init=None, handle=None, version="") -> None:
+    """Connect a web thrall to the ether and run its lifecycle - a thin wrapper over start."""
+    await start(def_web(name=name, init=init, handle=handle, version=version))
+
+
+def run_web(name="", init=None, handle=None, version="") -> None:
+    """Convenient entry point: asyncio.run(start_web(...))."""
+    asyncio.run(start_web(name=name, init=init, handle=handle, version=version))
 
 
 # --- FSM behaviour (mirrors the Go StartFSM and TS startFSM; an OTP gen_statem analogue) ---
