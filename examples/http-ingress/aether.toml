@@ -1,0 +1,24 @@
+app = "web"
+strategy = "one_for_one"
+restart_intensity = { max = 3, within_ms = 5000 }
+
+[nats]
+mode = "embedded"
+
+# A web thrall: a plain genserver that IS a web server (AE-091). It owns no socket and binds no port;
+# the ingress forwards HTTP to it over NATS as http_request calls. It does its own path routing.
+[[thrall]]
+name = "blog"
+cmd  = "../../bin/blog"
+restart = "permanent"
+scope   = "local"
+
+# The ingress: a generic HTTP front door that maps the Host header to a web thrall and forwards the
+# request over NATS, writing the reply back. It owns the OS socket, so it runs as a singleton (one
+# active instance; failover via the KV lock + fencing). The route table is a static file for now
+# (a dynamic site-registry provider is Wave 1); default-deny - only hosts in routes.json are served.
+[[thrall]]
+name = "ingress"
+cmd  = "../../bin/http-ingress -addr :7391 -routes routes.json"
+restart = "permanent"
+scope   = "singleton"
