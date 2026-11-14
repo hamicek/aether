@@ -19,3 +19,16 @@ export { startFencing, fenceConfigFromEnv } from "./fencing";
 export type { FenceConfig, FenceOptions } from "./fencing";
 export { validate, decode, ValidationError } from "./schema";
 export type { Problem } from "./schema";
+export {
+  OP_HTTP_REQUEST,
+  defWeb,
+  startWeb,
+  header,
+  textResponse,
+  htmlResponse,
+  jsonResponse,
+  encodeBody,
+  bodyBytes,
+  bodyText,
+} from "./http";
+export type { HTTPRequest, HTTPResponse, WebDef, WebHandler } from "./http";

@@ -1,0 +1,1 @@
+{"method":"GET","path":"/search","query":"q=cats\u0026q=dogs\u0026safe=1","headers":{"Accept":["text/html"],"X-Tag":["a","b"]}}
