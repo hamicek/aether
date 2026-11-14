@@ -638,8 +638,10 @@ plus ergonomic response constructors (HTML/text/JSON). The generic host->subject
 it is implemented as an **optional component** (`examples/http-ingress/`, implemented AE-092): a dumb
 forwarder on `thrall.StartEdge` that maps the `Host` header to a thrall and forwards the request over
 NATS, writing the reply back. It is **default-deny** (only hosts in its route table are reachable) and
-the route table sits behind a pluggable `RouteProvider` - a static file now, a dynamic site-registry
-provider later, behind the same interface. It does not replace models A/B: use `[[edge.http]]` to put
+the route table sits behind a pluggable `RouteProvider`: a static file (`-routes`) or a dynamic
+site-registry client (`-registry`, AE-093) that resolves each Host against the commons site-registry
+thrall over NATS and caches the result for a TTL, so sites can be published at runtime behind the same
+interface. It does not replace models A/B: use `[[edge.http]]` to put
 HTTP in front of an existing thrall's operations, and the web thrall + ingress when the thrall itself
 is the web app.
 
