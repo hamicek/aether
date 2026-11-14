@@ -80,6 +80,5 @@ test("defWeb answers http_request with the handler's response and threads state"
 });
 
 test("defWeb requires a handle", () => {
-  // deno-lint-ignore no-explicit-any
-  expect(() => defWeb({ name: "x" } as any)).toThrow(/handle is required/);
+  expect(() => defWeb({ name: "x" } as unknown as Parameters<typeof defWeb>[0])).toThrow(/handle is required/);
 });

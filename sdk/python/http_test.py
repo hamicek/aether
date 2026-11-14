@@ -8,6 +8,7 @@ Run: python -m unittest http_test   (from sdk/python)
 """
 
 import asyncio
+import base64
 import json
 import os
 import unittest
@@ -57,7 +58,7 @@ class HTTPParity(unittest.TestCase):
 
     def test_binary_body_round_trips(self):
         body = bytes(range(256))
-        b64 = aether.base64.b64encode(body).decode("ascii")
+        b64 = base64.b64encode(body).decode("ascii")
         resp = aether.HTTPResponse(status=200, body=b64)
         self.assertEqual(resp.body_bytes(), body)
 

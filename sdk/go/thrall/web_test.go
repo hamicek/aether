@@ -2,9 +2,8 @@ package thrall
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
-
-	"github.com/hamicek/aether/internal/wire"
 )
 
 // state used to prove a web handler can carry state across requests.
@@ -13,7 +12,7 @@ type webState struct{ hits int }
 func TestWebCallFnServesRequest(t *testing.T) {
 	handle := func(req HTTPRequest, s webState, ctx *Ctx) (HTTPResponse, webState, error) {
 		s.hits++
-		return HTMLResponse(200, "path="+req.Path+" hits="+itoa(s.hits)), s, nil
+		return HTMLResponse(200, "path="+req.Path+" hits="+strconv.Itoa(s.hits)), s, nil
 	}
 	fn := webCallFn(handle)
 
@@ -49,7 +48,7 @@ func TestWebCallFnRejectsMalformedPayload(t *testing.T) {
 }
 
 func TestWebCallFnPropagatesHandlerError(t *testing.T) {
-	sentinel := wire.OpHTTPRequest // any non-empty marker
+	const sentinel = "handler blew up"
 	fn := webCallFn(func(HTTPRequest, struct{}, *Ctx) (HTTPResponse, struct{}, error) {
 		return HTTPResponse{}, struct{}{}, errString(sentinel)
 	})
@@ -78,19 +77,8 @@ func TestResponseConstructors(t *testing.T) {
 	}
 }
 
-// small local helpers to avoid pulling strconv/errors into the test's intent.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
-}
-
+// errString is a minimal error with an exact message, so a test can assert the handler's error is
+// propagated verbatim.
 type errString string
 
 func (e errString) Error() string { return string(e) }
