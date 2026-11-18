@@ -147,6 +147,20 @@ func front(t *testing.T, nc *nats.Conn, routes ingress.RouteProvider, opts ingre
 	return srv.URL
 }
 
+// serve runs an ingress handler the way the program does - NewServer over a Listen listener - so a
+// test exercises the real socket limits, and returns the address it listens on.
+func serve(t *testing.T, handler http.Handler, opts ingress.ServerOptions, maxConns int) string {
+	t.Helper()
+	ln, err := ingress.Listen("127.0.0.1:0", maxConns)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := ingress.NewServer(handler, opts)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return ln.Addr().String()
+}
+
 // response is what a test needs from an HTTP exchange.
 type response struct {
 	status int

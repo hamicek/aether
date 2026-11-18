@@ -80,10 +80,7 @@ func TestRequestToWire(t *testing.T) {
 	r.Header.Add("X-Tag", "a")
 	r.Header.Add("X-Tag", "b")
 
-	req, err := requestToWire(r, defaultMaxBodyBytes)
-	if err != nil {
-		t.Fatalf("requestToWire: %v", err)
-	}
+	req := requestToWire(r, body)
 	if req.Method != "POST" || req.Path != "/upload" || req.Query != "q=cats&q=dogs" {
 		t.Errorf("method/path/query wrong: %+v", req)
 	}
@@ -92,17 +89,6 @@ func TestRequestToWire(t *testing.T) {
 	}
 	if !bytes.Equal(req.Body, body) {
 		t.Errorf("binary body changed: %v", req.Body)
-	}
-}
-
-func TestRequestToWireBodyCap(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(make([]byte, 100)))
-	req, err := requestToWire(r, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(req.Body) != 10 {
-		t.Errorf("body not capped: got %d bytes, want 10", len(req.Body))
 	}
 }
 

@@ -24,6 +24,42 @@ func TestParseFlagsAcceptsDeployedCommandLine(t *testing.T) {
 	if cfg.RegistrySubject != DefaultRegistrySubject {
 		t.Errorf("registry subject = %q, want the family default", cfg.RegistrySubject)
 	}
+	// A command line that names no limit runs with every limit at its safe default.
+	want := Config{
+		Timeout: DefaultTimeout, ReadHeaderTimeout: DefaultReadHeaderTimeout, ReadTimeout: DefaultReadTimeout,
+		WriteTimeout: DefaultWriteTimeout, IdleTimeout: DefaultIdleTimeout,
+		MaxConns: DefaultMaxConns, MaxHeaderBytes: DefaultMaxHeaderBytes,
+	}
+	if cfg.Timeout != want.Timeout || cfg.ReadHeaderTimeout != want.ReadHeaderTimeout || cfg.ReadTimeout != want.ReadTimeout ||
+		cfg.WriteTimeout != want.WriteTimeout || cfg.IdleTimeout != want.IdleTimeout ||
+		cfg.MaxConns != want.MaxConns || cfg.MaxHeaderBytes != want.MaxHeaderBytes || cfg.MaxBodyBytes != 0 {
+		t.Errorf("default limits = %+v", cfg)
+	}
+}
+
+func TestParseFlagsLimits(t *testing.T) {
+	cfg, err := ParseFlags([]string{
+		"-timeout", "8s", "-read-header-timeout", "2s", "-read-timeout", "10s", "-write-timeout", "11s",
+		"-idle-timeout", "1m", "-max-conns", "32", "-max-header-bytes", "16384", "-max-body-bytes", "4096",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.Timeout != 8*time.Second || cfg.ReadHeaderTimeout != 2*time.Second || cfg.ReadTimeout != 10*time.Second ||
+		cfg.WriteTimeout != 11*time.Second || cfg.IdleTimeout != time.Minute ||
+		cfg.MaxConns != 32 || cfg.MaxHeaderBytes != 16384 || cfg.MaxBodyBytes != 4096 {
+		t.Errorf("limits parsed to %+v", cfg)
+	}
+
+	// A limit can be tuned, not switched off.
+	for _, args := range [][]string{
+		{"-timeout", "0"}, {"-read-header-timeout", "0"}, {"-read-timeout", "-1s"}, {"-write-timeout", "0"},
+		{"-idle-timeout", "0"}, {"-max-conns", "0"}, {"-max-header-bytes", "0"}, {"-max-body-bytes", "-1"},
+	} {
+		if _, err := ParseFlags(args, io.Discard); err == nil {
+			t.Errorf("%v must be rejected", args)
+		}
+	}
 }
 
 func TestParseFlagsStaticRoutes(t *testing.T) {

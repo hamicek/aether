@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -27,11 +30,21 @@ type Config struct {
 	RegistrySubject string
 	RegistryScope   string
 	RegistryTTL     time.Duration
+
+	Timeout           time.Duration
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	MaxConns          int
+	MaxHeaderBytes    int
+	MaxBodyBytes      int64
 }
 
 // ParseFlags reads the ingress command line. Usage and parse errors are written to out; the
 // returned error is flag.ErrHelp when the caller asked for help, so a program can tell "printed
-// usage" from "bad command line".
+// usage" from "bad command line". A limit that would switch a protection off (a zero timeout, no
+// connection cap) is rejected: every limit has a safe default and can be tuned, not removed.
 func ParseFlags(args []string, out io.Writer) (Config, error) {
 	var cfg Config
 	fs := flag.NewFlagSet("http-ingress", flag.ContinueOnError)
@@ -42,10 +55,45 @@ func ParseFlags(args []string, out io.Writer) (Config, error) {
 	fs.StringVar(&cfg.RegistrySubject, "registry-subject", DefaultRegistrySubject, "site-registry resolve call subject (with -registry)")
 	fs.StringVar(&cfg.RegistryScope, "registry-scope", "public", "this ingress's reach: public (only public sites) or vpn (public and vpn sites) (with -registry)")
 	fs.DurationVar(&cfg.RegistryTTL, "registry-ttl", 5*time.Second, "how long a resolved route is cached before the registry is asked again (with -registry)")
+
+	fs.DurationVar(&cfg.Timeout, "timeout", DefaultTimeout, "how long to wait for a web thrall's reply before answering 504; also the deadline the call carries")
+	fs.DurationVar(&cfg.ReadHeaderTimeout, "read-header-timeout", DefaultReadHeaderTimeout, "how long a client may take to send the request line and headers")
+	fs.DurationVar(&cfg.ReadTimeout, "read-timeout", DefaultReadTimeout, "how long a client may take to send the whole request, body included (then 408)")
+	fs.DurationVar(&cfg.WriteTimeout, "write-timeout", DefaultWriteTimeout, "how long a client may take to read the response once the ingress has it")
+	fs.DurationVar(&cfg.IdleTimeout, "idle-timeout", DefaultIdleTimeout, "how long a keep-alive connection may sit idle between requests")
+	fs.IntVar(&cfg.MaxConns, "max-conns", DefaultMaxConns, "connections served at once; further ones wait to be accepted")
+	fs.IntVar(&cfg.MaxHeaderBytes, "max-header-bytes", DefaultMaxHeaderBytes, "largest request line plus headers accepted (then 431)")
+	fs.Int64Var(&cfg.MaxBodyBytes, "max-body-bytes", 0, "largest request body accepted (then 413); 0 = as much as one bus message carries, a higher value is lowered to that")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.validate(); err != nil {
+		fmt.Fprintln(out, err)
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// validate rejects a command line that would run the ingress without one of its limits.
+func (c Config) validate() error {
+	for name, d := range map[string]time.Duration{
+		"-timeout": c.Timeout, "-read-header-timeout": c.ReadHeaderTimeout, "-read-timeout": c.ReadTimeout,
+		"-write-timeout": c.WriteTimeout, "-idle-timeout": c.IdleTimeout,
+	} {
+		if d <= 0 {
+			return fmt.Errorf("ingress: %s must be positive, got %s", name, d)
+		}
+	}
+	if c.MaxConns < 1 {
+		return fmt.Errorf("ingress: -max-conns must be at least 1, got %d", c.MaxConns)
+	}
+	if c.MaxHeaderBytes < 1 {
+		return fmt.Errorf("ingress: -max-header-bytes must be positive, got %d", c.MaxHeaderBytes)
+	}
+	if c.MaxBodyBytes < 0 {
+		return fmt.Errorf("ingress: -max-body-bytes must not be negative, got %d", c.MaxBodyBytes)
+	}
+	return nil
 }
 
 // Run is the whole ingress program: parse the command line, then run as an edge thrall
@@ -61,24 +109,42 @@ func Run(args []string) error {
 		return err
 	}
 
-	var srv *http.Server
+	var (
+		srv *http.Server
+		ln  net.Listener
+	)
 	return thrall.StartEdge(thrall.EdgeDef{
-		// Init builds the route provider and the server before Run serves it; a misconfigured provider
-		// (a bad route file or an invalid scope) fails startup here (the lord restarts per policy)
-		// rather than silently denying everything.
+		// Init builds the route provider, derives the limits from the live connection and binds the
+		// socket before Run serves it. Anything wrong - a bad route file, an invalid scope, a bus too
+		// small to carry a request, an address already in use - fails startup here (the lord restarts
+		// per policy) rather than leaving an ingress that silently denies everything.
 		Init: func(ctx *thrall.Ctx) error {
 			routes, err := buildProvider(ctx, cfg)
 			if err != nil {
 				return err
 			}
-			handler := NewHandler(ctx.NATS, routes, Options{App: ctx.App, Log: ctx.Log})
-			srv = &http.Server{Addr: cfg.Addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-			ctx.Log.Info("http ingress listening", "addr", cfg.Addr)
+			maxBody, err := bodyLimitFor(ctx.NATS.MaxPayload(), cfg, ctx.Log)
+			if err != nil {
+				return err
+			}
+			handler := NewHandler(ctx.NATS, routes, Options{
+				App: ctx.App, Timeout: cfg.Timeout, MaxBodyBytes: maxBody, WriteTimeout: cfg.WriteTimeout, Log: ctx.Log,
+			})
+			srv = NewServer(handler, ServerOptions{
+				ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: cfg.ReadTimeout, IdleTimeout: cfg.IdleTimeout,
+				MaxHeaderBytes: cfg.MaxHeaderBytes, Log: ctx.Log,
+			})
+			if ln, err = Listen(cfg.Addr, cfg.MaxConns); err != nil {
+				return err
+			}
+			ctx.Log.Info("http ingress listening", "addr", cfg.Addr, "version", Version,
+				"timeout", cfg.Timeout, "max_body_bytes", maxBody, "max_conns", cfg.MaxConns,
+				"read_timeout", cfg.ReadTimeout, "write_timeout", cfg.WriteTimeout, "idle_timeout", cfg.IdleTimeout)
 			return nil
 		},
 		// Run owns the socket until Stop (a drain) shuts the server down.
 		Run: func(ctx *thrall.Ctx, stop <-chan struct{}) error {
-			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				return err
 			}
 			return nil
@@ -90,6 +156,26 @@ func Run(args []string) error {
 		},
 		Version: Version,
 	})
+}
+
+// bodyLimitFor settles the request body limit for a bus whose messages carry at most maxPayload
+// bytes. What the bus carries is a hard ceiling: -max-body-bytes can only lower it, and a higher
+// value is brought down to it with a warning rather than accepted and then failed per request.
+func bodyLimitFor(maxPayload int64, cfg Config, log *slog.Logger) (int64, error) {
+	carried := BodyLimit(maxPayload, cfg.MaxHeaderBytes)
+	if carried <= 0 {
+		return 0, fmt.Errorf("ingress: the bus carries messages of at most %d bytes, which leaves no room for a request body "+
+			"beside %d bytes of headers; raise the server's max_payload or lower -max-header-bytes", maxPayload, cfg.MaxHeaderBytes)
+	}
+	if cfg.MaxBodyBytes == 0 {
+		return carried, nil
+	}
+	if cfg.MaxBodyBytes > carried {
+		log.Warn("ingress: -max-body-bytes is more than one bus message carries, using the lower limit",
+			"configured", cfg.MaxBodyBytes, "limit", carried, "bus_max_payload", maxPayload)
+		return carried, nil
+	}
+	return cfg.MaxBodyBytes, nil
 }
 
 // buildProvider selects the ingress's RouteProvider: the dynamic site-registry client when -registry

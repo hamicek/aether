@@ -3,7 +3,6 @@ package ingress
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -19,47 +18,52 @@ import (
 // the header") leads straight to the log lines and the bus messages of that one request.
 const TraceHeader = "X-Aether-Trace"
 
-// defaultMaxBodyBytes caps a forwarded request body so a single request cannot buffer unbounded
-// memory into the ether. The demo value is generous; a real deployment tunes it per site.
-const defaultMaxBodyBytes = 10 << 20 // 10 MiB
-
-// DefaultTimeout bounds how long the ingress waits for a web thrall's reply before returning 504.
-const DefaultTimeout = 5 * time.Second
-
 // Options configure a Handler. App is the ether app the target thralls live in (the call subject is
-// aether.<app>.<thrall>.call). Timeout, MaxBodyBytes and Log fall back to sane defaults when zero.
+// aether.<app>.<thrall>.call). The limits fall back to the Default* constants when zero.
 type Options struct {
-	App          string
-	Timeout      time.Duration
+	App string
+	// Timeout is how long the ingress waits for a web thrall's reply (then 504); the call carries
+	// it as its deadline.
+	Timeout time.Duration
+	// MaxBodyBytes is the largest request body accepted (then 413). It must not exceed what one bus
+	// message carries; zero means BodyLimit for a bus with the NATS default max payload. Run derives
+	// it from the live connection.
 	MaxBodyBytes int64
+	// WriteTimeout bounds writing a response once the ingress has it.
+	WriteTimeout time.Duration
 	Log          *slog.Logger
 }
 
 // handler is the ingress HTTP handler: resolve Host -> thrall, forward as an http_request call, and
 // write the http_response back.
 type handler struct {
-	client  *thrall.Client
-	routes  RouteProvider
-	timeout time.Duration
-	maxBody int64
-	log     *slog.Logger
+	client       *thrall.Client
+	routes       RouteProvider
+	timeout      time.Duration
+	maxBody      int64
+	writeTimeout time.Duration
+	log          *slog.Logger
 }
 
 // NewHandler builds the ingress HTTP handler over a NATS connection and a route provider. It owns no
-// socket - the caller serves it (the edge's http.Server, or httptest in a test).
+// socket - the caller serves it (NewServer on a Listen listener, or httptest in a test).
 func NewHandler(nc *nats.Conn, routes RouteProvider, opts Options) http.Handler {
 	h := &handler{
-		client:  thrall.NewClient(nc, opts.App),
-		routes:  routes,
-		timeout: opts.Timeout,
-		maxBody: opts.MaxBodyBytes,
-		log:     opts.Log,
+		client:       thrall.NewClient(nc, opts.App),
+		routes:       routes,
+		timeout:      opts.Timeout,
+		maxBody:      opts.MaxBodyBytes,
+		writeTimeout: opts.WriteTimeout,
+		log:          opts.Log,
 	}
 	if h.timeout <= 0 {
 		h.timeout = DefaultTimeout
 	}
 	if h.maxBody <= 0 {
-		h.maxBody = defaultMaxBodyBytes
+		h.maxBody = BodyLimit(natsDefaultMaxPayload, DefaultMaxHeaderBytes)
+	}
+	if h.writeTimeout <= 0 {
+		h.writeTimeout = DefaultWriteTimeout
 	}
 	if h.log == nil {
 		h.log = slog.Default()
@@ -88,11 +92,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := requestToWire(r, h.maxBody)
-	if err != nil {
-		h.fail(w, r, trace, target, failure{status: http.StatusBadRequest, cause: "bad_request", err: err})
+	// The limit is checked before anything is forwarded: the thrall never sees a part of a request.
+	body, failed := readBody(w, r, h.maxBody)
+	if failed != nil {
+		h.fail(w, r, trace, target, *failed)
 		return
 	}
+	req := requestToWire(r, body)
 
 	// The call goes through the SDK client, so it is the same envelope a thrall's own call
 	// produces: it carries the trace and the instant the ingress stops waiting, and a thrall that
@@ -110,7 +116,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			err: fmt.Errorf("http_response status %d is not a final HTTP status", resp.Status)})
 		return
 	}
+	h.startWriting(w)
 	writeResponse(w, resp, trace)
+}
+
+// startWriting starts the write clock: from here the client has the write timeout to take the
+// response. A client that stops reading is cut off instead of holding the connection (and its slot
+// under the connection cap) for good. A writer that cannot take a deadline (a test recorder) is
+// left alone.
+func (h *handler) startWriting(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(h.writeTimeout))
 }
 
 // fail answers a request the ingress could not forward and says why in the log.
@@ -126,6 +141,7 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, trace, target str
 		attrs = append(attrs, slog.Any("err", f.err))
 	}
 	h.log.Warn("ingress request failed", attrs...)
+	h.startWriting(w)
 	http.Error(w, http.StatusText(f.status), f.status)
 }
 
@@ -137,9 +153,14 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, trace, target str
 //   - any other error reply -> 502. A refusal included: a web thrall answers its own "no" as an
 //     HTTP response, so an error reply here is the thrall failing, whatever its type.
 //   - anything else (an undecodable reply) -> 502.
+//
+// A request that passed the body limit and still did not fit one bus message (its headers took
+// more room than the limit reserves for them) is a 413: nothing was sent.
 func failureForCall(err error) failure {
 	var ce *thrall.CallError
 	switch {
+	case errors.Is(err, nats.ErrMaxPayload):
+		return failure{status: http.StatusRequestEntityTooLarge, cause: "request_too_large", err: err}
 	case errors.Is(err, nats.ErrNoResponders):
 		return failure{status: http.StatusServiceUnavailable, cause: "thrall_unavailable", err: err}
 	case errors.Is(err, nats.ErrTimeout):
@@ -157,25 +178,30 @@ func failureForCall(err error) failure {
 // of an HTTP response. Informational (1xx) statuses are not final, 0 means the reply carried none.
 func forwardableStatus(status int) bool { return status >= 200 && status <= 599 }
 
-// requestToWire translates an inbound *http.Request into the http_request payload: method, path, raw
-// query, headers and a size-capped body. http.Header is already a map[string][]string, so repeated
-// headers are preserved.
-func requestToWire(r *http.Request, maxBody int64) (wire.HTTPRequest, error) {
-	var body []byte
-	if r.Body != nil {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
-		if err != nil {
-			return wire.HTTPRequest{}, err
-		}
-		body = b
-	}
+// requestToWire translates an inbound *http.Request and its already read body into the http_request
+// payload: method, path, raw query, headers and body. http.Header is already a map[string][]string,
+// so repeated headers are preserved.
+func requestToWire(r *http.Request, body []byte) wire.HTTPRequest {
 	return wire.HTTPRequest{
 		Method:  r.Method,
 		Path:    r.URL.Path,
 		Query:   r.URL.RawQuery,
 		Headers: map[string][]string(r.Header),
 		Body:    body,
-	}, nil
+	}
+}
+
+// bodyTooLargeError says how a request body exceeded the limit, for the log line of a 413.
+type bodyTooLargeError struct {
+	limit    int64
+	declared int64 // the Content-Length the client stated, 0 when it sent the body without one
+}
+
+func (e *bodyTooLargeError) Error() string {
+	if e.declared > 0 {
+		return fmt.Sprintf("request body of %d bytes exceeds the limit of %d bytes one bus message carries", e.declared, e.limit)
+	}
+	return fmt.Sprintf("request body exceeds the limit of %d bytes one bus message carries", e.limit)
 }
 
 // writeResponse writes an http_response back to the client: headers (each value preserved, so a
