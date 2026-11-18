@@ -228,7 +228,7 @@ state does not act on.
 ```
 
 **The envelope grows only additively.** Every field added after the first version - `trace`,
-`idem`, `deadline`, `error.code`, the heartbeat's `describe` and `expired_total` - is optional and
+`idem`, `deadline`, `error.code`, the heartbeat's `describe`, `expired_total` and `in_flight` - is optional and
 omitted when empty, so peers of different ages interoperate in both directions: an old caller sends
 no `deadline` (its calls are handled whenever they are dequeued, as before) and reads a refusal as
 the `"<type>: <message>"` error string it has always got; a new caller talking to an old thrall gets
@@ -445,6 +445,55 @@ crash. The poison cast is consumed once and the restart is clean - it is not red
 that would crash every restart until restart-intensity gives up (which is what an unacked exit would
 cause, since durable delivery is at-least-once with redelivery on crash).
 
+### A panic is not an outcome - what it costs depends on the thrall
+
+A Go handler can also blow up without choosing to: a nil map, an index out of range. (TS and Python
+have no such fourth outcome - a bug there surfaces as a thrown error, the first bullet above.) The
+SDK used to do nothing about it, so the process died with a raw stack on stderr and the caller of
+that call timed out. What a panic *should* cost is decided by what the thrall is:
+
+- **An ordinary thrall (GenServer, FSM) still crashes - deliberately.** Its state is whatever its
+  handlers made of it, and a handler that panicked half way may have left it half changed (a map
+  mutated in place, a call to another thrall already sent). Continuing on that state is exactly what
+  *let it crash* exists to avoid, so the semantics stay: abnormal exit (status 2, as an unrecovered
+  panic always had), restart through `init` under the restart policy and intensity budget. What
+  changed is that it now dies properly, the way an escalation does: the caller of the panicking
+  call gets an **`escalated`** error reply at once (message `panic: <value>`) instead of waiting
+  out its timeout, and the panic is logged through the thrall's logger with the op, the request's
+  trace and the stack. A GenServer also sends the reason to the lord as `last_error` on a dying
+  breath; a state machine reports no last error at all (its self-description is static), so for an
+  FSM the reason is in its log and in the caller's reply only.
+  One difference from `Escalate` is intentional: a **durable cast that panics is not acked**. An
+  escalation is the handler's decision about that message; a panic is a bug that says nothing
+  about it, so delivery stays at-least-once and the cast is redelivered after the restart.
+- **A web thrall survives - one request pays.** Requests are independent of each other, and a
+  gateway that dies takes every user's request with the one that hit the bug (four such requests
+  in five seconds and the lord gave up on the gateway for good, §9). So `StartWeb` contains it: the
+  request is answered with a bare **500** by the web thrall itself, the panic is logged with trace
+  and stack, counted in `panics_total` (`aether_panics_total{name}`), recorded as `last_error`,
+  and the thrall keeps serving. With `Handle` the state the request would have returned is
+  discarded, so the next request gets the one from before it (anything the handler changed in place
+  through a pointer or a map stays changed); with `Serve` the shared value is whatever the handler
+  had made of it (release locks with `defer`).
+- **An event manager** already isolated a panicking handler from the others (§12); unchanged.
+
+The web rule is the same in all three SDKs: a web handler that fails - a Go panic or returned
+error, a thrown error or rejected promise in TS, a raised exception in Python - is answered as HTTP
+500 by the thrall, logged with the request's trace, recorded as `last_error`, and the process keeps
+serving. What is logged with a stack and counted in `panics_total` is the crash: a Go panic, and
+in TS and Python every such exception, since there a crash and a failure are the same thing. An
+error a Go handler *returns* is a failure the handler chose to report: it is logged without a
+stack and is not counted. A payload that is not an `http_request` at all takes the same road in
+Go (a 500, logged, `last_error`); the ingress builds that payload itself, so it takes a caller that
+bypasses the ingress to cause it. This is a
+change for the returned/thrown error: it used to be a `handler_error` reply, which the ingress
+could only render as a 502. A web thrall is HTTP-native - it answers its own "no" as a response,
+and now its own failures too - while `Refuse` and `Escalate` keep their meaning. The 500 comes
+from the SDK, not the ingress, so the ingress stays a dumb forwarder and its own statuses (502
+for an error reply, 504, 503) mean what they meant. Only the handler's own invocation is covered:
+a goroutine, promise or task the handler started and did not wait for fails outside the request
+and still ends the process.
+
 ---
 
 ## 9. Manifest - aether.toml
@@ -455,6 +504,7 @@ The separation: **thrall behavior = code** (in the SDK), **tree topology = a dec
 app = "demo"
 strategy = "one_for_one"                 # one_for_one | one_for_all | rest_for_one
 restart_intensity = { max = 3, within_ms = 5000 }
+# on_give_up = "exit"                    # continue (default) | exit - see "When the lord gives up"
 
 [nats]
 mode = "embedded"                        # embedded | external
@@ -495,6 +545,47 @@ replicas = 3                             # -> queue group, a pool of 3 workers
 A programmatic API on top (a DynamicSupervisor, §12) adds a thrall at runtime (`ctx.StartChild` /
 `ctx.StopChild`); the default path is still the manifest.
 
+### When the lord gives up
+
+`restart_intensity` bounds a crash loop: a thrall started more than `max` times within `within_ms`
+is not restarted again. The lord logs it at error, counts it (`aether_gave_up_total{name}`) and
+emits a `gave_up` event - always. What happens *next* is `on_give_up`:
+
+- **`continue`** (the default, and the behaviour before the setting existed). The thrall stays
+  down and the lord carries on supervising the rest. The cost is a **half-dead node**: the lord is
+  running, so whatever watches the lord process sees a healthy node, while a thrall - possibly the
+  one the whole site depends on - is gone until someone redeploys. It is still the right default
+  for a node nothing supervises (`aether up` in a terminal, a detached dev node): exiting there
+  would take the healthy thralls down too, with nothing to bring anything back.
+- **`exit`** - the OTP answer. A supervisor that cannot keep a child alive within its intensity
+  stops its children and fails itself, so the decision moves up to *its* supervisor. The lord
+  emits `node_exit`, stops restarting anything, drains the node, and `aether up` exits with
+  **status 3** (1 is a start-up error, 2 a usage error). The supervisor above - systemd with
+  `Restart=always`, a container restart policy - starts the whole node afresh: a clean bus, every
+  thrall through `init`.
+
+**A deploy tool should write `on_give_up = "exit"` for every node whose lord runs under a process
+supervisor that restarts it, and leave it out otherwise.** Under a supervisor, `continue` is the
+worst of both: the one thing that could repair the node is told everything is fine.
+
+**If the cause is permanent** (a broken binary, a missing dependency) the node crash-loops as a
+whole - by design, and where it can be seen: the lord's log ends each round with the same give-up
+and `node failed` lines, the supervisor records each non-zero exit (`systemctl status` shows
+status 3 and the restart count), and the loop is paced by the supervisor's own back-off
+(`RestartSec`, or a container's back-off) on top of the time the lord needs to give up. The lord
+adds no back-off of its own and does not try to hide the loop: whether to keep retrying forever or
+to stop after a burst (`StartLimitBurst`) is the outer supervisor's policy, not the node's. The
+price of `exit` is that the healthy thralls restart with the broken one on every round; a node
+where that is worse than a missing thrall should stay on `continue` - and alert on
+`aether_gave_up_total`.
+
+Scope. `on_give_up` covers the thralls of the manifest, under any strategy (a group restart that
+is given up on counts the same). A **dynamic child** (`ctx.StartChild`) is exempt: it is not part
+of the node the manifest declares, so giving up on it retires it as before and the thrall that
+spawned it decides what its loss means. A **singleton** has its own loop and no intensity budget -
+it is retried for as long as the lord runs and is never given up on, so this setting does not
+apply to it (nor to the built-in `[[edge.http]]` servers, which are singletons).
+
 ---
 
 ## 9b. Lord lifecycle (step by step)
@@ -506,8 +597,8 @@ A programmatic API on top (a DynamicSupervisor, §12) adds a thrall at runtime (
 3. The thrall (SDK) connects, subscribes, starts a heartbeat. The lord sees the heartbeat -> status
    `ready`, emits `ready` on `aether._lord.events`.
 4. **The watch loop** watches the signals: the PID exit code and the heartbeat. An abnormal crash ->
-   restart per policy + backoff, bounded by `restart_intensity` (exceeding it -> escalation per the
-   `strategy`).
+   restart per policy + backoff, bounded by `restart_intensity` (exceeding it -> the lord gives up
+   on the thrall and, with `on_give_up = "exit"`, ends the node - §9).
 5. **Graceful shutdown** (on Ctrl-C / restart): `ctl:drain` -> grace period -> `SIGTERM` -> fallback
    `SIGKILL`. After a drain the thrall finishes the in-flight message, calls `terminate`, and
    disconnects.
@@ -828,6 +919,70 @@ Each SDK ships a helper (`StartWeb` / `startWeb` / `start_web`) so the author wr
 plus ergonomic response constructors (HTML/text/JSON). It does not replace models A/B: use
 `[[edge.http]]` to put HTTP in front of an existing thrall's operations, and the web thrall + ingress
 when the thrall itself is the web app.
+
+**A web thrall serves requests concurrently - if its handler says it can.** A web thrall that
+inherited the GenServer mailbox served one request at a time: one slow request (a stalled thrall
+behind it, a chain of calls) held every other request of every user, the health check included. A
+gateway is the one kind of thrall for which that is the wrong default, so the web helper has two
+handler shapes, and **the shape, not a flag, decides how requests run**:
+
+| | `Handle` / `handle` | `Serve` / `serve` |
+|---|---|---|
+| signature | `(req, state, ctx) -> (resp, next state)` | `(req, shared, ctx) -> resp` |
+| requests at once | one - the serialized mailbox, as every thrall | up to `Concurrency` (default **32**) |
+| the value from `Init` | threaded: each request gets what the previous one returned | shared: built once, handed to every request, never replaced by the runtime |
+| ordering | arrival order | none between requests |
+
+The rule a `Serve` handler lives by: **the mailbox no longer stands between two requests.** What
+the shared value holds after `Init` is what every request sees. Treat it as read-only (clients,
+configuration, parsed templates, embedded files need nothing), or make what changes safe yourself -
+in Go a mutex, an atomic or a type that already is; in TS and Python, where handlers interleave only
+at an `await`, by keeping a change within one stretch without an `await` (a read, an `await`, then a
+write based on that read is a lost update). State that must change one request at a time belongs in
+an ordinary thrall the handler calls: its mailbox is the lock, which is what a GenServer is for.
+`ctx` is per request in a `Serve` thrall (its trace and message id are that request's) and must not
+be kept.
+
+It is hard to misuse on purpose. A handler written against the mailbox has the `Handle` shape, and
+there is no way to run that shape concurrently: `Handle` with `Concurrency > 1`, or both shapes at
+once, is refused at start instead of ignored, and an ordinary thrall (`Start`, FSM, event manager)
+has no concurrency setting at all - **GenServer semantics are unchanged**. `Concurrency = 1` with
+`Serve` runs through the mailbox, exactly as `Handle` does. Nothing switches over by itself: a web
+thrall written before this keeps its `Handle` shape and its one-at-a-time behaviour until its
+author moves it to `Serve`.
+
+What stays true in the concurrent mode:
+
+- **The deadline (§9c).** A request that finds every slot taken waits for one. The gate still
+  decides at the last moment before the handler runs - and a request whose deadline passes *while
+  it waits* is dropped right then (same log line, same `expired_total`, same `deadline_exceeded`
+  reply), not when a slot eventually frees. So the queue is bounded by how long callers are willing
+  to wait (the ingress stamps 5 s on every request), not by a count; a call without a deadline
+  waits as long as it takes, as before. A hard cap on queued work is a separate concern (overload
+  protection, deliberately not part of this).
+- **Drain.** A draining thrall stops reading at once - it closes its subscriptions, so a request
+  sent from then on is told immediately that nobody is listening (the ingress answers 503 with
+  `Retry-After`) instead of waiting for a reply that will not come. It then finishes every request
+  it had already taken - those in their handlers and those still waiting for a slot (which run or
+  expire) - flushes their replies, and only then terminates. The same in the three SDKs. For every
+  Go and Python thrall, not only web ones, drain now waits for the handler in hand whether or not
+  there is a `Terminate` hook - and for no more than that: an idle thrall stops immediately, and a
+  durable thrall stops after the cast it is handling, leaving the rest of its fetched batch
+  unacknowledged for redelivery rather than working through it past the lord's grace period.
+- **Metrics.** `mailbox_depth` counts requests received and not finished; the new `in_flight` is how
+  many are in their handlers right now, so `mailbox_depth - in_flight` is the queue. `describe`
+  carries `concurrency` for a concurrent web thrall (absent = serialized). On the lord:
+  `aether_in_flight{name}`, and `aether describe` prints the concurrency.
+- **Idempotency keys.** The in-memory dedup (§13c) belongs to the serialized mailbox and a web
+  thrall never enabled it (`WebDef` has no such option, and the ingress sends no key), so nothing
+  changes: a request's idempotency is the business of the thrall that does the write.
+- **Escalation** still crashes the process - with the other requests that were in flight.
+
+The three SDKs behave the same. Before this change all three serialized web requests (in TS and
+Python an `async` handler did *not* interleave with the next request: the mailbox awaited it), and
+all three now offer the same two shapes with the same default. The one honest difference is what
+"at once" means: goroutines in Go, interleaving at `await` on a single event loop in TS and Python,
+where a handler that blocks the loop still blocks every other request.
 
 **The ingress (`cmd/http-ingress`, core in `internal/ingress`; AE-092/093, a component since AE-095).**
 The generic host->subject forwarder that puts web thralls on the network: an edge thrall

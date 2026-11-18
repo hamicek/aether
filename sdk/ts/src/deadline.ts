@@ -43,6 +43,22 @@ export function overdueMs(e: Envelope, nowMs: number, skewMs: number): number | 
   return overdue > skewMs ? overdue : undefined;
 }
 
+// MAX_QUEUED_WAIT_MS is the longest a waiting call is given a timer for (24 hours). A deadline
+// further away is not worth timing - and must not be: setTimeout with a delay above 2^31-1 ms
+// fires at once. Such a call waits like one without a deadline; the gate still judges it when its
+// turn comes. The same bound as the Go and Python SDKs.
+export const MAX_QUEUED_WAIT_MS = 24 * 60 * 60 * 1000;
+
+// expiresInMs is how long from nowMs a thrall would start dropping the call: its deadline plus the
+// skew tolerance. undefined for a call that needs no timer: one without a deadline, which never
+// expires, or one whose deadline is more than MAX_QUEUED_WAIT_MS away.
+export function expiresInMs(e: Envelope, nowMs: number, skewMs: number): number | undefined {
+  if (!e.deadline || e.deadline <= 0) return undefined;
+  const remaining = e.deadline - nowMs;
+  if (remaining > MAX_QUEUED_WAIT_MS) return undefined;
+  return remaining + skewMs;
+}
+
 // expiredReply is the reply to a call dropped past its deadline. The caller is normally gone, but
 // one whose clock disagrees with ours is still waiting and should learn at once that nothing ran -
 // hence retryable.

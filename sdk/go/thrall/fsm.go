@@ -283,8 +283,26 @@ func (m *fsmRunner[D]) dispatch(ev Event, trace string, respond func(wire.Envelo
 	if respond != nil && m.gate.drop(req, respond) {
 		return // a call whose caller has given up never becomes an event
 	}
+	m.stats.started()
 	defer m.stats.end(start)
-	m.dispatchLocked(ev, trace, respond, req)
+	m.guarded(ev, trace, respond, req)
+}
+
+// guarded runs one event and deals with a handler that panics. A state machine is all state, so
+// like a GenServer it does not carry on after a panic (see panic.go): the caller of a call is
+// answered "escalated" at once instead of waiting out its timeout, the panic is logged with its
+// trace and stack, and the process exits abnormally for the lord to restart. Caller holds mu.
+func (m *fsmRunner[D]) guarded(ev Event, trace string, respond func(wire.Envelope), req wire.Envelope) {
+	p := guard(func() { m.dispatchLocked(ev, trace, respond, req) })
+	if p == nil {
+		return
+	}
+	logPanic(m.log, "fsm handler panicked - self-terminating for restart", ev.Op, trace, p)
+	if respond != nil {
+		respond(errReply(req, wire.ErrEscalated, p.reason()))
+	}
+	_ = m.ctx.NATS.Flush() // let the reply leave before the process does
+	exitProcess(exitPanic)
 }
 
 // dispatchLocked runs one event against the current state. Caller holds mu.
@@ -390,10 +408,11 @@ func (m *fsmRunner[D]) onTimeout(gen uint64, op string) {
 	defer m.stats.end(start)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stats.started()
 	if gen != m.timeoutGen {
 		return // superseded - a newer arm or transition happened first
 	}
-	m.dispatchLocked(Event{Op: op, Kind: EventTimeout}, "", nil, wire.Envelope{})
+	m.guarded(Event{Op: op, Kind: EventTimeout}, "", nil, wire.Envelope{})
 }
 
 // stopTimer disarms any pending timeout (on shutdown). Caller holds mu.

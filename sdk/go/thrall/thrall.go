@@ -14,6 +14,7 @@
 package thrall
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,14 +35,20 @@ import (
 )
 
 // mailboxStats collects the thrall's self-metrics reported on each heartbeat: how many
-// messages it currently holds (depth), how long the most recent handler took (latency), how
-// many it has processed in total, and how many calls it dropped unexecuted because their deadline
-// had passed. begin/end bracket every handled message; a dropped call ends with drop instead.
+// messages it currently holds (depth), how many of those have a handler running right now
+// (running), how long the most recent handler took (latency), how many it has processed in total,
+// and how many calls it dropped unexecuted because their deadline had passed.
+//
+// A message is accounted in three steps: begin when it is received, started when its turn comes
+// and its handler is about to run, end when the handler has returned. A call dropped before its
+// turn ends with drop instead of started/end. So depth - running is what is still waiting.
 type mailboxStats struct {
 	depth     atomic.Int64
+	running   atomic.Int64
 	processed atomic.Uint64
 	expired   atomic.Uint64
-	lastNs    atomic.Int64 // duration of the most recent handler, in nanoseconds
+	panics    atomic.Uint64 // handler crashes contained by a web thrall
+	lastNs    atomic.Int64  // duration of the most recent handler, in nanoseconds
 }
 
 func (s *mailboxStats) begin() time.Time {
@@ -49,9 +56,15 @@ func (s *mailboxStats) begin() time.Time {
 	return time.Now()
 }
 
+// started marks the message's turn: it stops waiting and its handler runs. Paired with end.
+func (s *mailboxStats) started() {
+	s.running.Add(1)
+}
+
 func (s *mailboxStats) end(start time.Time) {
 	s.lastNs.Store(int64(time.Since(start)))
 	s.processed.Add(1)
+	s.running.Add(-1)
 	s.depth.Add(-1)
 }
 
@@ -63,16 +76,25 @@ func (s *mailboxStats) drop() {
 }
 
 func (s *mailboxStats) snapshot() wire.HeartbeatMetrics {
+	// running is read before depth: a message that starts in between then shows as held and not
+	// yet running, never as more running than held.
+	running := s.running.Load()
 	return wire.HeartbeatMetrics{
 		MailboxDepth:     int(s.depth.Load()),
 		MailboxLatencyMs: float64(s.lastNs.Load()) / float64(time.Millisecond),
 		ProcessedTotal:   s.processed.Load(),
 		ExpiredTotal:     s.expired.Load(),
+		InFlight:         int(running),
+		PanicsTotal:      s.panics.Load(),
 	}
 }
 
 // Ctx is passed to init and to every handler. WE DO NOT HIDE NATS BEHIND THE THRALL -
 // a thrall has full access to JetStream, KV and its own subjects via Ctx.NATS.
+//
+// Trace and MsgID describe the message being handled, so a Ctx is only valid for the handler
+// invocation it was passed to: do not keep it for later. A serialized thrall reuses one Ctx for
+// every message; a concurrent web thrall (WebDef.Serve) hands each request its own.
 type Ctx struct {
 	NATS *nats.Conn
 	Name string
@@ -168,6 +190,32 @@ func connectOptions(name string) ([]nats.Option, error) {
 }
 
 func Start[S any](def Def[S]) error {
+	return run(def, dispatch{concurrency: serialized})
+}
+
+// serialized is the concurrency of a GenServer: one message at a time.
+const serialized = 1
+
+// dispatch is how a thrall's calls are run. Its zero-ish value - serialized, no failureReply - is
+// the GenServer every thrall is; StartWeb is the only caller that asks for anything else.
+type dispatch struct {
+	// concurrency is how many call handlers may run at once. At serialized: one mailbox, one
+	// handler at a time, each handler's returned state replacing the previous one. Above it -
+	// reachable only through WebDef.Serve - calls leave the mailbox for a callPool, and the state
+	// Init returned becomes a value shared by every handler that the runtime never replaces (a
+	// handler's returned state is ignored, which is why the only public way in is a handler shape
+	// that has none).
+	concurrency int
+	// failureReply, when set, is the payload a caller is answered with - as a successful reply -
+	// when a call handler fails: it returned a plain error, or it panicked. The thrall then
+	// survives a panic. Nil is the GenServer rule: a plain error is a handler_error reply and a
+	// panic ends the process (see panic.go).
+	failureReply func() any
+}
+
+// run is the lifecycle behind Start and StartWeb.
+func run[S any](def Def[S], how dispatch) error {
+	concurrency := how.concurrency
 	url := os.Getenv("AETHER_NATS_URL")
 	app := os.Getenv("AETHER_APP")
 	envName := os.Getenv("AETHER_NAME")
@@ -215,6 +263,9 @@ func Start[S any](def Def[S]) error {
 		CastOps: opNames(def.HandleCast),
 		Version: def.Version,
 	}
+	if concurrency > serialized {
+		staticDescribe.Concurrency = concurrency
+	}
 	describe := func() *wire.ThrallDescribe {
 		d := staticDescribe
 		d.LastError, d.LastErrorMs = lastErr.get()
@@ -237,29 +288,72 @@ func Start[S any](def Def[S]) error {
 		dedup = newDedupCache(def.IdempotencyMax)
 	}
 
+	// answerFailedCall answers a call whose handler returned an error and reports whether it did:
+	// false means the handler succeeded and the caller is still owed its reply. Shared by the
+	// mailbox and the concurrent pool, so a failure means the same thing on both.
+	answerFailedCall := func(e wire.Envelope, trace string, herr error, respond func(wire.Envelope)) bool {
+		if herr == nil {
+			return false
+		}
+		if esc, ok := asEscalate(herr); ok {
+			// Reply the caller before we crash, so it learns of the restart instead of
+			// hanging until timeout; flush so the reply leaves before the process exits.
+			respond(errReply(e, wire.ErrEscalated, esc.Reason))
+			lastErr.set("escalated: " + esc.Reason)
+			dyingBreath() // let the lord record the reason before the process dies
+			log.Error("handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
+			exitProcess(1)
+			return true
+		}
+		if ref, ok := asRefuse(herr); ok {
+			// A refusal is the domain saying no, not the thrall failing: the caller gets the code,
+			// the state stays as it was, and nothing is recorded as this thrall's last error.
+			log.Debug("call refused", slog.String("op", e.Op), slog.String("code", ref.Code), slog.String("trace", trace))
+			respond(refusedReply(e, ref))
+			return true
+		}
+		lastErr.set("handler_error: " + herr.Error())
+		if how.failureReply != nil {
+			// A web thrall answers its own failures as HTTP: nobody downstream has to guess what
+			// an error reply means, and the failure is on record here, with the request's trace.
+			log.Error("handler failed", slog.String("op", e.Op), slog.String("trace", trace), slog.Any("err", herr))
+			respond(okReply(e, how.failureReply()))
+			return true
+		}
+		respond(errReply(e, wire.ErrHandler, herr.Error()))
+		return true
+	}
+
+	// answerPanickedCall deals with a call handler that panicked (see panic.go for the rule).
+	// A web thrall answers the one request and lives on; any other thrall tells the caller and
+	// then crashes, the same way an escalation does.
+	answerPanickedCall := func(e wire.Envelope, trace string, p *handlerPanic, respond func(wire.Envelope)) {
+		lastErr.set(p.reason())
+		if how.failureReply != nil {
+			stats.panics.Add(1)
+			logPanic(log, "handler panicked - the request is answered with a failure, the thrall carries on", e.Op, trace, p)
+			respond(okReply(e, how.failureReply()))
+			return
+		}
+		logPanic(log, "handler panicked - self-terminating for restart", e.Op, trace, p)
+		respond(errReply(e, wire.ErrEscalated, p.reason()))
+		dyingBreath() // flushes the reply too, and lets the lord record the reason
+		exitProcess(exitPanic)
+	}
+
 	processCall := func(msg *nats.Msg) {
 		var e wire.Envelope
 		if json.Unmarshal(msg.Data, &e) != nil {
 			return
 		}
-		// A reply larger than one bus message cannot be sent at all. Dropping it would leave the
-		// caller waiting out its timeout with nothing to go on, so it is told what happened instead.
-		respond := func(reply wire.Envelope) {
-			data := mustJSON(reply)
-			if err := msg.Respond(data); errors.Is(err, nats.ErrMaxPayload) {
-				tooLarge := tooLargeReply(e, len(data), nc.MaxPayload())
-				lastErr.set(wire.ErrReplyTooLarge + ": " + tooLarge.Error.Message)
-				log.Error("reply too large for the bus", slog.String("op", e.Op), slog.String("trace", e.Trace),
-					slog.Int("bytes", len(data)), slog.Int64("max_payload", nc.MaxPayload()))
-				_ = msg.Respond(mustJSON(tooLarge))
-			}
-		}
+		respond := replier(nc, msg, e, lastErr, log)
 		start := stats.begin()
 		mu.Lock()
 		defer mu.Unlock()
 		if gate.drop(e, respond) {
 			return
 		}
+		stats.started()
 		defer stats.end(start)
 		ctx.Trace = orNewTrace(e.Trace)
 		ctx.MsgID = e.ID
@@ -280,27 +374,16 @@ func Start[S any](def Def[S]) error {
 				return
 			}
 		}
-		reply, next, herr := h(e.Payload, state, ctx)
-		if esc, ok := asEscalate(herr); ok {
-			// Reply the caller before we crash, so it learns of the restart instead of
-			// hanging until timeout; flush so the reply leaves before the process exits.
-			respond(errReply(e, wire.ErrEscalated, esc.Reason))
-			lastErr.set("escalated: " + esc.Reason)
-			dyingBreath() // let the lord record the reason before the process dies
-			log.Error("handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
-			exitProcess(1)
+		var (
+			reply any
+			next  S
+			herr  error
+		)
+		if p := guard(func() { reply, next, herr = h(e.Payload, state, ctx) }); p != nil {
+			answerPanickedCall(e, ctx.Trace, p, respond)
 			return
 		}
-		if ref, ok := asRefuse(herr); ok {
-			// A refusal is the domain saying no, not the thrall failing: the caller gets the code,
-			// the state stays as it was, and nothing is recorded as this thrall's last error.
-			log.Debug("call refused", slog.String("op", e.Op), slog.String("code", ref.Code), slog.String("trace", ctx.Trace))
-			respond(refusedReply(e, ref))
-			return
-		}
-		if herr != nil {
-			lastErr.set("handler_error: " + herr.Error())
-			respond(errReply(e, wire.ErrHandler, herr.Error()))
+		if answerFailedCall(e, ctx.Trace, herr, respond) {
 			return
 		}
 		state = next
@@ -308,6 +391,51 @@ func Start[S any](def Def[S]) error {
 			dedup.put(dkey, mustMarshal(reply)) // cache only a successful reply
 		}
 		respond(okReply(e, reply))
+	}
+
+	// onCall is what a received call goes to: the mailbox above, or - for a concurrent web thrall -
+	// a pool that runs up to concurrency handlers at once over the state Init returned. That state
+	// is captured here, before any message is read, and never reassigned, so the handlers share it
+	// without the mailbox lock; each gets its own Ctx, since Trace and MsgID differ per request.
+	// Idempotency dedup belongs to the mailbox and is not consulted here (StartWeb never asks for it).
+	onCall := processCall
+	var pool *callPool
+	if concurrency > serialized {
+		shared := state
+		// The mailbox keeps rewriting ctx (a stray cast still sets its trace), so the pooled
+		// requests are cut from a copy taken before anything runs.
+		base := *ctx
+		pool = newCallPool(concurrency, gate, stats)
+		onCall = func(msg *nats.Msg) {
+			var e wire.Envelope
+			if json.Unmarshal(msg.Data, &e) != nil {
+				return
+			}
+			respond := replier(nc, msg, e, lastErr, log)
+			pool.submit(e, respond, func() {
+				reqCtx := base
+				reqCtx.Trace = orNewTrace(e.Trace)
+				reqCtx.MsgID = e.ID
+				log.Debug("handling call", slog.String("op", e.Op), slog.String("trace", reqCtx.Trace))
+				h, ok := def.HandleCall[e.Op]
+				if !ok {
+					respond(errReply(e, wire.ErrUnknownOp, "unknown call op: "+e.Op))
+					return
+				}
+				var (
+					reply any
+					herr  error
+				)
+				if p := guard(func() { reply, _, herr = h(e.Payload, shared, &reqCtx) }); p != nil {
+					answerPanickedCall(e, reqCtx.Trace, p, respond)
+					return
+				}
+				if answerFailedCall(e, reqCtx.Trace, herr, respond) {
+					return
+				}
+				respond(okReply(e, reply))
+			})
+		}
 	}
 
 	// ackDurable acknowledges the source JetStream message (durable cast); it is nil for a
@@ -322,6 +450,7 @@ func Start[S any](def Def[S]) error {
 		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		stats.started()
 		ctx.Trace = orNewTrace(e.Trace)
 		ctx.MsgID = e.ID
 		log.Debug("handling cast", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
@@ -338,7 +467,20 @@ func Start[S any](def Def[S]) error {
 				return // already processed; a durable cast is acked by the consume loop
 			}
 		}
-		next, herr := h(e.Payload, state, ctx)
+		var (
+			next S
+			herr error
+		)
+		if p := guard(func() { next, herr = h(e.Payload, state, ctx) }); p != nil {
+			// Nobody waits for a cast, so there is no one to answer; the thrall crashes as it
+			// would have. The cast is deliberately not acked: a panic is a bug, not a decision
+			// about this message, so a durable cast stays at-least-once and is redelivered.
+			lastErr.set(p.reason())
+			logPanic(log, "cast handler panicked - self-terminating for restart", e.Op, ctx.Trace, p)
+			dyingBreath()
+			exitProcess(exitPanic)
+			return
+		}
 		if esc, ok := asEscalate(herr); ok {
 			// Ack the poison cast before crashing so JetStream does not redeliver it into a
 			// crash loop; a non-durable cast (ackDurable nil) is simply dropped, as it is today.
@@ -371,34 +513,48 @@ func Start[S any](def Def[S]) error {
 	stop := make(chan struct{})
 	stopped := false
 
+	// The goroutines that read messages off the bus. Drain waits for them to finish before it
+	// waits for the work they handed over: a reader notices stop only between two reads, so one
+	// more message may still be taken after stop, and it must be finished like any other.
+	var readers sync.WaitGroup
+	read := func(loop func()) {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			loop()
+		}()
+	}
+
 	if durable {
 		// Durable: call/info over core, cast via a durable JetStream consumer.
 		callSub, err := nc.SubscribeSync(wire.Call(app, name))
 		if err != nil {
 			return err
 		}
-		go verbLoop(callSub, stop, processCall)
+		read(func() { verbLoop(callSub, stop, onCall) })
 
 		infoSub, err := nc.SubscribeSync(wire.Info(app, name))
 		if err != nil {
 			return err
 		}
-		go verbLoop(infoSub, stop, func(_ *nats.Msg) {}) // TODO handleInfo
+		read(func() { verbLoop(infoSub, stop, func(_ *nats.Msg) {}) }) // TODO handleInfo
 
-		go consumeDurableCast(nc, app, name, log, stop, processCast)
+		read(func() { consumeDurableCast(nc, app, name, log, stop, processCast) })
 	} else {
 		// Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
 		dataSub, err := nc.SubscribeSync(wire.Data(app, name))
 		if err != nil {
 			return err
 		}
-		go verbLoop(dataSub, stop, func(msg *nats.Msg) {
-			switch lastToken(msg.Subject) {
-			case "call":
-				processCall(msg)
-			case "cast":
-				processCast(msg.Data, nil) // core cast: no ack
-			}
+		read(func() {
+			verbLoop(dataSub, stop, func(msg *nats.Msg) {
+				switch lastToken(msg.Subject) {
+				case "call":
+					onCall(msg)
+				case "cast":
+					processCast(msg.Data, nil) // core cast: no ack
+				}
+			})
 		})
 	}
 
@@ -426,34 +582,93 @@ func Start[S any](def Def[S]) error {
 	}
 
 	<-stop
-	if def.Terminate != nil {
-		mu.Lock()
-		s := state
-		mu.Unlock()
-		def.Terminate("drain", s)
+	// Drain: nothing new is read from here on. What was already received is finished first - a
+	// pooled call that is running or still waiting for a slot (the latter runs or expires by its
+	// deadline), then the handler holding the mailbox - and only then is the thrall terminated.
+	readers.Wait()
+	if pool != nil {
+		pool.wait()
 	}
+	mu.Lock()
+	final := state
+	mu.Unlock()
+	if def.Terminate != nil {
+		def.Terminate("drain", final)
+	}
+	return closeConn(nc)
+}
+
+// drainFlushTimeout bounds how long a stopping thrall waits for its last replies to reach the bus.
+const drainFlushTimeout = 2 * time.Second
+
+// closeConn ends the thrall's connection after a drain. nats.Conn.Drain only starts the drain and
+// returns, and the process exits right after Start does, so the replies of the handlers that were
+// just waited for are flushed first: otherwise the last answer of a drained thrall can be lost
+// with the process.
+func closeConn(nc *nats.Conn) error {
+	_ = nc.FlushTimeout(drainFlushTimeout)
 	return nc.Drain()
 }
 
+// replier builds the function that answers the call carried by msg. A reply larger than one bus
+// message cannot be sent at all; dropping it would leave the caller waiting out its timeout with
+// nothing to go on, so it is told what happened instead.
+func replier(nc *nats.Conn, msg *nats.Msg, e wire.Envelope, lastErr *lastError, log *slog.Logger) func(wire.Envelope) {
+	return func(reply wire.Envelope) {
+		data := mustJSON(reply)
+		if err := msg.Respond(data); errors.Is(err, nats.ErrMaxPayload) {
+			tooLarge := tooLargeReply(e, len(data), nc.MaxPayload())
+			lastErr.set(wire.ErrReplyTooLarge + ": " + tooLarge.Error.Message)
+			log.Error("reply too large for the bus", slog.String("op", e.Op), slog.String("trace", e.Trace),
+				slog.Int("bytes", len(data)), slog.Int64("max_payload", nc.MaxPayload()))
+			_ = msg.Respond(mustJSON(tooLarge))
+		}
+	}
+}
+
+// stopping reports whether the thrall has been told to stop.
+func stopping(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // verbLoop reads messages from a synchronous subscription and passes them to the handler
-// (serialized - one message at a time), until stop arrives.
+// (serialized - one message at a time), until stop arrives. A stop does not wait out the read
+// in progress: the subscription is closed, which makes a blocked read return at once, so an idle
+// thrall drains immediately. Messages the subscription still buffered are not handled; a message
+// already taken is.
 func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Msg)) {
-	for {
+	returned := make(chan struct{})
+	defer close(returned)
+	go func() {
 		select {
 		case <-stop:
-			return
-		default:
+			_ = sub.Unsubscribe()
+		case <-returned:
 		}
-		msg, err := sub.NextMsg(500 * time.Millisecond)
+	}()
+	for {
+		if stopping(stop) {
+			return
+		}
+		msg, err := sub.NextMsg(verbPollInterval)
 		if err == nats.ErrTimeout {
 			continue
 		}
 		if err != nil {
-			return
+			return // the subscription was closed: a stop, or the connection went away
 		}
 		handle(msg)
 	}
 }
+
+// verbPollInterval is how long one read waits for a message. It no longer bounds how fast a stop
+// is noticed (the stop closes the subscription); it only keeps the loop turning.
+const verbPollInterval = 500 * time.Millisecond
 
 // Durable consumer tuning. Fetching in batches amortizes the per-message server round-trip
 // (a Fetch(1) loop pays one round-trip per cast, which caps drain throughput). The batch is
@@ -462,7 +677,7 @@ func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Ms
 // MaxAckPending (>= batch) bounds the in-flight unacked messages the server will hand out.
 const (
 	durableBatchSize     = 128
-	durableFetchMaxWait  = 500 * time.Millisecond // keep the stop signal responsive
+	durableFetchMaxWait  = 500 * time.Millisecond // one fetch; a stop cancels it sooner
 	durableAckWait       = 30 * time.Second
 	durableMaxAckPending = 512
 )
@@ -492,17 +707,34 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 			return
 		}
 	}
-	for {
+	// A fetch in progress is abandoned the moment stop arrives, so an idle durable thrall drains
+	// at once instead of waiting out the fetch.
+	untilStop, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
 		select {
 		case <-stop:
-			return
-		default:
+			cancel()
+		case <-untilStop.Done():
 		}
-		msgs, err := sub.Fetch(durableBatchSize, nats.MaxWait(durableFetchMaxWait))
+	}()
+	for {
+		if stopping(stop) {
+			return
+		}
+		fetch, done := context.WithTimeout(untilStop, durableFetchMaxWait)
+		msgs, err := sub.Fetch(durableBatchSize, nats.Context(fetch))
+		done()
 		if err != nil {
-			continue // timeout / no messages
+			continue // timeout / no messages / stopping
 		}
 		for _, m := range msgs {
+			// A drain does not wait for the rest of the batch: with a backlog that is up to
+			// durableBatchSize handlers, far past the lord's grace period. The casts not yet
+			// handled stay unacknowledged and are redelivered to the next process.
+			if stopping(stop) {
+				return
+			}
 			m := m
 			// On escalation processCast acks (synchronously) before it crashes, so the poison
 			// cast is not redelivered; the happy path returns here and we ack in arrival order.

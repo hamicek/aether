@@ -207,6 +207,7 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     return serialize(async () => {
       // A call whose caller has given up never becomes an event.
       if (ev.kind === "call" && req && respond && gate.drop(req, respond)) return;
+      stats.started();
       try {
         if (gen !== undefined && gen !== timeoutGen) return; // superseded timeout
         await dispatch(ev, req, respond);

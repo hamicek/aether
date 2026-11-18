@@ -57,6 +57,15 @@ func goldenCases() map[string]Envelope {
 			Error: &WireError{Type: ErrReplyTooLarge, Message: "reply of 1500000 bytes does not fit one bus message (at most 1048576 bytes)"}},
 		"hb_expired": {V: 1, Kind: KindHB, To: "account", TS: 1700000000008,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 1, MailboxLatencyMs: 0.5, ProcessedTotal: 7, ExpiredTotal: 2})},
+		// A concurrent web thrall: 5 requests held, 4 of them in their handlers (so 1 waiting),
+		// and the self-description saying how many may run at once.
+		"hb_concurrent": {V: 1, Kind: KindHB, To: "web", TS: 1700000000009,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 5, MailboxLatencyMs: 12.5, ProcessedTotal: 40, InFlight: 4,
+				Describe: &ThrallDescribe{CallOps: []string{"http_request"}, Version: "1.0.0", Concurrency: 4}})},
+		// A web thrall that contained two handler crashes: counted, and the latest is its last error.
+		"hb_panics": {V: 1, Kind: KindHB, To: "web", TS: 1700000000010,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{ProcessedTotal: 12, PanicsTotal: 2,
+				Describe: &ThrallDescribe{CallOps: []string{"http_request"}, LastError: "panic: index out of range", LastErrorMs: 1700000000009}})},
 	}
 }
 
@@ -240,5 +249,31 @@ func TestExpired(t *testing.T) {
 		if expired != tc.wantExpired || overdue != tc.wantOverdue {
 			t.Errorf("%s: Expired = (%v, %v), want (%v, %v)", tc.name, overdue, expired, tc.wantOverdue, tc.wantExpired)
 		}
+	}
+}
+
+// TestExpiredHandlesAnyDeadline: the judgement holds for every instant the wire can carry. A
+// deadline far in the future is not expired - not even one so far that the difference would
+// overflow a Duration - and an ancient one is.
+func TestExpiredHandlesAnyDeadline(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	skew := 250 * time.Millisecond
+	live := map[string]int64{
+		"a minute away":       now.Add(time.Minute).UnixMilli(),
+		"a month away":        now.Add(30 * 24 * time.Hour).UnixMilli(),
+		"a thousand years":    now.UnixMilli() + 1000*365*24*3600*1000,
+		"the largest instant": 1<<63 - 1,
+		"within the skew":     now.Add(-skew).UnixMilli(),
+	}
+	for name, deadline := range live {
+		if overdue, expired := (Envelope{Deadline: deadline}).Expired(now, skew); expired || overdue > skew {
+			t.Errorf("%s: expired = %v, overdue = %v; want a live call", name, expired, overdue)
+		}
+	}
+	if overdue, expired := (Envelope{Deadline: 1}).Expired(now, skew); !expired || overdue <= 0 {
+		t.Errorf("an ancient deadline: expired = %v, overdue = %v; want expired with a positive overdue", expired, overdue)
+	}
+	if overdue, expired := (Envelope{Deadline: now.Add(-time.Second).UnixMilli()}).Expired(now, skew); !expired || overdue != time.Second {
+		t.Errorf("a deadline a second ago: expired = %v, overdue = %v", expired, overdue)
 	}
 }

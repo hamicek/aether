@@ -25,6 +25,8 @@ const (
 	metricMailboxLat     = "aether_mailbox_latency_ms"
 	metricProcessed      = "aether_processed_total"
 	metricExpired        = "aether_expired_total"
+	metricInFlight       = "aether_in_flight"
+	metricPanics         = "aether_panics_total"
 	metricDurableBacklog = "aether_durable_backlog"
 	metricThrallRSS      = "aether_thrall_rss_bytes"
 	metricThrallCPU      = "aether_thrall_cpu_percent"
@@ -40,7 +42,7 @@ var knownStatuses = []string{"starting", "ready", "down", "stale"}
 // accumulate frozen series (memory and scrape-cardinality growth).
 var perThrallMetrics = []string{
 	metricRestarts, metricGaveUp, metricHeartbeatMiss,
-	metricMailboxDepth, metricMailboxLat, metricProcessed, metricExpired, metricDurableBacklog,
+	metricMailboxDepth, metricMailboxLat, metricProcessed, metricExpired, metricInFlight, metricPanics, metricDurableBacklog,
 	metricThrallRSS, metricThrallCPU,
 }
 
@@ -52,6 +54,8 @@ type thrallRaw struct {
 	mailboxLatMs   float64
 	processed      uint64
 	expired        uint64
+	inFlight       int
+	panics         uint64
 	durableBacklog float64
 	restarts       uint64
 	gaveUp         uint64
@@ -66,7 +70,9 @@ type thrallMetricSnapshot struct {
 	MailboxDepth   int                  `json:"mailbox_depth"`
 	MailboxLatMs   float64              `json:"mailbox_latency_ms"`
 	Processed      uint64               `json:"processed"`
-	Expired        uint64               `json:"expired"` // calls dropped unexecuted past their deadline
+	Expired        uint64               `json:"expired"`   // calls dropped unexecuted past their deadline
+	InFlight       int                  `json:"in_flight"` // handlers running now; mailbox_depth - in_flight is waiting
+	Panics         uint64               `json:"panics"`    // handler crashes a web thrall contained
 	DurableBacklog float64              `json:"durable_backlog"`
 	Restarts       uint64               `json:"restarts"`
 	GaveUp         uint64               `json:"gave_up"`
@@ -113,7 +119,9 @@ func newLordMetrics() *lordMetrics {
 	reg.Counter(metricRestarts, "thrall restarts")
 	reg.Counter(metricGaveUp, "thralls the lord gave up restarting")
 	reg.Counter(metricHeartbeatMiss, "detected heartbeat misses")
-	reg.Gauge(metricMailboxDepth, "thrall mailbox depth (pending messages)")
+	reg.Gauge(metricMailboxDepth, "messages a thrall has received and not finished (waiting and running)")
+	reg.Gauge(metricInFlight, "handlers a thrall is running right now")
+	reg.Counter(metricPanics, "handler crashes a web thrall contained (each cost one request, not the process)")
 	reg.Gauge(metricMailboxLat, "thrall mailbox handler latency in milliseconds")
 	reg.Counter(metricProcessed, "messages processed by a thrall")
 	reg.Counter(metricExpired, "calls a thrall dropped unexecuted because their deadline had passed")
@@ -157,6 +165,8 @@ func (lm *lordMetrics) snapshot() map[string]thrallMetricSnapshot {
 			s.MailboxLatMs = r.mailboxLatMs
 			s.Processed = r.processed
 			s.Expired = r.expired
+			s.InFlight = r.inFlight
+			s.Panics = r.panics
 			s.DurableBacklog = r.durableBacklog
 			s.Restarts = r.restarts
 			s.GaveUp = r.gaveUp
@@ -238,7 +248,8 @@ func (lm *lordMetrics) incHeartbeatMiss(name string) {
 // recordHeartbeat folds a thrall's self-reported mailbox metrics into the registry and the raw
 // snapshot. The processed and expired totals are cumulative and reported as absolute values (they
 // reset when the thrall restarts, like any process-local counter). An SDK that predates the expired
-// counter omits it, which reads as zero - the truth for a thrall that never drops a call.
+// counter omits it, which reads as zero - the truth for a thrall that never drops a call. The same
+// goes for in_flight: an older SDK reports only the depth, and zero running is then "not stated".
 func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	lm.mu.Lock()
 	r := lm.rawFor(name)
@@ -246,6 +257,8 @@ func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	r.mailboxLatMs = hm.MailboxLatencyMs
 	r.processed = hm.ProcessedTotal
 	r.expired = hm.ExpiredTotal
+	r.inFlight = hm.InFlight
+	r.panics = hm.PanicsTotal
 	// Keep the last self-description. A heartbeat that carries none (an older SDK) must not erase
 	// what an earlier beat reported, so only a present describe replaces the stored one.
 	if hm.Describe != nil {
@@ -258,6 +271,8 @@ func (lm *lordMetrics) recordHeartbeat(name string, hm wire.HeartbeatMetrics) {
 	lm.reg.Set(metricMailboxLat, labels, hm.MailboxLatencyMs)
 	lm.reg.Set(metricProcessed, labels, float64(hm.ProcessedTotal))
 	lm.reg.Set(metricExpired, labels, float64(hm.ExpiredTotal))
+	lm.reg.Set(metricInFlight, labels, float64(hm.InFlight))
+	lm.reg.Set(metricPanics, labels, float64(hm.PanicsTotal))
 }
 
 // pollDurableBacklog periodically samples the pending-message count of each durable thrall's

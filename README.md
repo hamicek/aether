@@ -76,8 +76,8 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Typed refusals** | ✅ | `Refuse(code, message)` from a handler -> the caller gets a typed error with a stable machine code, told apart from a failure by type, not by message text; a refusal is not the thrall's last error. Go + TS + Python - see [Refusing a request](#refusing-a-request) |
 | **Call deadline** | ✅ | every call says when its caller stops waiting; a thrall drops an expired call instead of executing it later (`aether_expired_total`). Go + TS + Python - see [Calling a thrall](#calling-a-thrall-the-client) |
 | **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
-| **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
-| **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
+| **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff; `on_give_up = "exit"` ends the node (exit status 3) when a thrall is given up on, for the supervisor above to restart it |
+| **Graceful drain** | ✅ | `ctl:drain` -> the thrall stops reading, finishes the message in hand (a concurrent web thrall: every request it had taken) -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
 | **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a view of every lord across the bus, cluster, or leaf sites (opt-in, mechanism not domain; supervision stays node-local) - see [Observability](#observability) |
@@ -92,7 +92,8 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 | **HTTP ingress for web thralls** | ✅ | `http-ingress` -> a Host-routed front door: forwards a whole HTTP request as one call to a **web thrall** (a thrall that *is* the web server and owns no port), with timeouts, a connection cap, a body limit the bus can carry, serve-stale routing and trustworthy client facts - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
-| **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
+| **Concurrent web thrall** | ✅ | a web thrall written as `Serve` handles up to `Concurrency` requests at once (default 32) over a value built once and shared; `Handle` stays serialized and threads its state. Queued requests expire by their deadline, drain waits for in-flight ones, the heartbeat reports `in_flight`. Go + TS + Python - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
+| **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. A Go panic crashes an ordinary thrall the same way (the caller is answered first); a web thrall contains it as a 500. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
 | **Idempotence** | ✅ | opt-in per thrall -> dedup a call/cast by an idempotency key: a duplicate cast is skipped, a duplicate call returns the first reply. In-memory (the thrall's lifetime), complements the event-log command-key. Go + TS + Python - see [Durability](#durability) |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
@@ -212,6 +213,13 @@ return s, thrall.Escalate("balance underflow")     // Go
 ```python
 raise aether.Escalate("balance underflow")         # Python
 ```
+
+A **panic** in a Go handler (a bug, not a choice) follows the same road for an ordinary thrall: the
+process still crashes and is restarted through `init` - its state can no longer be trusted - but
+the caller of the panicking call gets the `"escalated"` reply at once, and the panic is logged with
+its trace and stack and reported as the thrall's last error. A **web thrall** is the exception: it
+contains the panic and answers that one request with a 500 (see
+[HTTP ingress for web thralls](#http-ingress-for-web-thralls)). Rationale: [DESIGN.md §8](./DESIGN.md).
 
 ### Refusing a request
 
@@ -383,6 +391,7 @@ in all three SDKs (`startEvent`/`defEvent` in TS, `start_event`/`def_event` in P
 app = "demo"
 strategy = "one_for_one"                 # | one_for_all | rest_for_one
 restart_intensity = { max = 3, within_ms = 5000 }
+# on_give_up = "exit"                    # after giving up on a thrall: continue (default) | exit the node
 
 [nats]
 mode = "embedded"                        # | external (+ url = "nats://...")
@@ -396,6 +405,16 @@ scope   = "local"                        # | singleton
 durable = false                          # true -> cast over JetStream
 # fencing = false                        # opt out of lord-liveness fencing (see below)
 ```
+
+**When the lord gives up.** A thrall started more than `max` times within `within_ms` is not
+restarted again (logged, `aether_gave_up_total`, a `gave_up` event). By default the lord then
+carries on without it - which leaves a node that looks up from outside while part of it is dead.
+With `on_give_up = "exit"` the lord instead drains the node and `aether up` exits with **status 3**,
+so the supervisor above it (systemd `Restart=always`, a container restart policy) starts the whole
+node afresh. Set it on every node whose lord is supervised; leave the default for a node nothing
+restarts. A permanent cause then shows as a crash loop of the node, paced by the supervisor's own
+back-off and visible in its record. It covers manifest thralls (not dynamic children or
+singletons). Details: [DESIGN.md §9](./DESIGN.md).
 
 By default every thrall self-terminates when it can no longer verify its lord's lease, so no
 thrall outlives its lord. On a shared external bus a KV hiccup then reaps the whole tree. Set
@@ -495,7 +514,33 @@ cmd   = "./bin/http-ingress -addr 127.0.0.1:7391 -routes routes.json"   # or -re
 scope = "singleton"          # it binds a port: one active instance
 ```
 
-It is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it like any other. Run it
+**One request at a time, or many.** A web thrall is written in one of two shapes. `Handle` threads
+a state from one request to the next and is serialized by the mailbox like every thrall. `Serve`
+has no next state and runs up to `Concurrency` requests at once (default 32), so a slow request
+does not hold up the others - the right shape for a gateway:
+
+```go
+thrall.StartWeb(thrall.WebDef[*site]{
+    Init:  func(ctx *thrall.Ctx) (*site, error) { return newSite(ctx), nil }, // built once, shared
+    Serve: func(req thrall.HTTPRequest, s *site, ctx *thrall.Ctx) (thrall.HTTPResponse, error) {
+        return s.route(req, ctx), nil // runs concurrently: s is read-only or guards itself
+    },
+    Concurrency: 16, // optional; 0 = 32, 1 = serialized
+})
+```
+
+A failing handler costs one request, in either shape: a returned error, a thrown exception or a
+panic is answered with a bare 500 by the web thrall itself, logged with the request's trace, and
+the thrall keeps serving. A Go panic and a TS or Python exception are logged with the stack and
+counted (`aether_panics_total`); an error a Go handler *returns* is logged and becomes the thrall's
+last error, without a stack and without the count.
+
+The shared value is never replaced by the runtime; what must change one request at a time belongs
+in an ordinary thrall the handler calls. Requests beyond the limit wait and are dropped when their
+caller's deadline passes. TS (`serve`, `concurrency`) and Python (`serve=`, `concurrency=`) are the
+same. Details and the rules for shared state: [DESIGN.md §12b](./DESIGN.md).
+
+The ingress is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it like any other. Run it
 **behind a reverse proxy** that terminates TLS (Caddy, nginx) and bind it to loopback. Demo:
 `examples/http-ingress/`.
 
@@ -525,7 +570,8 @@ It is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it li
 | 408 | the request body did not arrive within `-read-timeout` |
 | 413 | the body is over the limit, or the request does not fit one bus message |
 | 431 | the request line and headers are over `-max-header-bytes` |
-| 502 | the thrall answered with an error, with no usable status, or with a response too large for the bus |
+| 500 | (from the web thrall, not the ingress) its handler failed - returned an error, threw or panicked; the thrall logged it under the request's trace and keeps serving |
+| 502 | the thrall answered with an error reply (a refusal, an escalation), with no usable status, or with a response too large for the bus |
 | 503 | the thrall is not running, or the route table cannot be reached (with `Retry-After`) |
 | 504 | no reply within `-timeout` - also when the thrall dropped the call past its deadline |
 
@@ -757,11 +803,13 @@ works the same embedded or external. Exposed series:
 | `aether_up` | gauge | 1 while the lord is running |
 | `aether_thralls{status}` | gauge | thralls by current status (`starting`/`ready`/`down`/`stale`) |
 | `aether_restarts_total{name}` | counter | restarts per thrall |
-| `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded) |
+| `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded). With `on_give_up = "exit"` the node exits right after, so alert on the supervisor's restart count there, not on this |
 | `aether_heartbeat_misses_total{name}` | counter | detected heartbeat outages |
-| `aether_mailbox_depth{name}` | gauge | messages a thrall currently holds (self-reported) |
+| `aether_mailbox_depth{name}` | gauge | messages a thrall has received and not finished: waiting and running (self-reported) |
+| `aether_in_flight{name}` | gauge | handlers a thrall is running right now (self-reported); `mailbox_depth - in_flight` is what waits. 0 or 1 for a serialized thrall, up to its concurrency for a concurrent web thrall |
 | `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
 | `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
+| `aether_panics_total{name}` | counter | handler crashes a **web** thrall contained (self-reported): each cost one request a 500, not the process. Any value above zero is a bug to find - the thrall's log has the trace and the stack |
 | `aether_expired_total{name}` | counter | calls a thrall dropped unexecuted because their caller's deadline had passed (self-reported); a steady climb means callers time out behind a slow handler, or the node's clock is off |
 | `aether_durable_backlog{name}` | gauge | pending casts in a durable thrall's stream (JetStream `num_pending`) |
 | `aether_thrall_rss_bytes{name}` | gauge | thrall resident memory, summed over its process group |

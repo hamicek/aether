@@ -104,6 +104,7 @@
       +   metric("memory MB", (m.rss_bytes!=null && m.rss_bytes>0 ? (m.rss_bytes/1048576).toFixed(1) : null))
       +   metric("cpu %", (m.cpu_percent!=null ? m.cpu_percent.toFixed(1) : null))
       +   metric("mailbox", m.mailbox_depth)
+      +   metric("in flight", m.in_flight)
       +   metric("latency ms", (m.mailbox_latency_ms!=null?m.mailbox_latency_ms.toFixed(2):null))
       +   metric("processed", m.processed)
       +   metric("backlog", m.durable_backlog)

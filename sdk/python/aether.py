@@ -16,8 +16,10 @@ import os
 import ssl
 import sys
 import time
+import traceback
 import weakref
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -88,31 +90,51 @@ class _MailboxStats:
     """Thrall self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats):
     depth = messages currently held, last_ms = duration of the most recent handler,
     processed = cumulative count of handled messages, expired = cumulative count of calls dropped
-    unexecuted because their deadline had passed. begin/end bracket every handled message; a
-    dropped call ends with drop instead, so it is neither a processed message nor a latency sample."""
+    unexecuted because their deadline had passed, running = handlers executing right now.
+
+    A message is accounted in three steps: begin when it is received, started when its turn comes
+    and its handler is about to run, end when the handler has returned. A call dropped before its
+    turn ends with drop instead, so it is neither a processed message nor a latency sample; a
+    message whose turn never came because the thrall is stopping ends with abandon. So
+    depth - running is what is still waiting."""
 
     def __init__(self):
         self.depth = 0
+        self.running = 0
         self.processed = 0
         self.expired = 0
+        self.panics = 0  # handler crashes contained by a web thrall
         self.last_ms = 0.0
 
     def begin(self) -> float:
         self.depth += 1
         return time.perf_counter()
 
+    def started(self) -> None:
+        """The message's turn has come: it stops waiting and its handler runs. Paired with end."""
+        self.running += 1
+
     def end(self, start: float) -> None:
         self.last_ms = (time.perf_counter() - start) * 1000.0
         self.processed += 1
+        self.running -= 1
         self.depth -= 1
+
+    def abandon(self) -> None:
+        """The message left without its turn coming (its task was cancelled while it waited)."""
+        self.depth -= 1
+
+    def panicked(self) -> None:
+        """Count a handler crash the thrall contained (the message itself still ends with end)."""
+        self.panics += 1
 
     def drop(self) -> None:
         self.expired += 1
         self.depth -= 1
 
     def snapshot(self) -> dict:
-        """The heartbeat payload. expired_total is omitted while zero (the Go omitempty tag), so a
-        thrall that never dropped a call reports the shape it always did."""
+        """The heartbeat payload. expired_total and in_flight are omitted while zero (the Go
+        omitempty tags), so an idle thrall that never dropped a call reports the shape it always did."""
         m = {
             "mailbox_depth": self.depth,
             "mailbox_latency_ms": self.last_ms,
@@ -120,6 +142,10 @@ class _MailboxStats:
         }
         if self.expired > 0:
             m["expired_total"] = self.expired
+        if self.running > 0:
+            m["in_flight"] = self.running
+        if self.panics > 0:
+            m["panics_total"] = self.panics
         return m
 
 
@@ -138,9 +164,10 @@ def _heartbeat_interval() -> float:
     return ms / 1000.0
 
 
-def _describe_dict(call_ops, cast_ops, version, last_err=None) -> dict:
+def _describe_dict(call_ops, cast_ops, version, last_err=None, concurrency=1) -> dict:
     """Build a thrall's self-description (mirrors wire.ThrallDescribe). Empty fields are omitted to
-    match the Go omitempty wire form. last_err is a mutable {"msg", "ms"} holder, or None."""
+    match the Go omitempty wire form. last_err is a mutable {"msg", "ms"} holder, or None.
+    concurrency is declared only above 1: a serialized thrall says nothing."""
     d: dict = {}
     if call_ops:
         d["call_ops"] = call_ops
@@ -151,6 +178,8 @@ def _describe_dict(call_ops, cast_ops, version, last_err=None) -> dict:
     if last_err and last_err.get("msg"):
         d["last_error"] = last_err["msg"]
         d["last_error_ms"] = last_err["ms"]
+    if concurrency > 1:
+        d["concurrency"] = concurrency
     return d
 
 
@@ -535,10 +564,143 @@ class _DeadlineGate:
         overdue = _overdue_ms(e, int(time.time() * 1000), self._skew_ms)
         if overdue is None:
             return None
+        return self.expire(e, overdue)
+
+    def expire(self, e: dict, overdue: int) -> dict:
+        """Turn away a call whose deadline passed overdue ms ago: account it as dropped, log it,
+        and return the "deadline_exceeded" reply to send to the caller."""
         self._stats.drop()
         self._log.warn("dropping expired call - its caller stopped waiting", op=e.get("op"),
                        trace=e.get("trace"), overdue_ms=overdue)
         return _expired_reply(e, overdue)
+
+    def expires_in_ms(self, e: dict) -> Optional[int]:
+        """How long from now this gate would start dropping the call (its deadline plus the skew
+        tolerance), or None for a call that needs no timer: one without a deadline, which never
+        expires, or one whose deadline is more than _MAX_QUEUED_WAIT_MS away."""
+        deadline = e.get("deadline")
+        if not isinstance(deadline, (int, float)) or deadline <= 0:
+            return None
+        remaining = int(deadline) - int(time.time() * 1000)
+        if remaining > _MAX_QUEUED_WAIT_MS:
+            return None
+        return remaining + self._skew_ms
+
+
+# The longest a waiting call is given a timer for (24 hours). A deadline further away is not worth
+# timing; such a call waits like one without a deadline, and the gate still judges it when its turn
+# comes. The same bound as the Go and TS SDKs, where a longer timer would misfire.
+_MAX_QUEUED_WAIT_MS = 24 * 60 * 60 * 1000
+
+
+class _CallPool:
+    """What a concurrent web thrall has in place of the serialized mailbox for its calls: it runs
+    up to limit handlers at once and makes the rest wait their turn. "At once" means interleaved
+    at their awaits on the one event loop - a handler that never awaits still runs alone.
+
+    Waiting is bounded by the caller, not by a queue length. A call that finds every slot taken
+    waits for one; if its deadline passes first it is dropped right then - unexecuted, accounted
+    and answered exactly as the deadline gate drops a call - so calls nobody waits for any more do
+    not pile up behind slow handlers. A call without a deadline waits as long as it takes. Slots
+    are handed out in arrival order, but a concurrent thrall makes no ordering promise."""
+
+    def __init__(self, limit: int, gate: _DeadlineGate, stats: _MailboxStats, log: Any) -> None:
+        self._limit = limit
+        self._gate = gate
+        self._stats = stats
+        self._log = log
+        self._active = 0
+        self._waiting: deque = deque()  # futures of calls waiting for a slot, oldest first
+        self._pending: set = set()  # the task of every call submitted and not yet finished
+
+    def submit(self, e: dict, respond: Callable[[dict], Any], handle: Callable[[], Any]) -> None:
+        """Take one received call and return at once. handle runs on the call's own task when a
+        slot is free and the call's caller is still waiting; otherwise the call is dropped and
+        respond is awaited with the deadline_exceeded reply."""
+        task = asyncio.ensure_future(self._serve(e, respond, handle, self._stats.begin()))
+        self._pending.add(task)
+        task.add_done_callback(lambda done: self._finished(done, e))
+
+    def _finished(self, task, e: dict) -> None:
+        """A call's task ended. handle answers its own failures, so an exception that escapes it
+        happened while answering (the bus went away mid-reply); it is logged rather than left to
+        the event loop's "exception was never retrieved"."""
+        self._pending.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self._log.error("serving a call failed outside its handler", op=e.get("op"),
+                            trace=e.get("trace"), err=repr(task.exception()))
+
+    async def _serve(self, e: dict, respond, handle, received: float) -> None:
+        try:
+            taken = await self._acquire(e)
+        except asyncio.CancelledError:
+            self._stats.abandon()
+            raise
+        if not taken:
+            overdue = int(time.time() * 1000) - int(e.get("deadline") or 0)
+            await respond(self._gate.expire(e, overdue))
+            return
+        try:
+            # The slot may have come free at the very moment the deadline passed; the gate decides,
+            # as it does for the mailbox, at the last moment before the handler would run.
+            expired = self._gate.drop(e)
+            if expired is not None:
+                await respond(expired)
+                return
+            self._stats.started()
+            try:
+                await handle()
+            finally:
+                self._stats.end(received)
+        finally:
+            self._release()
+
+    async def _acquire(self, e: dict) -> bool:
+        """Wait for a free slot. False means the call's deadline (plus the skew tolerance) passed
+        first, and no slot was taken."""
+        if self._active < self._limit:
+            self._active += 1
+            return True
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        self._waiting.append(waiter)
+        wait_ms = self._gate.expires_in_ms(e)
+        timer = None
+        if wait_ms is not None:
+            # One past the tolerance, so a call dropped here is expired by the gate's own rule.
+            timer = loop.call_later((max(0, wait_ms) + 1) / 1000.0, self._give_up, waiter)
+        try:
+            return await waiter
+        except asyncio.CancelledError:
+            # Cancelled between being handed the slot and resuming: give the slot back.
+            if waiter.done() and not waiter.cancelled() and waiter.result():
+                self._release()
+            raise
+        finally:
+            if timer is not None:
+                timer.cancel()
+
+    def _give_up(self, waiter) -> None:
+        """The waiter's deadline passed: take it out of the queue and tell it no slot is coming."""
+        if not waiter.done():
+            self._waiting.remove(waiter)
+            waiter.set_result(False)
+
+    def _release(self) -> None:
+        """Hand the slot to the longest-waiting call that still wants it, or free it."""
+        while self._waiting:
+            waiter = self._waiting.popleft()
+            if not waiter.done():  # a cancelled waiter (the thrall is stopping) is skipped
+                waiter.set_result(True)
+                return
+        self._active -= 1
+
+    async def drain(self) -> None:
+        """Return once every submitted call has finished or been dropped. It does not turn calls
+        away: the thrall stops reading before it drains, and a call that was already taken is
+        served like any other."""
+        while self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
 
 
 # --- confirmed cast (mirrors sdk/go/thrall/confirm.go and the TS castConfirmed) ---
@@ -831,6 +993,10 @@ class Client:
 
 @dataclass
 class Ctx:
+    # trace and msg_id describe the message being handled, so a Ctx is only valid for the handler
+    # invocation it was passed to: do not keep it for later. A serialized thrall reuses one Ctx
+    # for every message; a concurrent web thrall (def_web(serve=...)) hands each request its own.
+    #
     # WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
     nats: Any
     name: str
@@ -914,6 +1080,15 @@ class ThrallDef:
     # self-description and shown by `aether ps` / `aether describe`. It lives with the code, so it
     # answers "what actually runs here". Empty means unversioned.
     version: str = ""
+    # How many call handlers run at once. Not something a thrall author sets: a thrall is a
+    # GenServer (1 - one mailbox, one handler at a time, each handler's returned state replacing
+    # the previous one), and the only definition that runs above that is the one def_web builds
+    # for a serve handler, whose shape has no state to thread.
+    _concurrency: int = field(default=1, repr=False)
+    # When set, the payload a caller is answered with - as a successful reply - when a call handler
+    # raises anything but Refuse or Escalate. None is the GenServer rule: a raised error is a
+    # handler_error reply. Set only by def_web, like _concurrency.
+    _failure_reply: Optional[Callable[[], Any]] = field(default=None, repr=False)
 
 
 def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None,
@@ -948,7 +1123,13 @@ def _too_large_reply(req: dict, size: int, max_payload: int) -> dict:
 
 
 async def start(defn: ThrallDef) -> None:
-    """Connect the thrall to the ether and run its lifecycle."""
+    """Connect the thrall to the ether and run its lifecycle.
+
+    How many call handlers may run at once is a property of the definition. Normally it is 1 - the
+    GenServer every thrall is. A web thrall defined with a serve handler runs above that: its
+    calls leave the mailbox for a _CallPool, and the state init returned becomes a value shared by
+    every handler that the runtime never replaces (a handler's returned state is ignored, which is
+    why the only way in is a handler shape that has none)."""
     url = os.environ.get("AETHER_NATS_URL")
     app = os.environ.get("AETHER_APP")
     env_name = os.environ.get("AETHER_NAME", "")
@@ -984,8 +1165,10 @@ async def start(defn: ThrallDef) -> None:
         last_err["msg"] = msg
         last_err["ms"] = int(time.time() * 1000)
 
+    concurrency = defn._concurrency
+
     def describe() -> dict:
-        return _describe_dict(call_ops, cast_ops, defn.version, last_err)
+        return _describe_dict(call_ops, cast_ops, defn.version, last_err, concurrency)
 
     async def dying_breath() -> None:
         """Publish one final heartbeat carrying the last error and flush it, so the lord learns WHY
@@ -1007,16 +1190,51 @@ async def start(defn: ThrallDef) -> None:
                           bytes=len(data), max_payload=nc.max_payload)
             await msg.respond(_encode(too_large))
 
+    async def answer_failed_call(msg, e: dict, trace: str, ex: Exception) -> None:
+        """Answer a call whose handler raised. Shared by the mailbox and the concurrent pool, so a
+        failure means the same thing on both."""
+        if isinstance(ex, Escalate):
+            # Reply the caller before we crash, so it learns of the restart instead of
+            # hanging until timeout; the dying breath then flushes both the reply and the
+            # final heartbeat (carrying the reason) before the process exits.
+            await respond(msg, e, _err_reply(e, ERR_ESCALATED, ex.reason))
+            _set_last_error(f"escalated: {ex.reason}")
+            await dying_breath()
+            ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=ex.reason)
+            _exit_process(1)
+            return
+        if isinstance(ex, Refuse):
+            # A refusal is the domain saying no, not the thrall failing: the caller gets
+            # the code, the state stays as it was, and nothing is recorded as the last error.
+            ctx.log.debug("call refused", op=e.get("op"), code=ex.code, trace=trace)
+            await respond(msg, e, _refused_reply(e, ex))
+            return
+        _set_last_error(f"handler_error: {ex}")
+        if defn._failure_reply is not None:
+            # A web thrall answers its own failures as HTTP. An exception is the one way a handler
+            # here can fail, a bug and a deliberate raise alike, so it is contained, counted and
+            # logged with the request's trace and the traceback - and the thrall carries on.
+            stats.panicked()
+            ctx.log.error("handler failed - the request is answered with a failure, the thrall carries on",
+                          op=e.get("op"), trace=trace, err=repr(ex),
+                          stack="".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
+            await respond(msg, e, _ok_reply(e, defn._failure_reply()))
+            return
+        await respond(msg, e, _err_reply(e, ERR_HANDLER, str(ex)))
+
     async def process_call(e: dict, msg) -> None:
         nonlocal state
         start = stats.begin()
         expired = None
+        ran = False
         try:
             async with lock:
                 expired = gate.drop(e)
                 if expired is not None:
                     await respond(msg, e, expired)
                     return
+                stats.started()
+                ran = True
                 ctx.trace = _or_new_trace(e.get("trace") or "")
                 ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
@@ -1031,32 +1249,55 @@ async def start(defn: ThrallDef) -> None:
                         # A duplicate call: return the first reply instead of re-running the handler.
                         await respond(msg, e, _ok_reply(e, cached))
                         return
+                # Only the handler is guarded: a reply that cannot be sent is not the handler
+                # failing, and must not be answered (or counted) as if it were.
                 try:
-                    reply, state = await _maybe(handler(e.get("payload"), state, ctx))
-                    if dkey:
-                        dedup.put(dkey, reply)  # cache only a successful reply
-                    await respond(msg, e, _ok_reply(e, reply))
-                except Escalate as esc:
-                    # Reply the caller before we crash, so it learns of the restart instead of
-                    # hanging until timeout; the dying breath then flushes both the reply and the
-                    # final heartbeat (carrying the reason) before the process exits.
-                    await respond(msg, e, _err_reply(e, ERR_ESCALATED, esc.reason))
-                    _set_last_error(f"escalated: {esc.reason}")
-                    await dying_breath()
-                    ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
-                    _exit_process(1)
-                    return
-                except Refuse as refusal:
-                    # A refusal is the domain saying no, not the thrall failing: the caller gets
-                    # the code, the state stays as it was, and nothing is recorded as the last error.
-                    ctx.log.debug("call refused", op=e.get("op"), code=refusal.code, trace=ctx.trace)
-                    await respond(msg, e, _refused_reply(e, refusal))
+                    reply, next_state = await _maybe(handler(e.get("payload"), state, ctx))
                 except Exception as ex:  # noqa: BLE001
-                    _set_last_error(f"handler_error: {ex}")
-                    await respond(msg, e, _err_reply(e, ERR_HANDLER, str(ex)))
+                    await answer_failed_call(msg, e, ctx.trace, ex)
+                    return
+                state = next_state
+                if dkey:
+                    dedup.put(dkey, reply)  # cache only a successful reply
+                await respond(msg, e, _ok_reply(e, reply))
         finally:
-            if expired is None:  # a dropped call is not a processed message
+            if ran:
                 stats.end(start)
+            elif expired is None:  # a dropped call is already accounted; this one was cancelled
+                stats.abandon()
+
+    # A concurrent web thrall takes its calls off the mailbox: a pool runs up to concurrency
+    # handlers at once over the state init returned. That state is captured here and never
+    # reassigned, so the handlers share it; each gets its own Ctx, since trace and msg_id differ
+    # per request. Idempotency dedup belongs to the mailbox and is not consulted here (def_web
+    # never asks for it).
+    pool = _CallPool(concurrency, gate, stats, ctx.log) if concurrency > 1 else None
+    shared = state
+
+    def pooled_call(e: dict, msg) -> None:
+        async def handle() -> None:
+            req_ctx = replace(ctx, trace=_or_new_trace(e.get("trace") or ""), msg_id=e.get("id") or "")
+            ctx.log.debug("handling call", op=e.get("op"), trace=req_ctx.trace)
+            handler = defn.handle_call.get(e.get("op"))
+            if handler is None:
+                await respond(msg, e, _err_reply(e, ERR_UNKNOWN_OP, f"unknown call op: {e.get('op')}"))
+                return
+            try:
+                reply, _ = await _maybe(handler(e.get("payload"), shared, req_ctx))
+            except Exception as ex:  # noqa: BLE001
+                await answer_failed_call(msg, e, req_ctx.trace, ex)
+                return
+            # Outside the guard: a send that fails is not a handler failure.
+            await respond(msg, e, _ok_reply(e, reply))
+
+        pool.submit(e, lambda reply: respond(msg, e, reply), handle)
+
+    async def on_call(e: dict, msg) -> None:
+        """Where a received call goes: the pool (which returns at once) or the mailbox."""
+        if pool is not None:
+            pooled_call(e, msg)
+        else:
+            await process_call(e, msg)
 
     # ack_durable acknowledges the source JetStream message (durable cast); None for a
     # non-durable core cast, which needs no ack. On escalation the poison cast is acked before
@@ -1064,8 +1305,11 @@ async def start(defn: ThrallDef) -> None:
     async def process_cast(e: dict, ack_durable: Optional[Callable[[], Any]] = None) -> None:
         nonlocal state
         start = stats.begin()
+        ran = False
         try:
             async with lock:
+                stats.started()
+                ran = True
                 ctx.trace = _or_new_trace(e.get("trace") or "")
                 ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling cast", op=e.get("op"), trace=ctx.trace)
@@ -1098,18 +1342,23 @@ async def start(defn: ThrallDef) -> None:
                         _set_last_error(f"handler_error: {ex}")
                         ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
         finally:
-            stats.end(start)
+            if ran:
+                stats.end(start)
+            else:
+                stats.abandon()
 
     tasks: list[asyncio.Task] = []
+    inbound: list = []  # the core subscriptions messages are read from; a drain closes them first
 
     if durable:
         # Durable: call/info over core (synchronous), cast via a durable JetStream consumer.
         call_sub = await nc.subscribe(_sub_call(app, name))
         info_sub = await nc.subscribe(_sub_info(app, name))
+        inbound += [call_sub, info_sub]
 
         async def call_loop() -> None:
             async for msg in call_sub.messages:
-                await process_call(_decode(msg.data), msg)
+                await on_call(_decode(msg.data), msg)
 
         async def info_loop() -> None:
             async for _msg in info_sub.messages:
@@ -1120,13 +1369,14 @@ async def start(defn: ThrallDef) -> None:
     else:
         # Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
         data_sub = await nc.subscribe(_sub_data(app, name))
+        inbound.append(data_sub)
 
         async def data_loop() -> None:
             async for msg in data_sub.messages:
                 verb = msg.subject.rsplit(".", 1)[1]
                 e = _decode(msg.data)
                 if verb == "call":
-                    await process_call(e, msg)
+                    await on_call(e, msg)
                 elif verb == "cast":
                     await process_cast(e)
 
@@ -1139,8 +1389,19 @@ async def start(defn: ThrallDef) -> None:
         async for msg in ctl_sub.messages:
             e = _decode(msg.data)
             if e.get("op") in ("drain", "shutdown"):
-                if defn.terminate:
-                    defn.terminate(e.get("op"), state)
+                # Stop reading first, as the Go SDK does: with the subscriptions closed nothing new
+                # is taken (a caller is told at once that nobody is listening, instead of waiting
+                # for a reply that will not come). Then finish what was already taken - the pooled
+                # calls that are running or waiting for a slot, then the handler holding the
+                # mailbox - and flush the replies before the connection goes.
+                for sub in inbound:
+                    await sub.unsubscribe()
+                if pool is not None:
+                    await pool.drain()
+                async with lock:
+                    if defn.terminate:
+                        defn.terminate(e.get("op"), state)
+                await nc.flush()
                 stop.set()
                 return
 
@@ -1293,41 +1554,138 @@ def json_response(status: int, value: Any) -> HTTPResponse:
     return HTTPResponse(status, header("Content-Type", "application/json"), _encode_body(body))
 
 
-# WebHandler shape: (req: HTTPRequest, state, ctx) -> (resp: HTTPResponse, new_state). It mirrors
-# the call shape, so a web thrall can hold state across requests, serialized by the mailbox.
+# A web thrall is written in one of two shapes, and the shape decides how its requests run:
+#
+#   - handle threads a state through the requests, GenServer style: each request gets the state
+#     the previous one returned. That only means something one request at a time, so a handle
+#     thrall is always serialized by the mailbox - a slow request holds every other one, and an
+#     async handler does not interleave with the next request either.
+#   - serve has no next state, and up to `concurrency` of its requests run at the same time.
+#
+# WebHandler is the handle shape: (req: HTTPRequest, state, ctx) -> (resp: HTTPResponse, new_state).
+# It mirrors the call shape, so a web thrall can hold state across requests, serialized by the mailbox.
 WebHandler = Callable[["HTTPRequest", Any, "Ctx"], Any]
+
+# WebServer is the serve shape: (req: HTTPRequest, shared, ctx) -> resp: HTTPResponse. Requests are
+# served concurrently - interleaved at their awaits on the one event loop - so the mailbox no
+# longer stands between them:
+#
+#   - shared is the one value init built, handed to every request. The runtime never replaces it
+#     (there is no "next state" to return), so what it holds after init is what every request
+#     sees. Treat it as read-only, or keep every change to it within one stretch without an await
+#     (or under your own asyncio.Lock): two requests cannot interleave between awaits, but a read,
+#     an await and then a write based on that read is a lost update waiting to happen.
+#   - State that must change one request at a time belongs in an ordinary thrall that the handler
+#     calls: its mailbox is the lock, and that is what a GenServer is for.
+#   - ctx is this request's own (its trace and msg_id are the request's); do not keep it or share
+#     it with another request.
+#   - Requests are independent: nothing orders one against another, not even two from one client.
+#   - A handler that blocks the event loop (time.sleep, a synchronous client) still stops every
+#     other request: concurrency is between awaits, not between threads.
+WebServer = Callable[["HTTPRequest", Any, "Ctx"], Any]
+
+# How many requests a serve web thrall handles at once when concurrency is left at 0. A request
+# mostly waits on calls to other thralls, so the number bounds how many of those are in flight, not
+# CPU: high enough that a few slow requests do not hold up the rest of a site, low enough that a
+# stalled dependency cannot be flooded. The same default as the Go and TS SDKs.
+DEFAULT_WEB_CONCURRENCY = 32
 
 
 def _web_call_handler(handle: WebHandler) -> CallHandler:
-    """Adapt an HTTP handler to a thrall call handler: decode the http_request payload into an
-    HTTPRequest, run the handler, and return the HTTPResponse as the reply. Factored out so it is
-    unit-testable without a NATS connection."""
+    """Adapt a handle-shape HTTP handler to a thrall call handler: decode the http_request payload
+    into an HTTPRequest, run the handler, and return the HTTPResponse as the reply. Factored out
+    so it is unit-testable without a NATS connection."""
     async def _handler(payload: Any, state: Any, ctx: "Ctx"):
         req = HTTPRequest.from_wire(payload or {})
         resp, next_state = await _maybe(handle(req, state, ctx))
-        return resp.to_wire(), next_state
+        return _as_response(resp).to_wire(), next_state
 
     return _handler
 
 
-def def_web(name="", init=None, handle=None, version="") -> ThrallDef:
-    """Build a ThrallDef that answers http_request with the given handler. Only handle is required;
-    init is optional (state defaults to None, the common stateless case)."""
-    if handle is None:
-        raise ValueError(f"web thrall {name}: handle is required")
+def _as_response(resp: Any) -> "HTTPResponse":
+    """Insist that a web handler returned a response. Without it a handler that forgot its return
+    would fail on an attribute of None, which says nothing about what went wrong."""
+    if not isinstance(resp, HTTPResponse):
+        raise TypeError("the web handler did not return an HTTPResponse")
+    return resp
+
+
+def _internal_server_error() -> dict:
+    """What a web thrall answers when its handler fails: a bare 500 that says nothing about the
+    inside of the node. The cause is in the thrall's log under the request's trace, which the
+    ingress returns to the client as X-Aether-Trace."""
+    return text_response(500, "Internal Server Error").to_wire()
+
+
+def _web_serve_handler(serve: WebServer) -> CallHandler:
+    """Adapt a serve-shape HTTP handler to a thrall call handler. The state it is given is the
+    shared value, and it is handed back as it came: a serve handler has no next state, whether its
+    requests run through the pool or (at concurrency 1) through the mailbox."""
+    async def _handler(payload: Any, shared: Any, ctx: "Ctx"):
+        req = HTTPRequest.from_wire(payload or {})
+        resp = await _maybe(serve(req, shared, ctx))
+        return _as_response(resp).to_wire(), shared
+
+    return _handler
+
+
+def _web_concurrency(name: str, handle, serve, concurrency) -> int:
+    """Validate a web definition and return how many requests it serves at once."""
+    who = f"web thrall {name}"
+    if handle is None and serve is None:
+        raise ValueError(f"{who}: one of handle and serve is required")
+    if handle is not None and serve is not None:
+        raise ValueError(f"{who}: handle and serve are two ways to write the same thrall - set one")
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 0:
+        raise ValueError(f"{who}: concurrency must be a non-negative integer, got {concurrency!r}")
+    if handle is not None and concurrency > 1:
+        raise ValueError(f"{who}: concurrency {concurrency} needs serve - handle threads its state from "
+                         "one request to the next, which only works one request at a time")
+    if handle is not None:
+        return 1
+    return DEFAULT_WEB_CONCURRENCY if concurrency == 0 else concurrency
+
+
+def def_web(name="", init=None, handle=None, version="", serve=None, concurrency=0) -> ThrallDef:
+    """Build a ThrallDef that answers http_request with the given handler. Exactly one of handle
+    (serialized, threads its state) and serve (concurrent, shares the value init returned) is
+    required; init is optional (the state defaults to None, the common stateless case).
+
+    concurrency is the most requests a serve thrall handles at the same time; further requests
+    wait for a free slot and are dropped unexecuted if their caller's deadline passes first. 0
+    means DEFAULT_WEB_CONCURRENCY; 1 serializes the requests through the mailbox, exactly as handle
+    does. It applies to serve only: with handle it is a mistake this function refuses rather than
+    ignores. The definition carries the result, so start(def_web(...)) and start_web(...) are the
+    same thing.
+
+    A failing handler costs one request, in either shape. A web thrall answers its own failures as
+    HTTP, the way it answers its own "no": a handler that raises (or returns something that is not
+    an HTTPResponse) is answered with a 500, the error is logged with the request's trace and its
+    traceback, counted (panics_total on the heartbeat, aether_panics_total on the lord) and becomes
+    the thrall's last error - and the thrall keeps serving. With handle the state stays what it was
+    before the request. Refuse and Escalate keep their meaning: an error reply of that type, and
+    for Escalate the crash it asks for. Only the handler's own coroutine is covered: a task the
+    handler started and did not await fails outside the request."""
+    limit = _web_concurrency(name, handle, serve, concurrency)
     init_fn = init if init is not None else (lambda ctx: None)
-    return def_thrall(name=name, init=init_fn,
-                      handle_call={OP_HTTP_REQUEST: _web_call_handler(handle)}, version=version)
+    handler = _web_serve_handler(serve) if serve is not None else _web_call_handler(handle)
+    defn = def_thrall(name=name, init=init_fn, handle_call={OP_HTTP_REQUEST: handler}, version=version)
+    defn._concurrency = limit
+    defn._failure_reply = _internal_server_error
+    return defn
 
 
-async def start_web(name="", init=None, handle=None, version="") -> None:
+async def start_web(name="", init=None, handle=None, version="", serve=None, concurrency=0) -> None:
     """Connect a web thrall to the ether and run its lifecycle - a thin wrapper over start."""
-    await start(def_web(name=name, init=init, handle=handle, version=version))
+    await start(def_web(name=name, init=init, handle=handle, version=version, serve=serve,
+                        concurrency=concurrency))
 
 
-def run_web(name="", init=None, handle=None, version="") -> None:
+def run_web(name="", init=None, handle=None, version="", serve=None, concurrency=0) -> None:
     """Convenient entry point: asyncio.run(start_web(...))."""
-    asyncio.run(start_web(name=name, init=init, handle=handle, version=version))
+    asyncio.run(start_web(name=name, init=init, handle=handle, version=version, serve=serve,
+                          concurrency=concurrency))
 
 
 # --- FSM behaviour (mirrors the Go StartFSM and TS startFSM; an OTP gen_statem analogue) ---
@@ -1420,6 +1778,7 @@ class _Machine:
     async def send(self, ev: Event, req=None, respond=None, gen=None) -> None:
         start = self._stats.begin()
         expired = None
+        ran = False
         try:
             async with self._lock:
                 if ev.kind == "call" and req is not None and respond is not None:
@@ -1427,12 +1786,16 @@ class _Machine:
                     if expired is not None:
                         respond(expired)  # a call whose caller has given up never becomes an event
                         return
+                self._stats.started()
+                ran = True
                 if gen is not None and gen != self._timeout_gen:
                     return  # superseded timeout
                 await self._dispatch(ev, req, respond)
         finally:
-            if expired is None:  # a dropped call is not a processed message
+            if ran:
                 self._stats.end(start)
+            elif expired is None:  # a dropped call is already accounted; this one was cancelled
+                self._stats.abandon()
 
     async def _dispatch(self, ev: Event, req, respond) -> None:
         self.ctx.trace = _or_new_trace("" if ev.kind == "timeout" else ((req or {}).get("trace") or ""))
@@ -1667,11 +2030,17 @@ class _EventBus:
 
     async def send(self, ev: Event, trace: str = "") -> None:
         start = self._stats.begin()
+        ran = False
         try:
             async with self._lock:
+                self._stats.started()
+                ran = True
                 await self._dispatch(ev, trace)
         finally:
-            self._stats.end(start)
+            if ran:
+                self._stats.end(start)
+            else:
+                self._stats.abandon()
 
     async def _dispatch(self, ev: Event, trace: str) -> None:
         self.ctx.trace = _or_new_trace(trace or "")

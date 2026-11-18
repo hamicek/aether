@@ -160,7 +160,7 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	lm.incRestart("worker")
 	lm.incGaveUp("worker")
 	lm.incHeartbeatMiss("worker")
-	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100, ExpiredTotal: 4})
+	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100, ExpiredTotal: 4, InFlight: 2})
 	lm.recordBacklog("worker", 7)
 
 	w, ok := lm.snapshot()["worker"]
@@ -179,8 +179,52 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	if w.Expired != 4 {
 		t.Errorf("expired = %d, want 4", w.Expired)
 	}
+	if w.InFlight != 2 {
+		t.Errorf("in flight = %d, want 2", w.InFlight)
+	}
 	if w.DurableBacklog != 7 {
 		t.Errorf("durable backlog = %v, want 7", w.DurableBacklog)
+	}
+}
+
+// TestInFlightHandlersAreExposed: a thrall's count of handlers running right now is a gauge next
+// to its mailbox depth, so the two together tell running work from waiting work. A thrall on an
+// SDK that predates the field reads as zero.
+func TestInFlightHandlersAreExposed(t *testing.T) {
+	l := &Lord{metrics: newLordMetrics()}
+	l.metrics.recordHeartbeat("web", wire.HeartbeatMetrics{MailboxDepth: 5, InFlight: 4,
+		Describe: &wire.ThrallDescribe{Concurrency: 4}})
+	body := scrape(t, l)
+	if v, ok := metricValue(t, body, `aether_in_flight{name="web"}`); !ok || v != 4 {
+		t.Fatalf("aether_in_flight = %v (present %v), want 4", v, ok)
+	}
+	if v, ok := metricValue(t, body, `aether_mailbox_depth{name="web"}`); !ok || v != 5 {
+		t.Fatalf("aether_mailbox_depth = %v (present %v), want 5", v, ok)
+	}
+	if d := l.metrics.describeFor("web"); d == nil || d.Concurrency != 4 {
+		t.Errorf("the declared concurrency was not kept: %+v", d)
+	}
+
+	l.metrics.recordHeartbeat("legacy", wire.HeartbeatMetrics{MailboxDepth: 1})
+	if v, ok := metricValue(t, scrape(t, l), `aether_in_flight{name="legacy"}`); !ok || v != 0 {
+		t.Fatalf("aether_in_flight without the field = %v (present %v), want 0", v, ok)
+	}
+}
+
+// TestContainedPanicsAreExposed: handler crashes a web thrall survived are a counter of their
+// own, apart from restarts - a thrall can be up the whole time and still be failing requests.
+func TestContainedPanicsAreExposed(t *testing.T) {
+	l := &Lord{metrics: newLordMetrics()}
+	l.metrics.recordHeartbeat("web", wire.HeartbeatMetrics{ProcessedTotal: 12, PanicsTotal: 2})
+	if v, ok := metricValue(t, scrape(t, l), `aether_panics_total{name="web"}`); !ok || v != 2 {
+		t.Fatalf("aether_panics_total = %v (present %v), want 2", v, ok)
+	}
+	if got := l.metrics.snapshot()["web"].Panics; got != 2 {
+		t.Errorf("snapshot panics = %d, want 2", got)
+	}
+	l.metrics.recordHeartbeat("legacy", wire.HeartbeatMetrics{ProcessedTotal: 1})
+	if v, ok := metricValue(t, scrape(t, l), `aether_panics_total{name="legacy"}`); !ok || v != 0 {
+		t.Fatalf("aether_panics_total without the field = %v (present %v), want 0", v, ok)
 	}
 }
 
