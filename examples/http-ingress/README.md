@@ -16,7 +16,7 @@ host->subject forwarder - it does no path routing (that is the web thrall's job)
 export GOTOOLCHAIN=local
 mise exec go@latest -- go build -o bin/aether ./cmd/aether
 mise exec go@latest -- go build -o bin/blog ./examples/http-ingress/blog
-mise exec go@latest -- go build -o bin/http-ingress ./examples/http-ingress
+mise exec go@latest -- go build -o bin/http-ingress ./cmd/http-ingress
 
 cd examples/http-ingress
 ../../bin/aether up -f aether.toml

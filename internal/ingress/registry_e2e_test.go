@@ -10,7 +10,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/hamicek/aether/examples/http-ingress/ingress"
+	"github.com/hamicek/aether/internal/ingress"
 	"github.com/hamicek/aether/internal/wire"
 	"github.com/hamicek/aether/sdk/go/thrall"
 )

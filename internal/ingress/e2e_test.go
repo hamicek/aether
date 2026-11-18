@@ -11,7 +11,7 @@ import (
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 
-	"github.com/hamicek/aether/examples/http-ingress/ingress"
+	"github.com/hamicek/aether/internal/ingress"
 	"github.com/hamicek/aether/sdk/go/thrall"
 )
 

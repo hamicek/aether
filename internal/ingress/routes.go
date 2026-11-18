@@ -1,12 +1,13 @@
-// Package ingress is the translation core of the HTTP ingress: resolve an inbound request's Host to
-// a web thrall, forward the whole request as an http_request call over NATS, and write the
-// http_response back. It depends only on the wire contract, not on the lord or the manifest, so it
-// stays a small, testable core; the HTTP server and the edge lifecycle live in the `main` package
-// that drives it (built on thrall.StartEdge).
+// Package ingress is the HTTP ingress of the "web thrall is pure NATS" model (AE-091): resolve an
+// inbound request's Host to a web thrall, forward the whole request as one http_request call over
+// NATS, and write the http_response back. The thrall is the web server and does its own path
+// routing; the ingress knows only Host -> thrall. It is the complement of [[edge.http]] (route ->
+// operation, internal/edge), not a replacement.
 //
-// This is the generic host->subject forwarder of the "web thrall is pure NATS" model (AE-091): the
-// thrall is the web server and does its own path routing; the ingress knows only Host -> thrall. It
-// is the complement of [[edge.http]] (route -> operation, internal/edge), not a replacement.
+// The package is the whole program behind the cmd/http-ingress binary: Run parses the command line
+// and runs the ingress as an edge thrall (thrall.StartEdge), NewHandler is the HTTP <-> envelope
+// translation, and a RouteProvider (a static table or the site-registry client) supplies the route
+// table. It depends on the wire contract and the SDK, not on the lord or the manifest.
 package ingress
 
 import (
