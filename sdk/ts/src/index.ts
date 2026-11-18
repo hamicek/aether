@@ -1,4 +1,4 @@
-export { defThrall, start, escalate, EscalateError, refuse, RefuseError } from "./thrall";
+export { defThrall, start, escalate, EscalateError, refuse, RefuseError, UNSPECIFIED_REFUSAL } from "./thrall";
 export type { ThrallDef, Ctx, CallHandler, CastHandler } from "./thrall";
 export { call, cast, castConfirmed, NotDurableError, useConnection, startChild, stopChild } from "./client";
 export { Client, CallError, asRefusal, refusalCode } from "./client";

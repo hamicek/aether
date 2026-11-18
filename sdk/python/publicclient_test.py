@@ -163,6 +163,27 @@ class ClientTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(aether.CallError):
             await aether.Client(malformed, "legacy").call("account", "x")
 
+    async def test_an_empty_message_stays_empty(self):
+        # A thrall may refuse with a code and no sentence; the caller must not invent one.
+        bus = FakeBus(error_reply({"type": "refused", "code": "day_closed", "message": "", "retryable": False}))
+        with self.assertRaises(aether.CallError) as raised:
+            await aether.Client(bus, "shop").call("denik", "zapis")
+        self.assertEqual((raised.exception.code, raised.exception.message), ("day_closed", ""))
+        self.assertEqual(str(raised.exception), "refused: ")
+
+    async def test_fractional_timeout_stamps_a_whole_millisecond_deadline(self):
+        bus = FakeBus()
+        await aether.Client(bus, "shop").call("account", "balance", timeout=1 / 3)
+        self.assertIsInstance(bus.last[1]["deadline"], int)
+
+    async def test_ctx_call_can_carry_another_trace(self):
+        bus = FakeBus()
+        ctx = aether.Ctx(nats=bus, name="web", app="ujito", trace="t-handled")
+        await ctx.call("denik", "stav", trace="t-explicit")
+        self.assertEqual(bus.last[1]["trace"], "t-explicit")
+        await ctx.cast("audit", "note")
+        self.assertEqual(bus.last[1]["trace"], "t-handled")
+
     def test_other_errors_are_not_refusals(self):
         self.assertIsNone(aether.as_refusal(TimeoutError("no reply")))
         self.assertEqual(aether.refusal_code(RuntimeError("handler_error: boom")), "")
@@ -181,6 +202,12 @@ class RefuseTest(unittest.TestCase):
         self.assertEqual(reply, {"v": 1, "id": "c-1", "kind": "reply", "status": "error",
                                  "error": {"type": "refused", "code": "day_closed", "message": "the day is closed",
                                            "retryable": False}})
+
+    def test_a_refusal_always_carries_a_code(self):
+        # A refusal without a code would read, through refusal_code, as "not a refusal".
+        unnamed = aether.Refuse("", "no")
+        self.assertEqual(unnamed.code, aether.UNSPECIFIED_REFUSAL)
+        self.assertEqual(aether._refused_reply({"v": 1, "id": "c-1"}, unnamed)["error"]["code"], "refused")
 
     def test_a_refusal_is_not_an_escalation(self):
         self.assertNotIsInstance(aether.Refuse("x", "y"), aether.Escalate)

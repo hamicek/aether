@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { createMachine, type FSMDef } from "./fsm";
 import { newLogger } from "./log";
-import { asRefuse, DeadlineGate, MailboxStats, refuse, RefuseError, refusedReply, type Ctx } from "./thrall";
+import { asRefuse, DeadlineGate, MailboxStats, refuse, RefuseError, refusedReply, UNSPECIFIED_REFUSAL, type Ctx } from "./thrall";
 import { DEFAULT_DEADLINE_SKEW_MS, deadlineAfter, deadlineSkewMs, overdueMs } from "./deadline";
 import type { Envelope } from "./envelope";
 
@@ -18,6 +18,13 @@ test("refuse throws a RefuseError with its code and reason", () => {
     expect((err as RefuseError).reason).toBe("the balance is 3, the withdrawal 5");
     expect((err as RefuseError).message).toBe("refused (insufficient_funds): the balance is 3, the withdrawal 5");
   }
+});
+
+// A refusal without a code would read, through refusalCode, as "not a refusal".
+test("a refusal always carries a code", () => {
+  const unnamed = new RefuseError("", "no");
+  expect(unnamed.code).toBe(UNSPECIFIED_REFUSAL);
+  expect(refusedReply({ v: 1, id: "c-1", kind: "call" }, unnamed).error?.code).toBe("refused");
 });
 
 test("asRefuse distinguishes a refusal from any other error", () => {
@@ -40,6 +47,10 @@ test("the refusal reply carries the code in its own error type", () => {
 
 test("deadlineAfter is the send time plus the timeout, and none for a non-positive timeout", () => {
   expect(deadlineAfter(1700000000000, 5000)).toBe(1700000005000);
+  // The wire field is an integer: a fractional timeout must not put a fractional deadline on the
+  // wire, which a Go thrall could not decode.
+  expect(deadlineAfter(1700000000000, 1000 / 3)).toBe(1700000000333);
+  expect(Number.isInteger(deadlineAfter(1700000000000.4, 0.7))).toBe(true);
   expect(deadlineAfter(1700000000000, 0)).toBeUndefined();
   expect(deadlineAfter(1700000000000, -1)).toBeUndefined();
 });

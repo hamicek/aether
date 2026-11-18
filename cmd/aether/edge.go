@@ -191,12 +191,12 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		if reply.Status == "error" {
 			// Application error from the thrall: log the detail, return a generic status to the caller.
 			status := edge.StatusForReply(reply)
-			var errType, errMsg string
+			var errType, errCode, errMsg string
 			if reply.Error != nil {
-				errType, errMsg = reply.Error.Type, reply.Error.Message
+				errType, errCode, errMsg = reply.Error.Type, reply.Error.Code, reply.Error.Message
 			}
 			logger.Warn("edge: thrall error reply", slog.String("thrall", route.Thrall), slog.String("op", route.Op),
-				slog.String("type", errType), slog.String("message", errMsg))
+				slog.String("type", errType), slog.String("code", errCode), slog.String("message", errMsg))
 			http.Error(w, http.StatusText(status), status)
 			return
 		}

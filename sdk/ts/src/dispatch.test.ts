@@ -120,17 +120,20 @@ async function heartbeat(name: string, want: (m: Record<string, unknown>) => boo
 
 test("a refusal is not the thrall's last error, a handler failure is", async () => {
   if (!hasServer) return;
-  const account = new Client(nc!, "ae");
-  await failure(account.call("account", "withdraw", { amount: 99 }));
-  const afterRefusal = await heartbeat("account", () => true);
-  const lastError = ((afterRefusal.describe as Record<string, unknown>).last_error as string | undefined) ?? "";
-  expect(lastError).not.toContain("insufficient_funds");
-  expect(lastError).not.toContain("refused");
+  // A peer of its own, so nothing but this test's calls can have set its last error.
+  await startPeer("ae", "fresh");
+  const fresh = new Client(nc!, "ae");
+  const describeOf = (m: Record<string, unknown>) => (m.describe ?? {}) as Record<string, unknown>;
 
-  await failure(account.call("account", "broken"));
-  const afterFailure = await heartbeat("account", (m) => ((m.describe as Record<string, unknown>).last_error as string | undefined)?.includes("disk on fire") ?? false);
-  expect((afterFailure.describe as Record<string, unknown>).last_error).toContain("handler_error");
-}, 15000);
+  expect(asRefusal(await failure(fresh.call("fresh", "withdraw", { amount: 99 })))).not.toBeNull();
+  await fresh.call("fresh", "write"); // a marker: the beat that counts it was taken after the refusal
+  const afterRefusal = await heartbeat("fresh", (m) => (m.processed_total as number) >= 3);
+  expect(describeOf(afterRefusal).last_error).toBeUndefined();
+
+  await failure(fresh.call("fresh", "broken"));
+  const afterFailure = await heartbeat("fresh", (m) => describeOf(m).last_error !== undefined);
+  expect(describeOf(afterFailure).last_error).toBe("handler_error: Error: disk on fire");
+}, 20000);
 
 test("a call that timed out while queued is not executed later", async () => {
   if (!hasServer) return;

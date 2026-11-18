@@ -27,9 +27,11 @@ export function deadlineSkewMs(): number {
 }
 
 // deadlineAfter is the deadline a caller stamps on a call it will wait timeoutMs for, starting at
-// nowMs. A non-positive timeout yields undefined (no deadline), never an already expired one.
+// nowMs. A non-positive timeout yields undefined (no deadline), never an already expired one. The
+// result is a whole number of milliseconds: the wire field is an integer, and a fractional value
+// (a timeout computed as budget / 3, say) would make the whole envelope undecodable to a Go thrall.
 export function deadlineAfter(nowMs: number, timeoutMs: number): number | undefined {
-  return timeoutMs > 0 ? nowMs + timeoutMs : undefined;
+  return timeoutMs > 0 ? Math.round(nowMs + timeoutMs) : undefined;
 }
 
 // overdueMs returns how far past its deadline (beyond the skew tolerance) the envelope is at nowMs,

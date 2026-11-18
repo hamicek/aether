@@ -420,3 +420,22 @@ func TestPackageCallNeedsARunningThrall(t *testing.T) {
 		t.Fatal("CastConfirmed before Start must fail")
 	}
 }
+
+// TestRefuseAlwaysCarriesACode: a refusal without a code would be indistinguishable, through
+// RefusalCode, from "not a refusal" - so an empty code becomes UnspecifiedRefusal.
+func TestRefuseAlwaysCarriesACode(t *testing.T) {
+	for _, err := range []error{Refuse("", "no"), Refusef("", "no %d", 1)} {
+		ref, ok := asRefuse(err)
+		if !ok || ref.Code != UnspecifiedRefusal {
+			t.Fatalf("refusal without a code = %+v, want code %q", ref, UnspecifiedRefusal)
+		}
+	}
+	ref, _ := asRefuse(fmt.Errorf("wrapped: %w", Refuse("day_closed", "the day is closed")))
+	if ref == nil || ref.Code != "day_closed" || ref.Message != "the day is closed" {
+		t.Fatalf("a wrapped refusal = %+v", ref)
+	}
+	reply := refusedReply(Envelope{V: 1, ID: "c-1"}, &RefuseError{Code: "day_closed", Message: "the day is closed"})
+	if reply.ID != "c-1" || reply.Error == nil || reply.Error.Type != ErrRefused || reply.Error.Code != "day_closed" || reply.Error.Retryable {
+		t.Fatalf("refusal reply = %+v (error %+v)", reply, reply.Error)
+	}
+}

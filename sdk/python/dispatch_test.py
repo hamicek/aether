@@ -146,20 +146,21 @@ class DispatchTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_skew_tolerance_and_old_shapes(self):
         await self._start_peer("ae", "account")  # default tolerance
-        now = int(time.time() * 1000)
-
-        async def write(deadline=None):
+        async def write(deadline_offset_ms=None):
+            # The deadline is set relative to the moment of sending, so the margin to the tolerance
+            # does not depend on how long the earlier calls took.
+            now = int(time.time() * 1000)
             e = {"v": 1, "id": f"raw-{random.random()}", "kind": "call", "to": "account", "op": "write",
                  "payload": {}, "ts": now - 3600_000}
-            if deadline is not None:
-                e["deadline"] = deadline
+            if deadline_offset_ms is not None:
+                e["deadline"] = now + deadline_offset_ms
             return await self._raw_call("ae", e)
 
         self.assertEqual((await write())["status"], "ok")  # an old caller: no deadline, however old
-        self.assertEqual((await write(now + 5000))["status"], "ok")
-        self.assertEqual((await write(now - 50))["status"], "ok")  # overdue by less than the 250 ms tolerance
+        self.assertEqual((await write(5000))["status"], "ok")
+        self.assertEqual((await write(-50))["status"], "ok")  # overdue by less than the 250 ms tolerance
 
-        dropped = await write(now - 2000)
+        dropped = await write(-2000)
         self.assertEqual(dropped["status"], "error")
         self.assertEqual(dropped["error"], {"type": "deadline_exceeded", "message": dropped["error"]["message"],
                                             "retryable": True})
@@ -170,7 +171,8 @@ class DispatchTest(unittest.IsolatedAsyncioTestCase):
 
         # An old caller reads a refusal as the error string it always got: "<type>: <message>".
         reply = await self._raw_call("ae", {"v": 1, "id": "old-1", "trace": "t-old", "kind": "call", "to": "account",
-                                           "op": "withdraw", "payload": {"amount": 50}, "ts": now})
+                                           "op": "withdraw", "payload": {"amount": 50},
+                                           "ts": int(time.time() * 1000)})
         self.assertEqual(f"{reply['error']['type']}: {reply['error']['message']}",
                          "refused: the balance is 3, the withdrawal 50")
 

@@ -387,26 +387,29 @@ func TestDeadlineToleranceAndCompatibility(t *testing.T) {
 		return Start(ledgerDef(make(chan struct{}), make(chan struct{}, 1), &writes))
 	})
 
-	call := func(deadline int64) wire.Envelope {
+	// sentAt builds a call whose deadline is `offset` from the moment it is sent, so the margin to
+	// the tolerance does not depend on how long the earlier calls took.
+	sentAt := func(offset time.Duration) wire.Envelope {
 		return rawCall(t, nc, "ae", wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: "ledger", Op: "write",
-			TS: time.Now().Add(-time.Hour).UnixMilli(), Deadline: deadline})
+			TS: time.Now().Add(-time.Hour).UnixMilli(), Deadline: time.Now().Add(offset).UnixMilli()})
 	}
-	now := time.Now().UnixMilli()
+	noDeadline := rawCall(t, nc, "ae", wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: "ledger", Op: "write",
+		TS: time.Now().Add(-time.Hour).UnixMilli()})
 
-	if reply := call(0); reply.Status != wire.StatusOK {
-		t.Fatalf("a call without a deadline must run however old it is, got %+v", reply.Error)
+	if noDeadline.Status != wire.StatusOK {
+		t.Fatalf("a call without a deadline must run however old it is, got %+v", noDeadline.Error)
 	}
-	if reply := call(now + 5000); reply.Status != wire.StatusOK {
+	if reply := sentAt(5 * time.Second); reply.Status != wire.StatusOK {
 		t.Fatalf("a call before its deadline must run, got %+v", reply.Error)
 	}
-	if reply := call(now - 50); reply.Status != wire.StatusOK {
+	if reply := sentAt(-50 * time.Millisecond); reply.Status != wire.StatusOK {
 		t.Fatalf("a call overdue by less than the skew tolerance must run, got %+v", reply.Error)
 	}
 	if writes.Load() != 3 {
 		t.Fatalf("writes = %d, want 3", writes.Load())
 	}
 
-	reply := call(now - 2000)
+	reply := sentAt(-2 * time.Second)
 	if reply.Status != wire.StatusError || reply.Error == nil {
 		t.Fatalf("a call overdue beyond the tolerance must be answered with an error, got %+v", reply)
 	}
@@ -473,8 +476,8 @@ func TestDeadlineSkewFromEnv(t *testing.T) {
 }
 
 // TestPackageCallUsesTheThrallsConnection: inside a running thrall the package-level Call works
-// without any setup and goes through the same client code - it carries a deadline and yields the
-// typed error.
+// without any setup and goes through the same client code - it reaches the thrall's own app and
+// yields the typed error.
 func TestPackageCallUsesTheThrallsConnection(t *testing.T) {
 	eth := dispatchEther(t)
 	runThrall(t, eth, "ae", "account", func() error { return Start(accountDef(3)) })
@@ -502,6 +505,9 @@ func TestFSMRefusalAndDeadline(t *testing.T) {
 		Init:    func(*Ctx) (int, error) { return 0, nil },
 		States: map[string]State[int]{
 			"locked": {On: map[string]Reaction[int]{
+				"attempts": {Fn: func(_ Event, attempts int, _ *Ctx) (Outcome[int], error) {
+					return Outcome[int]{Data: attempts, Reply: attempts}, nil
+				}},
 				"open": {Fn: func(ev Event, attempts int, _ *Ctx) (Outcome[int], error) {
 					var req struct {
 						Code string `json:"code"`
@@ -534,6 +540,10 @@ func TestFSMRefusalAndDeadline(t *testing.T) {
 	}
 	if got := state(); got != "locked" {
 		t.Fatalf("a refused event must not transition: state = %q", got)
+	}
+	// The reaction returned Data: attempts+1 alongside the refusal; it must have been discarded.
+	if got, err := CallInto[int](client, "door", "attempts", nil, clientTimeout); err != nil || got != 0 {
+		t.Fatalf("a refused event must not change the data: attempts = %d, %v; want 0", got, err)
 	}
 
 	// An expired call is dropped before it reaches the machine: the right code, sent too late.

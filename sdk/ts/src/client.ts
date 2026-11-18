@@ -165,7 +165,9 @@ export function orNewTrace(trace?: string): string {
 
 // call = synchronous request/reply with a timeout (GenServer.call) to another thrall, over this
 // process's shared connection. See Client.call for what it resolves and rejects with.
-export function call<R = unknown>(target: string, op: string, payload: unknown = {}, opts: CallOpts = {}): Promise<R> {
+// It is async so that a missing connection rejects the returned promise, as it always did, rather
+// than throwing synchronously.
+export async function call<R = unknown>(target: string, op: string, payload: unknown = {}, opts: CallOpts = {}): Promise<R> {
   return own().call<R>(target, op, payload, opts);
 }
 

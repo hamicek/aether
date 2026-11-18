@@ -233,7 +233,9 @@ no `deadline` (its calls are handled whenever they are dequeued, as before) and 
 the `"<type>: <message>"` error string it has always got; a new caller talking to an old thrall gets
 `handler_error` with no `code`, i.e. the generic failure. The golden fixtures in `testdata/wire`
 pin the shape for all SDKs, and the cross-language test (`sdk/go/thrall/crosslang_test.go`) runs
-the refusal and the deadline drop through every pairing of the Go, TS and Python SDKs.
+real Go, TS and Python thralls on one bus: a refusal made by each SDK is read as the typed error by
+each of the other SDKs, each SDK's caller stamps the deadline the same way, and each SDK's thrall
+drops a call that arrives past its deadline.
 
 **Cast (no reply):**
 ```json
@@ -333,8 +335,11 @@ the thrall running in the process. In Go both satisfy the `thrall.Caller` interf
 a library should accept: handed a `Ctx` it propagates the trace, handed a `Client` it works
 anywhere. A call resolves to the reply payload or fails in one of two distinguishable ways: a
 **typed call error** when the target answered with an error reply (`*thrall.CallError` /
-`CallError` / `aether.CallError`, exposing `type`, `code`, `message`, `retryable`), or the **NATS
-error** when no reply arrived (timeout, no responders).
+`CallError` / `aether.CallError`, exposing the reply's `type`, `code`, message and `retryable` -
+the human sentence is `Message` in Go, `message` in Python and `reason` in TS, where `message` is
+the standard error text `"<type>: <reason>"`), or the **NATS error** when no reply arrived
+(timeout, no responders). From a handler the trace of the message being handled is carried by
+default; an explicit one (`WithTrace` / `opts.trace` / `trace=`) takes its place.
 
 For the rare code that works at the envelope level - a test double standing in for a thrall, a
 bridge to another transport - the Go SDK re-exports the wire contract from `internal/wire`
@@ -384,11 +389,18 @@ people and may change freely. Before refusals existed a domain "no" travelled as
 and callers had to recognise it by the text of the message, which broke the moment a sentence was
 rephrased and made every refusal look like a fault.
 
-A refusal is deliberately *not* a failure anywhere in the runtime: the thrall's state is left as it
-was (as for any error), it is **not** recorded as the thrall's `last_error`, it counts as a
-processed message, it is logged at debug rather than as an error, and it is not stored in the
-idempotency cache (only successful replies are). A refused **cast** has no caller to tell and is
-only noted in the log.
+A refusal is deliberately *not* a failure of the thrall, in any SDK and in the lord's view of it:
+the thrall's state is left as it was (as for any error), it is **not** recorded as the thrall's
+`last_error`, it counts as a processed message, it is logged at debug rather than as an error, and
+it is not stored in the idempotency cache (only successful replies are). A refused **cast** has no
+caller to tell and is only noted in the log. A refusal always carries a code: refusing with an
+empty one yields the code `refused`, so "the code is empty" reliably means "this was not a refusal".
+
+What a *caller* makes of a refusal is the caller's business. The two callers built into the
+runtime are generic and cannot know a thrall's codes: `aether call` prints the refusal with its
+code and exits non-zero like for any error reply, and the built-in HTTP edge (§12b) answers 502 as
+for any error reply - mapping a thrall's refusal codes to client-facing statuses belongs in a
+gateway that knows the contract, which is what a web thrall is for.
 
 **A refusal is never forwarded implicitly.** If a handler calls another thrall, that thrall
 refuses, and the handler returns the call's error as it is, the caller of the *handler* gets a plain
@@ -780,8 +792,10 @@ The lord synthesizes a supervised child per section running the internal `aether
 it is a normal singleton thrall to the lord, so it inherits spawn, heartbeat, drain and fencing
 unchanged. Each request is translated to a wire envelope: a `call` route waits for the reply and
 returns it as the body (200), a `cast` route hands the message to the ether and returns 202. Errors
-map deterministically - an application error reply -> 502, no responders -> 503, a reply timeout ->
-504, an unknown route -> 404. The edge connects with the same client path as the CLI (`wire` +
+map deterministically - an application error reply -> 502 (a refusal included: the edge does not
+know a thrall's refusal codes, §8), no responders -> 503, a reply timeout -> 504, a call the thrall
+dropped past its deadline -> 504 as well (it is the same timeout seen from the other side, §9c), an
+unknown route -> 404. The edge connects with the same client path as the CLI (`wire` +
 `nats.Conn`), not the thrall runtime, so it carries no mailbox. Multiple `[[edge.http]]` servers
 coexist in one manifest, each on its own port. Demo: `examples/webserver/`.
 

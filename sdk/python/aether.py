@@ -386,10 +386,13 @@ class CallError(RuntimeError):
     SDK's CallError."""
 
     def __init__(self, error: Optional[dict]) -> None:
-        error = error or {}
+        if error is None:
+            # A reply with status "error" but no error object is malformed; it still has to
+            # surface as an error, typed as a handler failure since nothing says otherwise.
+            error = {"type": ERR_HANDLER, "message": "error reply without detail"}
         self.type: str = error.get("type") or ERR_HANDLER
         self.code: str = error.get("code") or ""
-        self.message: str = error.get("message") or "error reply without detail"
+        self.message: str = error.get("message") or ""
         self.retryable: bool = bool(error.get("retryable", False))
         super().__init__(f"{self.type}: {self.message}")
 
@@ -412,6 +415,10 @@ def refusal_code(err: Any) -> str:
     return refusal.code if refusal is not None else ""
 
 
+# The code of a refusal made without one (mirrors thrall.UnspecifiedRefusal in the Go SDK).
+UNSPECIFIED_REFUSAL = "refused"
+
+
 class Refuse(Exception):
     """The typed "no" of a handler: the request is understood and the thrall is healthy, but a rule
     of its domain forbids what was asked (not enough funds, the day is already closed). A handler
@@ -424,8 +431,8 @@ class Refuse(Exception):
     - nothing is recorded as the thrall's last error, and the refusal counts as a handled message.
 
     code is a stable, machine-readable identifier that callers branch on, so it is part of the
-    thrall's contract: name it for the rule ("insufficient_funds"), never reword it. message is for
-    people and may change freely.
+    thrall's contract: name it for the rule ("insufficient_funds"), never reword it (an empty code
+    becomes UNSPECIFIED_REFUSAL). message is for people and may change freely.
 
     A refusal is never forwarded implicitly: a handler that calls another thrall and lets that
     call's CallError propagate gets a plain handler failure even when the other thrall refused,
@@ -434,6 +441,9 @@ class Refuse(Exception):
     """
 
     def __init__(self, code: str, message: str) -> None:
+        # A refusal always carries a code - that is what tells a caller "the thrall said no" from
+        # "the call failed" (refusal_code returns "" only for the latter) - so an empty one is replaced.
+        code = code or UNSPECIFIED_REFUSAL
         super().__init__(f"refused ({code}): {message}")
         self.code = code
         self.message = message
@@ -845,22 +855,25 @@ class Ctx:
         return Client(self.nats, self.app, self.trace)
 
     async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
-                   idempotency_key: str | None = None, app: str | None = None) -> Any:
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> Any:
         """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
-        message carries the trace of the message currently being handled. app addresses a thrall
-        in another app. See Client.call for what it returns and raises."""
-        return await self._client().call(target, op, payload, timeout, idempotency_key, app)
+        message carries the trace of the message currently being handled (or trace, when given).
+        app addresses a thrall in another app. See Client.call for what it returns and raises."""
+        return await self._client().call(target, op, payload, timeout, idempotency_key, app, trace)
 
     async def cast(self, target: str, op: str, payload: Any = None,
-                   idempotency_key: str | None = None, app: str | None = None) -> None:
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> None:
         """Trace-propagating fire-and-forget to another thrall (GenServer.cast). See Client.cast."""
-        await self._client().cast(target, op, payload, idempotency_key, app)
+        await self._client().cast(target, op, payload, idempotency_key, app, trace)
 
     async def cast_confirmed(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
-                             idempotency_key: str | None = None, app: str | None = None) -> None:
+                             idempotency_key: str | None = None, app: str | None = None,
+                             trace: str | None = None) -> None:
         """Trace-propagating cast to a durable thrall that returns only once the message is durably
         stored in the target's mailbox. See Client.cast_confirmed."""
-        await self._client().cast_confirmed(target, op, payload, timeout, idempotency_key, app)
+        await self._client().cast_confirmed(target, op, payload, timeout, idempotency_key, app, trace)
 
     async def append(self, event: Any, dedup_key: str | None = None) -> None:
         """Persist a domain event to this thrall's event log (a JetStream publish that waits for

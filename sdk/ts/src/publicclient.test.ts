@@ -54,6 +54,22 @@ test("a Client needs only a connection and stamps when it stops waiting", async 
   expect(env.deadline!).toBeGreaterThanOrEqual(before + 2000);
 });
 
+test("a fractional timeout still stamps a whole-millisecond deadline", async () => {
+  const bus = fakeBus();
+  await new Client(bus.nc, "shop").call("account", "balance", {}, { timeoutMs: 1000 / 3 });
+  expect(Number.isInteger(bus.last().env.deadline)).toBe(true);
+  expect(JSON.stringify(bus.last().env)).not.toMatch(/"deadline":\d+\.\d/);
+});
+
+test("the module-level call without a connection rejects rather than throws", async () => {
+  useConnection(null as unknown as NatsConnection);
+  let promise: Promise<unknown> | undefined;
+  expect(() => {
+    promise = call("account", "balance");
+  }).not.toThrow();
+  await expect(promise!).rejects.toThrow(/no connection/);
+});
+
 test("a call without an explicit timeout carries the default one as its deadline", async () => {
   const bus = fakeBus();
   await new Client(bus.nc, "shop").call("account", "balance");

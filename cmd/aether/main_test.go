@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hamicek/aether/internal/natstest"
+	"github.com/hamicek/aether/internal/wire"
 )
 
 // TestDial proves the CLI authenticates to a secured bus (server TLS + nkey) when given the
@@ -105,6 +106,24 @@ func TestVersionMismatch(t *testing.T) {
 	for _, c := range cases {
 		if got := versionMismatch(c.reported, c.expected); got != c.want {
 			t.Errorf("versionMismatch(%q, %q) = %v, want %v", c.reported, c.expected, got, c.want)
+		}
+	}
+}
+
+// TestDescribeErrorReply: `aether call` shows a refusal with its code, any other error as
+// "<type>: <message>", and does not crash on an error reply without an error object.
+func TestDescribeErrorReply(t *testing.T) {
+	cases := []struct {
+		err  *wire.WireError
+		want string
+	}{
+		{&wire.WireError{Type: wire.ErrRefused, Code: "insufficient_funds", Message: "the balance is 3"}, "refused (insufficient_funds): the balance is 3"},
+		{&wire.WireError{Type: wire.ErrHandler, Message: "disk on fire"}, "handler_error: disk on fire"},
+		{nil, "error reply without detail"},
+	}
+	for _, tc := range cases {
+		if got := describeErrorReply(tc.err); got != tc.want {
+			t.Errorf("describeErrorReply(%+v) = %q, want %q", tc.err, got, tc.want)
 		}
 	}
 }

@@ -27,19 +27,28 @@ type RefuseError struct {
 
 func (e *RefuseError) Error() string { return "refused (" + e.Code + "): " + e.Message }
 
-// Refuse builds the refusal for a handler to return.
+// UnspecifiedRefusal is the code of a refusal made without one. A refusal always carries a code -
+// that is what tells a caller "the thrall said no" from "the call failed" (RefusalCode returns ""
+// only for the latter) - so Refuse("", ...) is given this one rather than an empty code.
+const UnspecifiedRefusal = "refused"
+
+// Refuse builds the refusal for a handler to return. code should name the rule; an empty code
+// becomes UnspecifiedRefusal.
 //
 // A refusal is never forwarded implicitly. A handler that calls another thrall and returns that
 // call's error gets a plain handler failure even when the other thrall refused, because a code
 // from someone else's contract must not pose as this thrall's answer. To pass a downstream refusal
 // on, say so: if r, ok := thrall.AsRefusal(err); ok { return nil, s, thrall.Refuse(r.Code, r.Message) }.
 func Refuse(code, message string) error {
+	if code == "" {
+		code = UnspecifiedRefusal
+	}
 	return &RefuseError{Code: code, Message: message}
 }
 
 // Refusef is Refuse with a formatted message.
 func Refusef(code, format string, args ...any) error {
-	return &RefuseError{Code: code, Message: fmt.Sprintf(format, args...)}
+	return Refuse(code, fmt.Sprintf(format, args...))
 }
 
 // asRefuse reports whether err is (or wraps) a refusal, returning it for its code and message.

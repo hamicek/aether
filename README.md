@@ -244,7 +244,8 @@ except aether.CallError as err:               # a RuntimeError, str(err) == "<ty
 ```
 
 A refusal is a normal outcome, not a fault: the state is left as it was, it is **not** the thrall's
-`last error` in `aether describe`, and it counts as a processed message. It is also never forwarded
+`last error` in `aether describe`, and it counts as a processed message. It always carries a code
+(an empty one becomes `refused`), so an empty `RefusalCode` reliably means "not a refusal". It is also never forwarded
 implicitly - a handler that returns a downstream call's error produces a plain `handler_error` even
 if the downstream thrall refused; to pass a refusal on, refuse again with its code (`DESIGN.md` §8).
 
@@ -423,8 +424,8 @@ route."POST /decrement" = { thrall = "counter", op = "dec", kind = "cast" }
 ```
 
 A `call` route returns the thrall's reply as the body (200); a `cast` route returns 202. Errors map
-deterministically: application error -> 502, no responders -> 503, reply timeout -> 504, unknown
-route -> 404. Each route's `thrall` is checked at manifest load against the declared thralls, so a
+deterministically: application error -> 502 (a refusal included), no responders -> 503, reply
+timeout -> 504 (also when the thrall dropped the call past its deadline), unknown route -> 404. Each route's `thrall` is checked at manifest load against the declared thralls, so a
 typo (`thrall = "countr"`) fails `aether up` loudly instead of surfacing as a runtime timeout. A real
 port is held by one active instance (singleton); aether does no load balancing - put a reverse proxy
 in front to scale a single port. Runnable demo: `examples/webserver/`.

@@ -50,6 +50,9 @@ export function asEscalate(err: unknown): EscalateError | null {
   return err instanceof EscalateError ? err : null;
 }
 
+// UNSPECIFIED_REFUSAL is the code of a refusal made without one (mirrors thrall.UnspecifiedRefusal).
+export const UNSPECIFIED_REFUSAL = "refused";
+
 // RefuseError is the typed "no" of a handler: the request is understood and the thrall is healthy,
 // but a rule of its domain forbids what was asked (not enough funds, the day is already closed).
 // A handler throws it via refuse(). It is the third outcome beside a plain error ("this request
@@ -67,14 +70,19 @@ export class RefuseError extends Error {
   readonly code: string;
   readonly reason: string;
   constructor(code: string, reason: string) {
-    super(`refused (${code}): ${reason}`);
+    // A refusal always carries a code - that is what tells a caller "the thrall said no" from "the
+    // call failed" (refusalCode returns "" only for the latter) - so an empty one is replaced.
+    const named = code || UNSPECIFIED_REFUSAL;
+    super(`refused (${named}): ${reason}`);
     this.name = "RefuseError";
-    this.code = code;
+    this.code = named;
     this.reason = reason;
   }
 }
 
-// refuse declines the request being handled.
+
+// refuse declines the request being handled. code should name the rule; an empty code becomes
+// UNSPECIFIED_REFUSAL.
 //
 // A refusal is never forwarded implicitly: a handler that calls another thrall and lets that
 // call's CallError propagate gets a plain handler failure even when the other thrall refused,
@@ -180,7 +188,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     trace: "",
     msgId: "",
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
-    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
+    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: opts.trace || ctx.trace }),
     cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
     castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
