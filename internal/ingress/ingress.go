@@ -31,7 +31,10 @@ type Options struct {
 	MaxBodyBytes int64
 	// WriteTimeout bounds writing a response once the ingress has it.
 	WriteTimeout time.Duration
-	Log          *slog.Logger
+	// TrustedProxies are the peers whose forwarding headers are believed when establishing the
+	// client address and scheme of a request. Nil trusts nobody; Run defaults to loopback.
+	TrustedProxies TrustedProxies
+	Log            *slog.Logger
 }
 
 // handler is the ingress HTTP handler: resolve Host -> thrall, forward as an http_request call, and
@@ -42,6 +45,7 @@ type handler struct {
 	timeout      time.Duration
 	maxBody      int64
 	writeTimeout time.Duration
+	trusted      TrustedProxies
 	log          *slog.Logger
 }
 
@@ -54,6 +58,7 @@ func NewHandler(nc *nats.Conn, routes RouteProvider, opts Options) http.Handler 
 		timeout:      opts.Timeout,
 		maxBody:      opts.MaxBodyBytes,
 		writeTimeout: opts.WriteTimeout,
+		trusted:      opts.TrustedProxies,
 		log:          opts.Log,
 	}
 	if h.timeout <= 0 {
@@ -107,7 +112,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, trace, target, *failed)
 		return
 	}
-	req := requestToWire(r, body)
+	req := requestToWire(r, body, h.trusted.facts(r))
 
 	// The call goes through the SDK client, so it is the same envelope a thrall's own call
 	// produces: it carries the trace and the instant the ingress stops waiting, and a thrall that
@@ -196,16 +201,19 @@ func failureForCall(err error) failure {
 // of an HTTP response. Informational (1xx) statuses are not final, 0 means the reply carried none.
 func forwardableStatus(status int) bool { return status >= 200 && status <= 599 }
 
-// requestToWire translates an inbound *http.Request and its already read body into the http_request
-// payload: method, path, raw query, headers and body. http.Header is already a map[string][]string,
-// so repeated headers are preserved.
-func requestToWire(r *http.Request, body []byte) wire.HTTPRequest {
+// requestToWire translates an inbound *http.Request, its already read body and the facts the ingress
+// established about it into the http_request payload. Repeated headers are preserved; the
+// forwarding headers are replaced by the ingress's own (see forwardedHeaders).
+func requestToWire(r *http.Request, body []byte, facts requestFacts) wire.HTTPRequest {
 	return wire.HTTPRequest{
-		Method:  r.Method,
-		Path:    r.URL.Path,
-		Query:   r.URL.RawQuery,
-		Headers: map[string][]string(r.Header),
-		Body:    body,
+		Method:   r.Method,
+		Path:     r.URL.Path,
+		Query:    r.URL.RawQuery,
+		Host:     facts.host,
+		Scheme:   facts.scheme,
+		ClientIP: facts.clientIP,
+		Headers:  forwardedHeaders(r.Header, facts),
+		Body:     body,
 	}
 }
 

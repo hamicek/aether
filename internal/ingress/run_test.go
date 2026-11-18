@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -73,6 +74,35 @@ func TestParseFlagsRegistryStaleCanBeSwitchedOff(t *testing.T) {
 	}
 	if cfg.RegistryStale != 0 || cfg.RegistryCache != 16 {
 		t.Errorf("parsed to stale %s, cache %d", cfg.RegistryStale, cfg.RegistryCache)
+	}
+}
+
+func TestParseFlagsTrustedProxies(t *testing.T) {
+	loopback := netip.MustParseAddr("127.0.0.1")
+	bridge := netip.MustParseAddr("172.17.0.1")
+
+	cfg, err := ParseFlags(nil, io.Discard)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cfg.TrustedProxies.contains(loopback) || !cfg.TrustedProxies.contains(netip.MustParseAddr("::1")) || cfg.TrustedProxies.contains(bridge) {
+		t.Errorf("default trust = %v, want loopback only", cfg.TrustedProxies)
+	}
+
+	cfg, err = ParseFlags([]string{"-trusted-proxies", "172.17.0.0/16, 10.1.2.3"}, io.Discard)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cfg.TrustedProxies.contains(bridge) || !cfg.TrustedProxies.contains(netip.MustParseAddr("10.1.2.3")) || cfg.TrustedProxies.contains(loopback) {
+		t.Errorf("explicit trust = %v, want exactly what was listed", cfg.TrustedProxies)
+	}
+
+	cfg, err = ParseFlags([]string{"-trusted-proxies", ""}, io.Discard)
+	if err != nil || len(cfg.TrustedProxies) != 0 {
+		t.Errorf("an empty list must trust nobody: %v, %v", cfg.TrustedProxies, err)
+	}
+	if _, err := ParseFlags([]string{"-trusted-proxies", "caddy.internal"}, io.Discard); err == nil {
+		t.Error("a trusted proxy that is not an address must be rejected")
 	}
 }
 

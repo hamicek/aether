@@ -80,9 +80,12 @@ func TestRequestToWire(t *testing.T) {
 	r.Header.Add("X-Tag", "a")
 	r.Header.Add("X-Tag", "b")
 
-	req := requestToWire(r, body)
+	req := requestToWire(r, body, requestFacts{host: "shop.example", scheme: "https", clientIP: "203.0.113.7"})
 	if req.Method != "POST" || req.Path != "/upload" || req.Query != "q=cats&q=dogs" {
 		t.Errorf("method/path/query wrong: %+v", req)
+	}
+	if req.Host != "shop.example" || req.Scheme != "https" || req.ClientIP != "203.0.113.7" {
+		t.Errorf("request facts wrong: %+v", req)
 	}
 	if got := req.Headers["X-Tag"]; len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("repeated header lost: %v", got)

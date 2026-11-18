@@ -269,8 +269,8 @@ func (r *RegistryRoutes) noteOutage(now time.Time, err error) {
 		return
 	}
 	r.downSince = now
-	r.log.Error("ingress: site-registry unreachable, serving last known routes",
-		slog.Duration("stale_for", r.staleFor), slog.Any("err", err))
+	r.log.Error("ingress: site-registry unreachable",
+		slog.Duration("serving_last_known_routes_for", r.staleFor), slog.Any("err", err))
 }
 
 // noteRecovery records a successful resolve, logging the end of an outage. The caller holds mu.

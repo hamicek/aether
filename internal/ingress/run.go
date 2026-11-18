@@ -41,6 +41,8 @@ type Config struct {
 	MaxConns          int
 	MaxHeaderBytes    int
 	MaxBodyBytes      int64
+
+	TrustedProxies TrustedProxies
 }
 
 // ParseFlags reads the ingress command line. Usage and parse errors are written to out; the
@@ -68,10 +70,15 @@ func ParseFlags(args []string, out io.Writer) (Config, error) {
 	fs.IntVar(&cfg.MaxConns, "max-conns", DefaultMaxConns, "connections served at once; further ones wait to be accepted")
 	fs.IntVar(&cfg.MaxHeaderBytes, "max-header-bytes", DefaultMaxHeaderBytes, "largest request line plus headers accepted (then 431)")
 	fs.Int64Var(&cfg.MaxBodyBytes, "max-body-bytes", 0, "largest request body accepted (then 413); 0 = as much as one bus message carries, a higher value is lowered to that")
+	trustedProxies := fs.String("trusted-proxies", DefaultTrustedProxies, "comma-separated IPs/CIDRs of the reverse proxies whose X-Forwarded-For and X-Forwarded-Proto are believed; empty = trust none")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
-	if err := cfg.validate(); err != nil {
+	err := cfg.validate()
+	if err == nil {
+		cfg.TrustedProxies, err = ParseTrustedProxies(*trustedProxies)
+	}
+	if err != nil {
 		fmt.Fprintln(out, err)
 		return Config{}, err
 	}
@@ -141,7 +148,8 @@ func Run(args []string) error {
 				return err
 			}
 			handler := NewHandler(ctx.NATS, routes, Options{
-				App: ctx.App, Timeout: cfg.Timeout, MaxBodyBytes: maxBody, WriteTimeout: cfg.WriteTimeout, Log: ctx.Log,
+				App: ctx.App, Timeout: cfg.Timeout, MaxBodyBytes: maxBody, WriteTimeout: cfg.WriteTimeout,
+				TrustedProxies: cfg.TrustedProxies, Log: ctx.Log,
 			})
 			srv = NewServer(handler, ServerOptions{
 				ReadHeaderTimeout: cfg.ReadHeaderTimeout, ReadTimeout: cfg.ReadTimeout, IdleTimeout: cfg.IdleTimeout,
@@ -152,7 +160,8 @@ func Run(args []string) error {
 			}
 			ctx.Log.Info("http ingress listening", "addr", cfg.Addr, "version", Version,
 				"timeout", cfg.Timeout, "max_body_bytes", maxBody, "max_conns", cfg.MaxConns,
-				"read_timeout", cfg.ReadTimeout, "write_timeout", cfg.WriteTimeout, "idle_timeout", cfg.IdleTimeout)
+				"read_timeout", cfg.ReadTimeout, "write_timeout", cfg.WriteTimeout, "idle_timeout", cfg.IdleTimeout,
+				"trusted_proxies", fmt.Sprint(cfg.TrustedProxies))
 			return nil
 		},
 		// Run owns the socket until Stop (a drain) shuts the server down.
