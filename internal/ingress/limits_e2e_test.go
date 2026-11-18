@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -67,6 +68,43 @@ func TestOversizedRequestIs413AndNeverForwarded(t *testing.T) {
 
 	if got := handled.Load(); got != 1 {
 		t.Errorf("the thrall handled %d requests, want only the one that fit", got)
+	}
+}
+
+// TestOversizedResponseIs502WithTheCauseLogged: a real web thrall produces a response that does not
+// fit one bus message. The browser gets a 502 at once (not a 504 after the timeout) and the
+// ingress's log line says it was the size of the response.
+func TestOversizedResponseIs502WithTheCauseLogged(t *testing.T) {
+	srv := embeddedNATS(t)
+	nc := connect(t, srv)
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		size := 1024
+		if req.Path == "/huge" {
+			size = int(nc.MaxPayload())
+		}
+		return thrall.HTTPResponse{Status: http.StatusOK, Body: make([]byte, size)}, s, nil
+	})
+	var logged lockedBuffer
+	url := front(t, nc, ingress.StaticRoutes{"blog.test": "blog"}, ingress.Options{
+		Timeout: 5 * time.Second, Log: slog.New(slog.NewTextHandler(&logged, nil)),
+	})
+
+	if res := get(t, url+"/small", "blog.test"); res.status != http.StatusOK || len(res.body) != 1024 {
+		t.Fatalf("a response that fits: status %d, %d bytes", res.status, len(res.body))
+	}
+	started := time.Now()
+	res := get(t, url+"/huge", "blog.test")
+	if res.status != http.StatusBadGateway {
+		t.Fatalf("an oversized response: status = %d, want 502", res.status)
+	}
+	if waited := time.Since(started); waited > 4*time.Second {
+		t.Errorf("the 502 took %v: it must come from the thrall's answer, not from the timeout", waited)
+	}
+	line := logged.String()
+	for _, want := range []string{"cause=response_too_large", "status=502", "does not fit one bus message", "trace=" + res.header.Get(ingress.TraceHeader)} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the log line for the 502 lacks %q:\n%s", want, line)
+		}
 	}
 }
 

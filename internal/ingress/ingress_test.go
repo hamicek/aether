@@ -128,6 +128,8 @@ func TestFailureForCall(t *testing.T) {
 		{"wrapped deadline drop", fmt.Errorf("call: %w", &thrall.CallError{Type: thrall.ErrDeadlineExceeded}),
 			http.StatusGatewayTimeout, "thrall_timeout"},
 		{"handler error", &thrall.CallError{Type: thrall.ErrHandler, Message: "boom"}, http.StatusBadGateway, "thrall_error"},
+		{"response too large for the bus", &thrall.CallError{Type: thrall.ErrReplyTooLarge}, http.StatusBadGateway, "response_too_large"},
+		{"request too large for the bus", fmt.Errorf("call: %w", nats.ErrMaxPayload), http.StatusRequestEntityTooLarge, "request_too_large"},
 		{"refusal", &thrall.CallError{Type: thrall.ErrRefused, Code: "nope"}, http.StatusBadGateway, "thrall_error"},
 		{"undecodable reply", errors.New("decode reply"), http.StatusBadGateway, "invalid_reply"},
 	}

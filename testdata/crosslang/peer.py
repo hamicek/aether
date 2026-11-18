@@ -43,6 +43,10 @@ def writes(_payload, state, _ctx):
     return state["writes"], state
 
 
+def bulk(payload, state, _ctx):
+    return "x" * payload["bytes"], state
+
+
 async def relay(payload, state, ctx):
     try:
         reply = await ctx.call(payload["target"], payload["op"], payload.get("payload"),
@@ -60,5 +64,5 @@ if __name__ == "__main__":
         name="",  # taken from AETHER_NAME
         init=init,
         handle_call={"balance": balance, "withdraw": withdraw, "broken": broken, "hold": hold,
-                     "write": write, "writes": writes, "relay": relay},
+                     "write": write, "writes": writes, "bulk": bulk, "relay": relay},
     ))

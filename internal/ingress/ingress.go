@@ -150,6 +150,9 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, trace, target str
 //   - nobody subscribed (the thrall is not running) -> 503;
 //   - no reply within the timeout -> 504, and so is a call the thrall dropped because its deadline
 //     had passed: that is the same timeout seen from the thrall's side;
+//   - a response too large for one bus message -> 502. The thrall produced it but could not send
+//     it, and says so instead (a thrall on an SDK older than that answer drops the reply, and the
+//     request ends as the 504 above);
 //   - any other error reply -> 502. A refusal included: a web thrall answers its own "no" as an
 //     HTTP response, so an error reply here is the thrall failing, whatever its type.
 //   - anything else (an undecodable reply) -> 502.
@@ -167,6 +170,8 @@ func failureForCall(err error) failure {
 		return failure{status: http.StatusGatewayTimeout, cause: "thrall_timeout", err: err}
 	case errors.As(err, &ce) && ce.Type == thrall.ErrDeadlineExceeded:
 		return failure{status: http.StatusGatewayTimeout, cause: "thrall_timeout", err: err}
+	case errors.As(err, &ce) && ce.Type == thrall.ErrReplyTooLarge:
+		return failure{status: http.StatusBadGateway, cause: "response_too_large", err: err}
 	case errors.As(err, &ce):
 		return failure{status: http.StatusBadGateway, cause: "thrall_error", err: err}
 	default:

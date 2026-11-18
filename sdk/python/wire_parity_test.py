@@ -58,6 +58,10 @@ CASES = {
                                 "error": {"type": "deadline_exceeded",
                                           "message": "call expired 1200 ms before it could be handled",
                                           "retryable": True}},
+    "reply_too_large": {"v": 1, "id": "c-11", "kind": "reply", "status": "error",
+                        "error": {"type": "reply_too_large",
+                                  "message": "reply of 1500000 bytes does not fit one bus message (at most 1048576 bytes)",
+                                  "retryable": False}},
     "hb_expired": {"v": 1, "kind": "hb", "to": "account",
                    "payload": {"mailbox_depth": 1, "mailbox_latency_ms": 0.5, "processed_total": 7,
                                "expired_total": 2},
@@ -85,6 +89,7 @@ class WireParity(unittest.TestCase):
         refusal = aether.Refuse("insufficient_funds", "the balance is 3, the withdrawal 5")
         self.assertEqual(aether._refused_reply(req, refusal), json.loads(golden("reply_refused")))
         self.assertEqual(aether._expired_reply(req, 1200), json.loads(golden("reply_deadline_exceeded")))
+        self.assertEqual(aether._too_large_reply(req, 1500000, 1048576), json.loads(golden("reply_too_large")))
 
     def test_heartbeat_metrics_payload_matches_the_contract(self):
         # A thrall that never dropped a call reports the payload it always did (no expired_total

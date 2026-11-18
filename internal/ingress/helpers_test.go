@@ -1,6 +1,7 @@
 package ingress_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -159,6 +160,24 @@ func serve(t *testing.T, handler http.Handler, opts ingress.ServerOptions, maxCo
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return ln.Addr().String()
+}
+
+// lockedBuffer collects log output written from the server's goroutines while a test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // response is what a test needs from an HTTP exchange.

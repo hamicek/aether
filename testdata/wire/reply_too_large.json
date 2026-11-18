@@ -1,0 +1,1 @@
+{"v":1,"id":"c-11","kind":"reply","status":"error","error":{"type":"reply_too_large","message":"reply of 1500000 bytes does not fit one bus message (at most 1048576 bytes)","retryable":false}}

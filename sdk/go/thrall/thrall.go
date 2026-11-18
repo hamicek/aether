@@ -15,6 +15,7 @@ package thrall
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -241,7 +242,18 @@ func Start[S any](def Def[S]) error {
 		if json.Unmarshal(msg.Data, &e) != nil {
 			return
 		}
-		respond := func(reply wire.Envelope) { _ = msg.Respond(mustJSON(reply)) }
+		// A reply larger than one bus message cannot be sent at all. Dropping it would leave the
+		// caller waiting out its timeout with nothing to go on, so it is told what happened instead.
+		respond := func(reply wire.Envelope) {
+			data := mustJSON(reply)
+			if err := msg.Respond(data); errors.Is(err, nats.ErrMaxPayload) {
+				tooLarge := tooLargeReply(e, len(data), nc.MaxPayload())
+				lastErr.set(wire.ErrReplyTooLarge + ": " + tooLarge.Error.Message)
+				log.Error("reply too large for the bus", slog.String("op", e.Op), slog.String("trace", e.Trace),
+					slog.Int("bytes", len(data)), slog.Int64("max_payload", nc.MaxPayload()))
+				_ = msg.Respond(mustJSON(tooLarge))
+			}
+		}
 		start := stats.begin()
 		mu.Lock()
 		defer mu.Unlock()

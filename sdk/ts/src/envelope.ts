@@ -54,6 +54,9 @@ export const ErrorType = {
   // The call's deadline had passed before the thrall could start handling it, so it was dropped
   // unexecuted. Retryable, because nothing happened.
   deadlineExceeded: "deadline_exceeded",
+  // The handler ran, but its reply is larger than one bus message carries and could not be sent;
+  // the caller gets this instead of waiting out its timeout. Not retryable.
+  replyTooLarge: "reply_too_large",
 } as const;
 
 // ThrallDescribe = a thrall's self-report of its own contract and most recent failure, carried in

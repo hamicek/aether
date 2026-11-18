@@ -1,4 +1,4 @@
-import { AckPolicy, DeliverPolicy, nanos, type NatsConnection } from "nats";
+import { AckPolicy, DeliverPolicy, ErrorCode, nanos, type NatsConnection, type NatsError } from "nats";
 import { decode, encode, ErrorType, type Envelope, type HeartbeatMetrics, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
@@ -252,15 +252,30 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   // mailbox lock.
   const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
     const start = stats.begin();
+    // A reply larger than one bus message cannot be sent at all. Dropping it would leave the
+    // caller waiting out its timeout with nothing to go on, so it is told what happened instead.
+    const send = (reply: Envelope): void => {
+      const data = encode(reply);
+      try {
+        respond(data);
+      } catch (err) {
+        if ((err as NatsError)?.code !== ErrorCode.MaxPayloadExceeded) throw err;
+        const maxPayload = nc.info?.max_payload ?? 0;
+        const tooLarge = tooLargeReply(e, data.length, maxPayload);
+        setLastError(`${ErrorType.replyTooLarge}: ${tooLarge.error!.message}`);
+        log.error("reply too large for the bus", { op: e.op, trace: e.trace, bytes: data.length, max_payload: maxPayload });
+        respond(encode(tooLarge));
+      }
+    };
     return serialize(async () => {
-      if (gate.drop(e, (reply) => respond(encode(reply)))) return;
+      if (gate.drop(e, send)) return;
       ctx.trace = orNewTrace(e.trace);
       ctx.msgId = e.id ?? "";
       log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCall?.[e.op ?? ""];
         if (!handler) {
-          respond(encode(errReply(e, ErrorType.unknownOp, `unknown call op: ${e.op}`)));
+          send(errReply(e, ErrorType.unknownOp, `unknown call op: ${e.op}`));
           return;
         }
         const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
@@ -268,7 +283,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           const [cached, seen] = dedup!.get(dkey);
           if (seen) {
             // A duplicate call: return the first reply instead of re-running the handler.
-            respond(encode(okReply(e, cached)));
+            send(okReply(e, cached));
             return;
           }
         }
@@ -276,14 +291,14 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           const [reply, next] = await handler(e.payload, state, ctx);
           state = next;
           if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
-          respond(encode(okReply(e, reply)));
+          send(okReply(e, reply));
         } catch (err) {
           const esc = asEscalate(err);
           if (esc) {
             // Reply the caller before we crash, so it learns of the restart instead of
             // hanging until timeout; the dying breath then flushes both the reply and the final
             // heartbeat (carrying the reason) before the process exits.
-            respond(encode(errReply(e, ErrorType.escalated, esc.reason)));
+            send(errReply(e, ErrorType.escalated, esc.reason));
             setLastError(`escalated: ${esc.reason}`);
             await dyingBreath();
             log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
@@ -295,11 +310,11 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
             // A refusal is the domain saying no, not the thrall failing: the caller gets the
             // code, the state stays as it was, and nothing is recorded as the last error.
             log.debug("call refused", { op: e.op, code: refusal.code, trace: ctx.trace });
-            respond(encode(refusedReply(e, refusal)));
+            send(refusedReply(e, refusal));
             return;
           }
           setLastError(`handler_error: ${String(err)}`);
-          respond(encode(errReply(e, ErrorType.handler, String(err))));
+          send(errReply(e, ErrorType.handler, String(err)));
         }
       } finally {
         stats.end(start);
@@ -522,6 +537,12 @@ export class DeadlineGate {
 
 export function okReply(req: Envelope, payload: unknown): Envelope {
   return { v: 1, id: req.id, kind: "reply", status: "ok", payload };
+}
+
+// tooLargeReply builds the reply sent in place of one that did not fit a bus message. The text is
+// part of the wire contract's golden fixtures, so every SDK words it the same way.
+export function tooLargeReply(req: Envelope, size: number, maxPayload: number): Envelope {
+  return errReply(req, ErrorType.replyTooLarge, `reply of ${size} bytes does not fit one bus message (at most ${maxPayload} bytes)`);
 }
 
 export function errReply(req: Envelope, type: string, message: string): Envelope {

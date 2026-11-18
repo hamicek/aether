@@ -191,3 +191,21 @@ test("an old caller reads a refusal as the error string it always got", async ()
   const text = `${reply.error?.type}: ${reply.error?.message}`;
   expect(text).toMatch(/^refused: the balance is \d+, the withdrawal 50$/);
 });
+
+test("a reply too large for the bus is answered as reply_too_large instead of dropped", async () => {
+  if (!hasServer) return;
+  const account = new Client(nc!, "ae");
+  const maxPayload = nc!.info!.max_payload;
+  expect(await account.call<string>("account", "bulk", { bytes: 1024 })).toHaveLength(1024);
+
+  // The caller is told at once what happened - well inside its timeout, not by it running out.
+  const started = Date.now();
+  const failed = (await failure(account.call("account", "bulk", { bytes: maxPayload + 1 }, { timeoutMs: 5000 }))) as CallError;
+  expect(failed).toBeInstanceOf(CallError);
+  expect(failed.type).toBe("reply_too_large");
+  expect(failed.retryable).toBe(false);
+  expect(failed.reason).toMatch(new RegExp(`^reply of \\d+ bytes does not fit one bus message \\(at most ${maxPayload} bytes\\)$`));
+  expect(Date.now() - started).toBeLessThan(4000);
+
+  expect(await account.call<number>("account", "balance")).toBeGreaterThanOrEqual(0); // the thrall carries on
+});
