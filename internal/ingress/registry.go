@@ -212,6 +212,11 @@ func natsResolver(nc *nats.Conn, subject string, s scope, timeout time.Duration)
 	}
 }
 
+func mustMarshal(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
 // wireErrorMessage renders a reply's structured error for a log/error string, tolerating a nil error
 // field (a reply marked status=error but carrying no detail).
 func wireErrorMessage(e *wire.WireError) string {

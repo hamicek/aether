@@ -1,17 +1,13 @@
 package ingress_test
 
 import (
-	"io"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	natsserver "github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
-
 	"github.com/hamicek/aether/internal/ingress"
+	"github.com/hamicek/aether/internal/wire"
 	"github.com/hamicek/aether/sdk/go/thrall"
 )
 
@@ -20,94 +16,155 @@ import (
 // thrall's HTML reply comes back out as the HTTP response. An unknown host is denied (default-deny).
 func TestEndToEnd(t *testing.T) {
 	srv := embeddedNATS(t)
-
-	// A real web thrall, started through the SDK helper, serving a tiny HTML page.
 	const html = "<h1>hello from the blog</h1>"
-	t.Setenv("AETHER_NATS_URL", srv.ClientURL())
-	t.Setenv("AETHER_APP", "web")
-	t.Setenv("AETHER_NAME", "blog")
-	webErr := make(chan error, 1)
-	go func() {
-		webErr <- thrall.StartWeb(thrall.WebDef[struct{}]{
-			Handle: func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
-				return thrall.HTMLResponse(http.StatusOK, html+" path="+req.Path), s, nil
-			},
-		})
-	}()
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		return thrall.HTMLResponse(http.StatusOK, html+" path="+req.Path), s, nil
+	})
+	url := front(t, connect(t, srv), ingress.StaticRoutes{"blog.test": "blog"}, ingress.Options{Timeout: 2 * time.Second})
 
-	// The ingress connects on its own and routes blog.test -> the blog thrall.
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("ingress connect: %v", err)
+	res := get(t, url+"/hello", "blog.test")
+	if res.status != http.StatusOK {
+		t.Fatalf("allowed host: status = %d, body = %q", res.status, res.body)
 	}
-	t.Cleanup(nc.Close)
-	handler := ingress.NewHandler(nc, ingress.StaticRoutes{"blog.test": "blog"},
-		ingress.Options{App: "web", Timeout: 2 * time.Second})
-	front := httptest.NewServer(handler)
-	t.Cleanup(front.Close)
-
-	// Wait for the web thrall to subscribe: retry the request until it is no longer "no responders".
-	body, status := getWithHost(t, front.URL+"/hello", "blog.test")
-	deadline := time.Now().Add(5 * time.Second)
-	for status == http.StatusServiceUnavailable && time.Now().Before(deadline) {
-		select {
-		case err := <-webErr:
-			t.Fatalf("web thrall exited early: %v", err)
-		default:
-		}
-		time.Sleep(50 * time.Millisecond)
-		body, status = getWithHost(t, front.URL+"/hello", "blog.test")
-	}
-
-	if status != http.StatusOK {
-		t.Fatalf("allowed host: status = %d, body = %q", status, body)
-	}
-	if body != html+" path=/hello" {
-		t.Errorf("allowed host: body = %q, want the thrall's HTML", body)
+	if res.body != html+" path=/hello" {
+		t.Errorf("allowed host: body = %q, want the thrall's HTML", res.body)
 	}
 
 	// Default-deny: a host with no route never reaches the ether.
-	if _, denied := getWithHost(t, front.URL+"/", "evil.test"); denied != http.StatusNotFound {
-		t.Errorf("unknown host: status = %d, want 404", denied)
+	if denied := get(t, url+"/", "evil.test"); denied.status != http.StatusNotFound {
+		t.Errorf("unknown host: status = %d, want 404", denied.status)
 	}
 }
 
-func getWithHost(t *testing.T, url, host string) (string, int) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatal(err)
+// TestCallCarriesTraceAndDeadline proves the ingress calls the web thrall the way the SDK client
+// does: the handler sees the request's trace as ctx.Trace (so its own calls continue it), the same
+// trace is handed back to the browser, and the envelope states when the ingress stops waiting.
+func TestCallCarriesTraceAndDeadline(t *testing.T) {
+	srv := embeddedNATS(t)
+	nc := connect(t, srv)
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		return thrall.TextResponse(http.StatusOK, ctx.Trace), s, nil
+	})
+	const timeout = 2 * time.Second
+	stub := startStubThrall(t, nc, "probe", func(req wire.Envelope) wire.Envelope {
+		return thrall.OKReply(req, thrall.TextResponse(http.StatusOK, "ok"))
+	})
+	url := front(t, nc, ingress.StaticRoutes{"blog.test": "blog", "probe.test": "probe"}, ingress.Options{Timeout: timeout})
+
+	res := get(t, url+"/", "blog.test")
+	trace := res.header.Get(ingress.TraceHeader)
+	if res.status != http.StatusOK || trace == "" {
+		t.Fatalf("status = %d, trace header = %q; want 200 and a trace", res.status, trace)
 	}
-	req.Host = host
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request to %s (Host %s): %v", url, host, err)
+	if res.body != trace {
+		t.Errorf("the handler saw trace %q, the browser was told %q", res.body, trace)
 	}
-	defer res.Body.Close()
-	b, _ := io.ReadAll(res.Body)
-	return string(b), res.StatusCode
+	if again := get(t, url+"/", "blog.test"); again.header.Get(ingress.TraceHeader) == trace {
+		t.Error("two requests must not share a trace")
+	}
+
+	before := time.Now()
+	probed := get(t, url+"/", "probe.test")
+	after := time.Now()
+	envs := stub.envelopes()
+	if len(envs) != 1 {
+		t.Fatalf("the stub saw %d envelopes, want 1", len(envs))
+	}
+	env := envs[0]
+	if env.Kind != wire.KindCall || env.Op != wire.OpHTTPRequest || env.To != "probe" {
+		t.Errorf("envelope kind/op/to = %q/%q/%q", env.Kind, env.Op, env.To)
+	}
+	if env.Trace == "" || env.Trace != probed.header.Get(ingress.TraceHeader) {
+		t.Errorf("envelope trace %q, response header %q", env.Trace, probed.header.Get(ingress.TraceHeader))
+	}
+	earliest, latest := before.Add(timeout).UnixMilli(), after.Add(timeout).UnixMilli()
+	if env.Deadline < earliest || env.Deadline > latest {
+		t.Errorf("envelope deadline %d is not now + the ingress timeout (%d..%d)", env.Deadline, earliest, latest)
+	}
 }
 
-func embeddedNATS(t *testing.T) *natsserver.Server {
-	t.Helper()
-	srv, err := natsserver.NewServer(&natsserver.Options{
-		Host:      "127.0.0.1",
-		Port:      -1,
-		JetStream: true,
-		StoreDir:  filepath.Join(t.TempDir(), "js"),
-		NoSigs:    true,
+// TestSlowThrallIs504AndQueuedCallIsNotExecuted stages the outage the deadline exists for: a web
+// thrall stuck on one request while another queues behind it. Both browsers get 504 when the
+// ingress stops waiting - and the queued request, which the thrall only reaches after its caller
+// has gone, is dropped instead of being executed for nobody.
+func TestSlowThrallIs504AndQueuedCallIsNotExecuted(t *testing.T) {
+	srv := embeddedNATS(t)
+	var handled atomic.Int32
+	release := make(chan struct{})
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		handled.Add(1)
+		if req.Path == "/slow" {
+			<-release
+		}
+		return thrall.TextResponse(http.StatusOK, "done"), s, nil
 	})
-	if err != nil {
-		t.Fatalf("new server: %v", err)
+	url := front(t, connect(t, srv), ingress.StaticRoutes{"blog.test": "blog"}, ingress.Options{Timeout: 300 * time.Millisecond})
+
+	statuses := make(chan int, 2)
+	go func() { statuses <- get(t, url+"/slow", "blog.test").status }()
+	// Let the slow request reach the handler first, so the second one queues behind it.
+	for deadline := time.Now().Add(5 * time.Second); handled.Load() == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the slow request never reached the handler")
+		}
 	}
-	go srv.Start()
-	if !srv.ReadyForConnections(5 * time.Second) {
-		srv.Shutdown()
-		t.Fatalf("NATS did not start in time")
+	go func() { statuses <- get(t, url+"/queued", "blog.test").status }()
+	for i := 0; i < 2; i++ {
+		if status := <-statuses; status != http.StatusGatewayTimeout {
+			t.Errorf("request %d: status = %d, want 504", i, status)
+		}
 	}
-	t.Cleanup(func() {
-		srv.Shutdown()
-		srv.WaitForShutdown()
+
+	// Unblock the thrall well after the queued call's deadline (plus the SDK's clock tolerance), then
+	// make it work through its mailbox: a fresh request is answered, the queued one never ran.
+	time.Sleep(wire.DefaultDeadlineSkewMs*time.Millisecond + 100*time.Millisecond)
+	close(release)
+	if res := get(t, url+"/fresh", "blog.test"); res.status != http.StatusOK {
+		t.Fatalf("after the stall: status = %d, want 200", res.status)
+	}
+	if got := handled.Load(); got != 2 {
+		t.Errorf("the handler ran %d times, want 2 (slow + fresh): the queued call must be dropped past its deadline", got)
+	}
+}
+
+// TestErrorRepliesMapToGatewayStatuses covers the replies a call can end with other than a
+// response: a call the thrall dropped past its deadline is a 504 like the ingress's own timeout,
+// a failed handler is a 502, a reply that is not a usable http_response is a 502, and a thrall
+// that is not running is a 503.
+func TestErrorRepliesMapToGatewayStatuses(t *testing.T) {
+	srv := embeddedNATS(t)
+	nc := connect(t, srv)
+	startStubThrall(t, nc, "expired", func(req wire.Envelope) wire.Envelope {
+		return thrall.ErrorReply(req, wire.WireError{Type: wire.ErrDeadlineExceeded, Message: "dropped", Retryable: true})
 	})
-	return srv
+	startStubThrall(t, nc, "broken", func(req wire.Envelope) wire.Envelope {
+		return thrall.ErrorReply(req, wire.WireError{Type: wire.ErrHandler, Message: "boom"})
+	})
+	startStubThrall(t, nc, "statusless", func(req wire.Envelope) wire.Envelope {
+		return thrall.OKReply(req, map[string]any{"headers": map[string][]string{}})
+	})
+	startStubThrall(t, nc, "wildstatus", func(req wire.Envelope) wire.Envelope {
+		return thrall.OKReply(req, wire.HTTPResponse{Status: 42})
+	})
+	routes := ingress.StaticRoutes{
+		"expired.test": "expired", "broken.test": "broken", "statusless.test": "statusless",
+		"wildstatus.test": "wildstatus", "down.test": "nobody",
+	}
+	url := front(t, nc, routes, ingress.Options{Timeout: time.Second})
+
+	for host, want := range map[string]int{
+		"expired.test":    http.StatusGatewayTimeout,
+		"broken.test":     http.StatusBadGateway,
+		"statusless.test": http.StatusBadGateway,
+		"wildstatus.test": http.StatusBadGateway,
+		"down.test":       http.StatusServiceUnavailable,
+	} {
+		res := get(t, url+"/", host)
+		if res.status != want {
+			t.Errorf("%s: status = %d, want %d", host, res.status, want)
+		}
+		if res.header.Get(ingress.TraceHeader) == "" {
+			t.Errorf("%s: an ingress-produced %d must carry the trace header", host, res.status)
+		}
+	}
 }

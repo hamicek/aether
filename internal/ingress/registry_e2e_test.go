@@ -3,7 +3,6 @@ package ingress_test
 import (
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -106,23 +105,10 @@ func TestEndToEndRegistry(t *testing.T) {
 
 	// A real web thrall (the AE-091 helper) serving a tiny HTML page; every admitted host routes to it.
 	const html = "<h1>hello from the web thrall</h1>"
-	t.Setenv("AETHER_NATS_URL", srv.ClientURL())
-	t.Setenv("AETHER_APP", "web")
-	t.Setenv("AETHER_NAME", "blog")
-	webErr := make(chan error, 1)
-	go func() {
-		webErr <- thrall.StartWeb(thrall.WebDef[struct{}]{
-			Handle: func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
-				return thrall.HTMLResponse(http.StatusOK, html+" path="+req.Path), s, nil
-			},
-		})
-	}()
-
-	nc, err := nats.Connect(srv.ClientURL())
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(nc.Close)
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		return thrall.HTMLResponse(http.StatusOK, html+" path="+req.Path), s, nil
+	})
+	nc := connect(t, srv)
 
 	// The stub registry, seeded with one public site and one vpn-only site.
 	const registrySubject = "aether.ae.site-registry.call"
@@ -143,57 +129,43 @@ func TestEndToEndRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new registry provider: %v", err)
 	}
-	handler := ingress.NewHandler(nc, provider, ingress.Options{App: "web", Timeout: 2 * time.Second})
-	front := httptest.NewServer(handler)
-	t.Cleanup(front.Close)
-
-	// Wait for the web thrall to subscribe: retry until it is no longer "no responders".
-	body, status := getWithHost(t, front.URL+"/hello", "blog.test")
-	deadline := time.Now().Add(5 * time.Second)
-	for status == http.StatusServiceUnavailable && time.Now().Before(deadline) {
-		select {
-		case err := <-webErr:
-			t.Fatalf("web thrall exited early: %v", err)
-		default:
-		}
-		time.Sleep(50 * time.Millisecond)
-		body, status = getWithHost(t, front.URL+"/hello", "blog.test")
-	}
+	url := front(t, nc, provider, ingress.Options{Timeout: 2 * time.Second})
 
 	// 1) A seeded public host routes end to end.
-	if status != http.StatusOK {
-		t.Fatalf("seeded host: status = %d, body = %q", status, body)
+	res := get(t, url+"/hello", "blog.test")
+	if res.status != http.StatusOK {
+		t.Fatalf("seeded host: status = %d, body = %q", res.status, res.body)
 	}
-	if body != html+" path=/hello" {
-		t.Errorf("seeded host: body = %q, want the thrall's HTML", body)
+	if res.body != html+" path=/hello" {
+		t.Errorf("seeded host: body = %q, want the thrall's HTML", res.body)
 	}
 
 	// 2) Dynamics: a host that is denied before registration becomes routable after it, with no
 	// ingress restart. Registration must also win over the cached negative, so poll until the short
 	// TTL lets the change through - that proves the route table is live, cache included.
-	if _, denied := getWithHost(t, front.URL+"/", "shop.test"); denied != http.StatusNotFound {
-		t.Fatalf("precondition: shop.test must be unknown before registration, got %d", denied)
+	if denied := get(t, url+"/", "shop.test"); denied.status != http.StatusNotFound {
+		t.Fatalf("precondition: shop.test must be unknown before registration, got %d", denied.status)
 	}
 	reg.register("shop.test", "blog", "public")
-	body, status = getWithHost(t, front.URL+"/catalog", "shop.test")
-	deadline = time.Now().Add(3 * time.Second)
-	for status == http.StatusNotFound && time.Now().Before(deadline) {
+	res = get(t, url+"/catalog", "shop.test")
+	deadline := time.Now().Add(3 * time.Second)
+	for res.status == http.StatusNotFound && time.Now().Before(deadline) {
 		time.Sleep(50 * time.Millisecond)
-		body, status = getWithHost(t, front.URL+"/catalog", "shop.test")
+		res = get(t, url+"/catalog", "shop.test")
 	}
-	if status != http.StatusOK {
-		t.Errorf("newly registered host: status = %d, body = %q, want 200", status, body)
-	} else if body != html+" path=/catalog" {
-		t.Errorf("newly registered host: body = %q, want the thrall's HTML", body)
+	if res.status != http.StatusOK {
+		t.Errorf("newly registered host: status = %d, body = %q, want 200", res.status, res.body)
+	} else if res.body != html+" path=/catalog" {
+		t.Errorf("newly registered host: body = %q, want the thrall's HTML", res.body)
 	}
 
 	// 3) Default-deny: an unknown host never reaches the ether.
-	if _, denied := getWithHost(t, front.URL+"/", "evil.test"); denied != http.StatusNotFound {
-		t.Errorf("unknown host: status = %d, want 404", denied)
+	if denied := get(t, url+"/", "evil.test"); denied.status != http.StatusNotFound {
+		t.Errorf("unknown host: status = %d, want 404", denied.status)
 	}
 
 	// 4) Scope filter: a vpn-only site is not routable from a PUBLIC ingress (the registry denies it).
-	if _, denied := getWithHost(t, front.URL+"/", "vpnonly.test"); denied != http.StatusNotFound {
-		t.Errorf("vpn-only host on public ingress: status = %d, want 404 (scope filter)", denied)
+	if denied := get(t, url+"/", "vpnonly.test"); denied.status != http.StatusNotFound {
+		t.Errorf("vpn-only host on public ingress: status = %d, want 404 (scope filter)", denied.status)
 	}
 }

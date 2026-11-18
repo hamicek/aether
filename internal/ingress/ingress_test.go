@@ -3,6 +3,7 @@ package ingress
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/hamicek/aether/internal/wire"
+	"github.com/hamicek/aether/sdk/go/thrall"
 )
 
 func TestNormalizeHost(t *testing.T) {
@@ -108,9 +110,9 @@ func TestWriteResponse(t *testing.T) {
 	rr := httptest.NewRecorder()
 	writeResponse(rr, wire.HTTPResponse{
 		Status:  201,
-		Headers: map[string][]string{"Set-Cookie": {"a=1", "b=2"}},
+		Headers: map[string][]string{"Set-Cookie": {"a=1", "b=2"}, TraceHeader: {"forged"}},
 		Body:    []byte("done"),
-	})
+	}, "trace-1")
 	res := rr.Result()
 	if res.StatusCode != 201 {
 		t.Errorf("status = %d, want 201", res.StatusCode)
@@ -118,20 +120,47 @@ func TestWriteResponse(t *testing.T) {
 	if cookies := res.Header["Set-Cookie"]; len(cookies) != 2 {
 		t.Errorf("repeated Set-Cookie lost: %v", cookies)
 	}
+	if got := res.Header.Values(TraceHeader); len(got) != 1 || got[0] != "trace-1" {
+		t.Errorf("trace header = %v, want only the ingress's own trace", got)
+	}
 	if rr.Body.String() != "done" {
 		t.Errorf("body = %q", rr.Body.String())
 	}
 }
 
-func TestStatusForError(t *testing.T) {
-	if got := statusForError(nats.ErrNoResponders); got != http.StatusServiceUnavailable {
-		t.Errorf("no responders -> %d, want 503", got)
+func TestFailureForCall(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+		cause  string
+	}{
+		{"no responders", nats.ErrNoResponders, http.StatusServiceUnavailable, "thrall_unavailable"},
+		{"reply timeout", nats.ErrTimeout, http.StatusGatewayTimeout, "thrall_timeout"},
+		{"dropped past its deadline", &thrall.CallError{Type: thrall.ErrDeadlineExceeded, Retryable: true},
+			http.StatusGatewayTimeout, "thrall_timeout"},
+		{"wrapped deadline drop", fmt.Errorf("call: %w", &thrall.CallError{Type: thrall.ErrDeadlineExceeded}),
+			http.StatusGatewayTimeout, "thrall_timeout"},
+		{"handler error", &thrall.CallError{Type: thrall.ErrHandler, Message: "boom"}, http.StatusBadGateway, "thrall_error"},
+		{"refusal", &thrall.CallError{Type: thrall.ErrRefused, Code: "nope"}, http.StatusBadGateway, "thrall_error"},
+		{"undecodable reply", errors.New("decode reply"), http.StatusBadGateway, "invalid_reply"},
 	}
-	if got := statusForError(nats.ErrTimeout); got != http.StatusGatewayTimeout {
-		t.Errorf("timeout -> %d, want 504", got)
+	for _, c := range cases {
+		f := failureForCall(c.err)
+		if f.status != c.status || f.cause != c.cause {
+			t.Errorf("%s: got %d/%s, want %d/%s", c.name, f.status, f.cause, c.status, c.cause)
+		}
+		if f.err == nil {
+			t.Errorf("%s: the failure must keep the error for the log", c.name)
+		}
 	}
-	if got := statusForError(errors.New("other")); got != http.StatusBadGateway {
-		t.Errorf("other -> %d, want 502", got)
+}
+
+func TestForwardableStatus(t *testing.T) {
+	for status, want := range map[int]bool{0: false, 42: false, 100: false, 199: false, 200: true, 404: true, 599: true, 600: false, 1000: false} {
+		if got := forwardableStatus(status); got != want {
+			t.Errorf("forwardableStatus(%d) = %v, want %v", status, got, want)
+		}
 	}
 }
 
@@ -147,5 +176,8 @@ func TestHandlerDefaultDeny(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "Not Found") {
 		t.Errorf("unexpected body: %q", rr.Body.String())
+	}
+	if rr.Result().Header.Get(TraceHeader) == "" {
+		t.Error("a response the ingress produces itself must carry the trace header too")
 	}
 }

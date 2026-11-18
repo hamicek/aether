@@ -187,14 +187,17 @@ func newCastEnvelope(trace, target, op string, payload any, idem string) (wire.E
 		Payload: body, TS: time.Now().UnixMilli()}, nil
 }
 
-// newTrace mints a fresh correlation id for an edge (a message that starts a new operation).
-func newTrace() string { return nats.NewInbox() }
+// NewTrace mints a fresh correlation id. A call or cast without a trace mints one by itself; this
+// is for an edge that starts an operation and has to know its trace before sending anything - to
+// log it, or to hand it back to whoever is waiting outside the ether (an HTTP response header) -
+// and then passes it on with WithTrace.
+func NewTrace() string { return nats.NewInbox() }
 
 // orNewTrace returns the given trace, or a fresh one when it is empty (the message came in
 // without a trace, so this sender is the edge that starts one).
 func orNewTrace(trace string) string {
 	if trace == "" {
-		return newTrace()
+		return NewTrace()
 	}
 	return trace
 }
