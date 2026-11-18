@@ -116,13 +116,19 @@ func payloadFrom(body []byte, query url.Values) json.RawMessage {
 	return json.RawMessage("{}")
 }
 
-// StatusForReply maps a completed call's reply to an HTTP status: an application-level error reply
-// from the thrall becomes 502 (the upstream thrall failed), a successful reply becomes 200.
+// StatusForReply maps a completed call's reply to an HTTP status: a successful reply becomes 200,
+// and an error reply from the thrall becomes 502 (the upstream thrall failed) - except a call the
+// thrall dropped because its deadline had passed, which is the same outcome as the edge's own
+// timeout and so the same 504. A refusal is still a 502 here: turning a thrall's refusal codes into
+// client-facing statuses needs a route-level mapping this edge does not have.
 func StatusForReply(reply wire.Envelope) int {
-	if reply.Status == "error" {
-		return http.StatusBadGateway
+	if reply.Status != wire.StatusError {
+		return http.StatusOK
 	}
-	return http.StatusOK
+	if reply.Error != nil && reply.Error.Type == wire.ErrDeadlineExceeded {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 // StatusForError maps a transport-level failure of a call to an HTTP status: no responders (the

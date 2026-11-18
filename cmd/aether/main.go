@@ -446,7 +446,9 @@ func callCmd(argv []string) {
 	nc := connect(ep)
 	defer nc.Close()
 
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	now := time.Now()
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload,
+		TS: now.UnixMilli(), Deadline: wire.DeadlineAfter(now, *timeout)}
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(wire.Call(ep.App, name), data, *timeout)
 	if err != nil {
@@ -457,11 +459,24 @@ func callCmd(argv []string) {
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
 		log.Fatalf("reply: %v", err)
 	}
-	if reply.Status == "error" {
-		fmt.Fprintf(os.Stderr, "error: %s: %s\n", reply.Error.Type, reply.Error.Message)
+	if reply.Status == wire.StatusError {
+		fmt.Fprintln(os.Stderr, "error: "+describeErrorReply(reply.Error))
 		os.Exit(1)
 	}
 	fmt.Println(string(reply.Payload))
+}
+
+// describeErrorReply renders the error of an error reply for the operator: "<type>: <message>",
+// with the refusal code when the thrall declined the request - "refused (insufficient_funds): ...".
+func describeErrorReply(e *wire.WireError) string {
+	switch {
+	case e == nil:
+		return "error reply without detail"
+	case e.Code != "":
+		return fmt.Sprintf("%s (%s): %s", e.Type, e.Code, e.Message)
+	default:
+		return e.Type + ": " + e.Message
+	}
 }
 
 // credFlags registers the shared --ca/--nkey credential flags on a subcommand's flag set.

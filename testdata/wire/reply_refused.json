@@ -1,0 +1,1 @@
+{"v":1,"id":"c-11","kind":"reply","status":"error","error":{"type":"refused","code":"insufficient_funds","message":"the balance is 3, the withdrawal 5","retryable":false}}

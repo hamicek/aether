@@ -56,7 +56,10 @@ func doCastConfirmed(nc *nats.Conn, app, trace, target, op string, payload any, 
 	if idem != "" {
 		pubOpts = append(pubOpts, nats.MsgId(idem))
 	}
-	e := newCastEnvelope(trace, target, op, payload, idem)
+	e, err := newCastEnvelope(trace, target, op, payload, idem)
+	if err != nil {
+		return fmt.Errorf("confirmed cast to %q: %w", target, err)
+	}
 	if _, err := js.Publish(wire.Cast(app, target), mustJSON(e), pubOpts...); err != nil {
 		return fmt.Errorf("confirmed cast to %q: %w", target, err)
 	}

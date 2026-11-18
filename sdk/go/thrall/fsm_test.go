@@ -49,7 +49,7 @@ func (testError) Error() string { return "boom" }
 func newRunner(def FSM[int]) *fsmRunner[int] {
 	ctx := &Ctx{Log: obs.NewLogger(), Name: def.Name, App: "test"}
 	data, _ := def.Init(ctx)
-	r := &fsmRunner[int]{def: def, ctx: ctx, log: ctx.Log, stats: &mailboxStats{}, cur: def.Initial, data: data}
+	r := newFSMRunner(def, ctx, ctx.Log, data)
 	// Arm the initial state's timeout, as StartFSM does.
 	r.mu.Lock()
 	r.armLocked(def.States[r.cur].Timeout)
@@ -310,7 +310,7 @@ func TestEnterUnknownStateWarns(t *testing.T) {
 	log := obs.NewWithWriter(&buf)
 	ctx := &Ctx{Log: log, Name: def.Name, App: "test"}
 	data, _ := def.Init(ctx)
-	r := &fsmRunner[int]{def: def, ctx: ctx, log: log, stats: &mailboxStats{}, cur: def.Initial, data: data}
+	r := newFSMRunner(def, ctx, log, data)
 
 	cast(r, "leave")
 	if !strings.Contains(buf.String(), "transition to unknown state") {

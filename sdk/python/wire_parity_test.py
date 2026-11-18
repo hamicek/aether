@@ -49,6 +49,19 @@ CASES = {
                     "ts": 1700000000006},
     "ctl": {"v": 1, "kind": "ctl", "op": "drain"},
     "minimal": {"v": 1, "kind": "call"},
+    "call_deadline": {"v": 1, "id": "c-11", "trace": "t-abc", "kind": "call", "to": "account", "op": "withdraw",
+                      "payload": {"amt": 5}, "ts": 1700000000007, "deadline": 1700000005007},
+    "reply_refused": {"v": 1, "id": "c-11", "kind": "reply", "status": "error",
+                      "error": {"type": "refused", "code": "insufficient_funds",
+                                "message": "the balance is 3, the withdrawal 5", "retryable": False}},
+    "reply_deadline_exceeded": {"v": 1, "id": "c-11", "kind": "reply", "status": "error",
+                                "error": {"type": "deadline_exceeded",
+                                          "message": "call expired 1200 ms before it could be handled",
+                                          "retryable": True}},
+    "hb_expired": {"v": 1, "kind": "hb", "to": "account",
+                   "payload": {"mailbox_depth": 1, "mailbox_latency_ms": 0.5, "processed_total": 7,
+                               "expired_total": 2},
+                   "ts": 1700000000008},
 }
 
 
@@ -64,6 +77,25 @@ class WireParity(unittest.TestCase):
             with self.subTest(case=name):
                 decoded = aether._decode(golden(name))
                 self.assertEqual(json.loads(aether._encode(decoded)), json.loads(golden(name)))
+
+    def test_sdk_builds_the_canonical_refusal_and_deadline_replies(self):
+        # The replies the SDK itself builds must be the canonical wire form too: the refusal a
+        # handler's Refuse produces and the answer to a call dropped past its deadline.
+        req = {"v": 1, "id": "c-11", "kind": "call", "op": "withdraw"}
+        refusal = aether.Refuse("insufficient_funds", "the balance is 3, the withdrawal 5")
+        self.assertEqual(aether._refused_reply(req, refusal), json.loads(golden("reply_refused")))
+        self.assertEqual(aether._expired_reply(req, 1200), json.loads(golden("reply_deadline_exceeded")))
+
+    def test_heartbeat_metrics_payload_matches_the_contract(self):
+        # A thrall that never dropped a call reports the payload it always did (no expired_total
+        # key); one that did reports the count.
+        stats = aether._MailboxStats()
+        self.assertEqual(list(stats.snapshot()), ["mailbox_depth", "mailbox_latency_ms", "processed_total"])
+        for _ in range(2):
+            stats.begin()
+            stats.drop()
+        self.assertEqual(stats.snapshot(), {"mailbox_depth": 0, "mailbox_latency_ms": 0.0,
+                                            "processed_total": 0, "expired_total": 2})
 
     def test_describe_dict_omits_empty_fields(self):
         # Empty fields are dropped to match the Go omitempty wire form.

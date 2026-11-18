@@ -6,7 +6,7 @@
 // call/cast - the envelope is unchanged.
 
 import type { NatsConnection } from "nats";
-import { decode, encode, type Envelope, type ThrallDescribe } from "./envelope";
+import { decode, encode, ErrorType, type Envelope, type HeartbeatMetrics, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv } from "./connection";
 import { useConnection, call, cast, castConfirmed, startChild, stopChild, orNewTrace } from "./client";
@@ -20,6 +20,10 @@ import {
   startHeartbeat,
   okReply,
   errReply,
+  asRefuse,
+  refusedReply,
+  MailboxStats,
+  DeadlineGate,
   type Ctx,
 } from "./thrall";
 
@@ -84,7 +88,7 @@ export interface Machine<D> {
   send(ev: Event, req: Envelope | undefined, respond?: (reply: Envelope) => void): Promise<void>;
   state(): string;
   data(): D;
-  snapshot(): { mailbox_depth: number; mailbox_latency_ms: number; processed_total: number };
+  snapshot(): HeartbeatMetrics;
   drain(): Promise<void>; // resolves when the currently-enqueued mailbox jobs have completed
   stop(): void;
 }
@@ -95,16 +99,9 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
   let current = def.initial;
   let data = initialData;
 
-  const stats = { depth: 0, processed: 0, lastMs: 0 };
-  const beginJob = (): number => {
-    stats.depth++;
-    return performance.now();
-  };
-  const endJob = (start: number): void => {
-    stats.lastMs = performance.now() - start;
-    stats.processed++;
-    stats.depth--;
-  };
+  const stats = new MailboxStats();
+  // Turns away calls whose caller has stopped waiting, before they become an event.
+  const gate = new DeadlineGate(stats, log);
 
   let tail: Promise<void> = Promise.resolve();
   const serialize = (job: () => Promise<void>): Promise<void> => {
@@ -180,8 +177,16 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     try {
       out = await r.fn(ev, data, ctx);
     } catch (err) {
+      const refusal = asRefuse(err);
+      if (refusal) {
+        // The reaction declined the event by a domain rule: no transition, no data change, and
+        // (unlike a failure) nothing to report as an error.
+        log.debug("fsm event refused", { state: current, op: ev.op, code: refusal.code });
+        if (respond && req) respond(refusedReply(req, refusal));
+        return;
+      }
       log.error("fsm handler failed", { state: current, op: ev.op, err: String(err) });
-      if (respond && req) respond(errReply(req, "handler_error", String(err)));
+      if (respond && req) respond(errReply(req, ErrorType.handler, String(err)));
       return;
     }
     data = out.data;
@@ -198,13 +203,15 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     respond?: (reply: Envelope) => void,
     gen?: number,
   ): Promise<void> {
-    const start = beginJob();
+    const start = stats.begin();
     return serialize(async () => {
+      // A call whose caller has given up never becomes an event.
+      if (ev.kind === "call" && req && respond && gate.drop(req, respond)) return;
       try {
         if (gen !== undefined && gen !== timeoutGen) return; // superseded timeout
         await dispatch(ev, req, respond);
       } finally {
-        endJob(start);
+        stats.end(start);
       }
     });
   }
@@ -215,7 +222,7 @@ export function createMachine<D>(def: FSMDef<D>, ctx: Ctx, initialData: D, log: 
     send: (ev, req, respond) => send(ev, req, respond),
     state: () => current,
     data: () => data,
-    snapshot: () => ({ mailbox_depth: stats.depth, mailbox_latency_ms: stats.lastMs, processed_total: stats.processed }),
+    snapshot: () => stats.snapshot(),
     drain: () => tail,
     stop: () => {
       timeoutGen++;
@@ -250,8 +257,8 @@ export async function startFSM<D>(def: FSMDef<D>): Promise<void> {
     trace: "",
     msgId: "",
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
-    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
-    cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: opts.trace || ctx.trace }),
+    cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
     castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),

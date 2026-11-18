@@ -86,11 +86,14 @@ def new_logger(**base) -> Logger:
 class _MailboxStats:
     """Thrall self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats):
     depth = messages currently held, last_ms = duration of the most recent handler,
-    processed = cumulative count. begin/end bracket every handled message."""
+    processed = cumulative count of handled messages, expired = cumulative count of calls dropped
+    unexecuted because their deadline had passed. begin/end bracket every handled message; a
+    dropped call ends with drop instead, so it is neither a processed message nor a latency sample."""
 
     def __init__(self):
         self.depth = 0
         self.processed = 0
+        self.expired = 0
         self.last_ms = 0.0
 
     def begin(self) -> float:
@@ -102,12 +105,21 @@ class _MailboxStats:
         self.processed += 1
         self.depth -= 1
 
+    def drop(self) -> None:
+        self.expired += 1
+        self.depth -= 1
+
     def snapshot(self) -> dict:
-        return {
+        """The heartbeat payload. expired_total is omitted while zero (the Go omitempty tag), so a
+        thrall that never dropped a call reports the shape it always did."""
+        m = {
             "mailbox_depth": self.depth,
             "mailbox_latency_ms": self.last_ms,
             "processed_total": self.processed,
         }
+        if self.expired > 0:
+            m["expired_total"] = self.expired
+        return m
 
 
 def _heartbeat_interval() -> float:
@@ -346,6 +358,187 @@ def _cast_envelope(trace: str, target: str, op: str, payload: Any,
     return e
 
 
+# --- error replies: types, refusals, the typed call error (mirrors internal/wire and the Go SDK) ---
+
+# The error types the runtime puts into an error reply's error.type (mirrors the wire.Err*
+# constants). An FSM additionally answers "no_transition" and "guard_rejected".
+ERR_HANDLER = "handler_error"  # the handler raised a plain exception: this request failed
+ERR_UNKNOWN_OP = "unknown_op"  # the thrall has no call handler for the op
+ERR_ESCALATED = "escalated"  # the handler asked to be crashed; the thrall restarts after replying
+ERR_REFUSED = "refused"  # the thrall declined the request by a domain rule; error.code says which
+ERR_DEADLINE_EXCEEDED = "deadline_exceeded"  # the call was dropped unexecuted past its deadline
+
+
+class CallError(RuntimeError):
+    """The error a call raises when the target answered with an error reply. It carries the reply's
+    error as the target sent it, so a caller tells the outcomes apart instead of matching text:
+
+    - type "refused": the thrall declined the request by a rule of its domain. code is the thrall's
+      stable machine code for the rule and message the human sentence. A normal answer, not a fault.
+    - type "handler_error" / "unknown_op" / "escalated": the request failed in the thrall.
+    - type "deadline_exceeded": the thrall got to the call after its deadline and dropped it
+      unexecuted (retryable is True).
+
+    A thrall built with an SDK that predates refusals reports everything as "handler_error" with an
+    empty code. A call that got no reply at all raises the NATS error (timeout, no responders), not
+    a CallError. It subclasses RuntimeError and str() stays "<type>: <message>" - what a failed
+    call has always raised - so existing `except RuntimeError` code keeps working. Mirrors the Go
+    SDK's CallError."""
+
+    def __init__(self, error: Optional[dict]) -> None:
+        if error is None:
+            # A reply with status "error" but no error object is malformed; it still has to
+            # surface as an error, typed as a handler failure since nothing says otherwise.
+            error = {"type": ERR_HANDLER, "message": "error reply without detail"}
+        self.type: str = error.get("type") or ERR_HANDLER
+        self.code: str = error.get("code") or ""
+        self.message: str = error.get("message") or ""
+        self.retryable: bool = bool(error.get("retryable", False))
+        super().__init__(f"{self.type}: {self.message}")
+
+    @property
+    def refused(self) -> bool:
+        """Whether the target declined the request (as opposed to failing at it)."""
+        return self.type == ERR_REFUSED
+
+
+def as_refusal(err: Any) -> Optional[CallError]:
+    """Return the refusal behind err, or None when err is not one - a failure of the thrall, a
+    transport error, or anything else."""
+    return err if isinstance(err, CallError) and err.refused else None
+
+
+def refusal_code(err: Any) -> str:
+    """Return the code of the refusal behind err, or "" when err is not a refusal. It makes mapping
+    refusals to outcomes a plain dict lookup on the code."""
+    refusal = as_refusal(err)
+    return refusal.code if refusal is not None else ""
+
+
+# The code of a refusal made without one (mirrors thrall.UnspecifiedRefusal in the Go SDK).
+UNSPECIFIED_REFUSAL = "refused"
+
+
+class Refuse(Exception):
+    """The typed "no" of a handler: the request is understood and the thrall is healthy, but a rule
+    of its domain forbids what was asked (not enough funds, the day is already closed). A handler
+    raises it. It is the third outcome beside a plain exception ("this request failed") and
+    Escalate ("crash me"), and the only one of the three that is not a failure:
+
+    - the caller gets an error reply of type "refused" carrying code and message, which its SDK
+      surfaces as a typed error (in Python a CallError with refused True);
+    - the thrall's state is left as it was, exactly as for a plain exception;
+    - nothing is recorded as the thrall's last error, and the refusal counts as a handled message.
+
+    code is a stable, machine-readable identifier that callers branch on, so it is part of the
+    thrall's contract: name it for the rule ("insufficient_funds"), never reword it (an empty code
+    becomes UNSPECIFIED_REFUSAL). message is for people and may change freely.
+
+    A refusal is never forwarded implicitly: a handler that calls another thrall and lets that
+    call's CallError propagate gets a plain handler failure even when the other thrall refused,
+    because a code from someone else's contract must not pose as this thrall's answer. To pass a
+    downstream refusal on, say so: `r = as_refusal(err); if r: raise Refuse(r.code, r.message)`.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        # A refusal always carries a code - that is what tells a caller "the thrall said no" from
+        # "the call failed" (refusal_code returns "" only for the latter) - so an empty one is replaced.
+        code = code or UNSPECIFIED_REFUSAL
+        super().__init__(f"refused ({code}): {message}")
+        self.code = code
+        self.message = message
+
+
+def _refused_reply(req: dict, refusal: Refuse) -> dict:
+    """The error reply that carries a refusal to the caller."""
+    return {
+        "v": 1,
+        "id": req.get("id"),
+        "kind": "reply",
+        "status": "error",
+        "error": {"type": ERR_REFUSED, "code": refusal.code, "message": refusal.message, "retryable": False},
+    }
+
+
+# --- call deadlines (mirrors internal/wire DeadlineAfter / Envelope.Expired and the Go SDK gate) ---
+#
+# A caller stamps a call with the instant it stops waiting; a thrall that only gets to the call
+# after that instant drops it instead of executing a request nobody is waiting for - otherwise the
+# caller's retry would run the write a second time.
+#
+# The deadline is stamped by the caller's clock and judged by the callee's, so the callee allows a
+# skew tolerance. On one host the two are the same clock; across nodes kept by NTP they differ by
+# tens of milliseconds, which the default covers with a wide margin. A callee whose clock runs
+# ahead by more than the tolerance refuses live calls at once (loud, nothing executed, retryable);
+# one that runs behind executes an expired call, which is the behavior without a deadline.
+#
+# A deadline narrows the window, it does not close it: a handler that starts just before the
+# deadline can still finish after it. A caller that must not double-write sends an idempotency key
+# as well.
+
+DEFAULT_DEADLINE_SKEW_MS = 250
+
+
+def _deadline_skew_ms() -> int:
+    """This thrall's skew tolerance: AETHER_DEADLINE_SKEW_MS when it is a non-negative integer
+    (0 = judge the deadline exactly), else the default. A thrall inherits the lord's environment,
+    so setting it on the lord applies to every thrall it spawns."""
+    raw = os.environ.get("AETHER_DEADLINE_SKEW_MS", "").strip()
+    return int(raw) if raw.isdigit() else DEFAULT_DEADLINE_SKEW_MS
+
+
+def _deadline_after(now_ms: int, timeout: float) -> Optional[int]:
+    """The deadline a caller stamps on a call it will wait `timeout` seconds for, starting at
+    now_ms. A non-positive timeout yields None (no deadline), never an already expired one."""
+    return now_ms + int(round(timeout * 1000)) if timeout > 0 else None
+
+
+def _overdue_ms(e: dict, now_ms: int, skew_ms: int) -> Optional[int]:
+    """How far past its deadline the envelope is at now_ms, when that is more than the skew
+    tolerance; None when it has not expired. An envelope without a deadline never expires."""
+    deadline = e.get("deadline") or 0
+    if deadline <= 0:
+        return None
+    overdue = now_ms - deadline
+    return overdue if overdue > skew_ms else None
+
+
+def _expired_reply(req: dict, overdue_ms: int) -> dict:
+    """The reply to a call dropped past its deadline. The caller is normally gone, but one whose
+    clock disagrees with ours is still waiting and should learn at once that nothing ran - hence
+    retryable."""
+    return {
+        "v": 1,
+        "id": req.get("id"),
+        "kind": "reply",
+        "status": "error",
+        "error": {"type": ERR_DEADLINE_EXCEEDED,
+                  "message": f"call expired {overdue_ms} ms before it could be handled", "retryable": True},
+    }
+
+
+class _DeadlineGate:
+    """Stands in front of a thrall's call handlers and turns away calls whose caller has already
+    stopped waiting. It is consulted once the mailbox lock is held, i.e. at the last moment before
+    the handler would run."""
+
+    def __init__(self, stats: _MailboxStats, log: Any) -> None:
+        self._skew_ms = _deadline_skew_ms()
+        self._stats = stats
+        self._log = log
+
+    def drop(self, e: dict) -> Optional[dict]:
+        """Return None for a live call. For an expired one, account it as dropped (not as
+        processed), log it, and return the "deadline_exceeded" reply to send to the caller."""
+        overdue = _overdue_ms(e, int(time.time() * 1000), self._skew_ms)
+        if overdue is None:
+            return None
+        self._stats.drop()
+        self._log.warn("dropping expired call - its caller stopped waiting", op=e.get("op"),
+                       trace=e.get("trace"), overdue_ms=overdue)
+        return _expired_reply(e, overdue)
+
+
 # --- confirmed cast (mirrors sdk/go/thrall/confirm.go and the TS castConfirmed) ---
 #
 # A plain cast is a core publish: the sender learns nothing about whether the durable mailbox
@@ -567,9 +760,71 @@ async def _lord_control(nc: Any, op: str, payload: Any, timeout: float) -> Any:
     msg = await nc.request(_sub_lord_ctl(), _encode(req), timeout=timeout)
     reply = _decode(msg.data)
     if reply.get("status") == "error":
-        err = reply.get("error") or {}
-        raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
+        raise CallError(reply.get("error"))
     return reply.get("payload")
+
+
+class Client:
+    """Calls and casts to thralls over a NATS connection. It needs nothing else: no lord, no
+    environment, no running thrall - so a gateway, a CLI, a test or a library can talk to the ether
+    with the same envelope a thrall's own ctx.call produces. app is the app it addresses by
+    default; trace, when given, is carried by every send that does not name its own. A Client is
+    immutable. Mirrors the Go SDK's Client."""
+
+    def __init__(self, nc: Any, app: str, trace: str = "") -> None:
+        self._nc = nc
+        self.app = app
+        self._trace = trace
+
+    def with_(self, app: str | None = None, trace: str | None = None) -> "Client":
+        """Return a copy of the client with another default app and/or trace, leaving this one
+        untouched - e.g. binding a per-request trace to a long-lived client: client.with_(trace=t)."""
+        return Client(self._nc, app or self.app, trace or self._trace)
+
+    async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> Any:
+        """Synchronous request/reply (GenServer.call). Returns the reply payload; raises a
+        CallError when the target answered with an error reply, or the NATS error when no reply
+        arrived. app addresses a thrall in another app (aether.<app>.<target>.call).
+
+        The envelope carries the instant this call stops waiting (now + timeout), so a thrall that
+        only gets to it later drops it instead of executing a request nobody is waiting for.
+        idempotency_key: on an idempotent thrall a retry carrying the same key returns the first
+        reply. See AE-077."""
+        now_ms = int(time.time() * 1000)
+        req = {"v": 1, "id": _next_id(), "trace": _or_new_trace(trace or self._trace), "kind": "call",
+               "to": target, "op": op, "payload": payload if payload is not None else {}, "ts": now_ms}
+        if idempotency_key:
+            req["idem"] = idempotency_key
+        deadline = _deadline_after(now_ms, timeout)
+        if deadline is not None:
+            req["deadline"] = deadline
+        msg = await self._nc.request(_sub_call(app or self.app, target), _encode(req), timeout=timeout)
+        reply = _decode(msg.data)
+        if reply.get("status") == "error":
+            raise CallError(reply.get("error"))
+        return reply.get("payload")
+
+    async def cast(self, target: str, op: str, payload: Any = None,
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> None:
+        """Fire-and-forget (GenServer.cast): it says nothing about whether the target received or
+        handled the message. idempotency_key: on an idempotent thrall a duplicate cast with the
+        same key is skipped. See AE-077."""
+        e = _cast_envelope(_or_new_trace(trace or self._trace), target, op, payload, idempotency_key)
+        await self._nc.publish(_sub_cast(app or self.app, target), _encode(e))
+
+    async def cast_confirmed(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
+                             idempotency_key: str | None = None, app: str | None = None,
+                             trace: str | None = None) -> None:
+        """A cast to a durable thrall that returns only once the message is durably stored in the
+        target's mailbox. Returning means stored; an exception means the message may not be stored
+        and the caller decides whether to retry (with the same idempotency_key, so a retry of a
+        message that did land is deduplicated). A target without a durable mailbox raises
+        NotDurableError. timeout bounds the whole send. Mirrors the Go SDK CastConfirmed."""
+        await _send_confirmed_cast(self._nc, app or self.app, _or_new_trace(trace or self._trace),
+                                   target, op, payload, timeout, idempotency_key)
 
 
 @dataclass
@@ -594,39 +849,31 @@ class Ctx:
     # have the resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
     singleton_epoch: int = 0
 
+    def _client(self) -> Client:
+        """This thrall's view of the ether: its connection and app, carrying the trace of the
+        message currently being handled. Built per send because the trace changes per message."""
+        return Client(self.nats, self.app, self.trace)
+
     async def call(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
-                   idempotency_key: str | None = None) -> Any:
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> Any:
         """Trace-propagating request/reply to another thrall (GenServer.call): the downstream
-        message carries the trace of the message currently being handled. idempotency_key: on an
-        idempotent thrall a retry carrying the same key returns the first reply. See AE-077."""
-        req = {"v": 1, "id": _next_id(), "trace": _or_new_trace(self.trace), "kind": "call",
-               "to": target, "op": op, "payload": payload if payload is not None else {},
-               "ts": int(time.time() * 1000)}
-        if idempotency_key:
-            req["idem"] = idempotency_key
-        msg = await self.nats.request(_sub_call(self.app, target), _encode(req), timeout=timeout)
-        reply = _decode(msg.data)
-        if reply.get("status") == "error":
-            err = reply.get("error") or {}
-            raise RuntimeError(f"{err.get('type')}: {err.get('message')}")
-        return reply.get("payload")
+        message carries the trace of the message currently being handled (or trace, when given).
+        app addresses a thrall in another app. See Client.call for what it returns and raises."""
+        return await self._client().call(target, op, payload, timeout, idempotency_key, app, trace)
 
     async def cast(self, target: str, op: str, payload: Any = None,
-                   idempotency_key: str | None = None) -> None:
-        """Trace-propagating fire-and-forget to another thrall (GenServer.cast). idempotency_key:
-        on an idempotent thrall a duplicate cast with the same key is skipped. See AE-077."""
-        e = _cast_envelope(_or_new_trace(self.trace), target, op, payload, idempotency_key)
-        await self.nats.publish(_sub_cast(self.app, target), _encode(e))
+                   idempotency_key: str | None = None, app: str | None = None,
+                   trace: str | None = None) -> None:
+        """Trace-propagating fire-and-forget to another thrall (GenServer.cast). See Client.cast."""
+        await self._client().cast(target, op, payload, idempotency_key, app, trace)
 
     async def cast_confirmed(self, target: str, op: str, payload: Any = None, timeout: float = 5.0,
-                             idempotency_key: str | None = None) -> None:
+                             idempotency_key: str | None = None, app: str | None = None,
+                             trace: str | None = None) -> None:
         """Trace-propagating cast to a durable thrall that returns only once the message is durably
-        stored in the target's mailbox. Returning means stored; an exception means the message may
-        not be stored and the caller decides whether to retry (with the same idempotency_key, so a
-        retry of a message that did land is deduplicated). A target without a durable mailbox
-        raises NotDurableError. timeout bounds the whole send. Mirrors the Go SDK CastConfirmed."""
-        await _send_confirmed_cast(self.nats, self.app, _or_new_trace(self.trace), target, op,
-                                   payload, timeout, idempotency_key)
+        stored in the target's mailbox. See Client.cast_confirmed."""
+        await self._client().cast_confirmed(target, op, payload, timeout, idempotency_key, app, trace)
 
     async def append(self, event: Any, dedup_key: str | None = None) -> None:
         """Persist a domain event to this thrall's event log (a JetStream publish that waits for
@@ -712,6 +959,7 @@ async def start(defn: ThrallDef) -> None:
     stop = asyncio.Event()
     lock = asyncio.Lock()  # serialized mailbox: 1 handler changes state at a time
     stats = _MailboxStats()
+    gate = _DeadlineGate(stats, ctx.log)  # turns away calls whose caller has stopped waiting
 
     # Optional in-memory dedup by idempotency key. Accessed only under the mailbox lock, so it
     # needs no lock of its own. None unless the thrall opts in.
@@ -739,14 +987,19 @@ async def start(defn: ThrallDef) -> None:
     async def process_call(e: dict, msg) -> None:
         nonlocal state
         start = stats.begin()
+        expired = None
         try:
             async with lock:
+                expired = gate.drop(e)
+                if expired is not None:
+                    await msg.respond(_encode(expired))
+                    return
                 ctx.trace = _or_new_trace(e.get("trace") or "")
                 ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_call.get(e.get("op"))
                 if handler is None:
-                    await msg.respond(_encode(_err_reply(e, "unknown_op", f"unknown call op: {e.get('op')}")))
+                    await msg.respond(_encode(_err_reply(e, ERR_UNKNOWN_OP, f"unknown call op: {e.get('op')}")))
                     return
                 dkey = _dedup_key(e) if dedup is not None else ""  # empty -> not deduped
                 if dkey:
@@ -764,17 +1017,23 @@ async def start(defn: ThrallDef) -> None:
                     # Reply the caller before we crash, so it learns of the restart instead of
                     # hanging until timeout; the dying breath then flushes both the reply and the
                     # final heartbeat (carrying the reason) before the process exits.
-                    await msg.respond(_encode(_err_reply(e, "escalated", esc.reason)))
+                    await msg.respond(_encode(_err_reply(e, ERR_ESCALATED, esc.reason)))
                     _set_last_error(f"escalated: {esc.reason}")
                     await dying_breath()
                     ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
                     _exit_process(1)
                     return
+                except Refuse as refusal:
+                    # A refusal is the domain saying no, not the thrall failing: the caller gets
+                    # the code, the state stays as it was, and nothing is recorded as the last error.
+                    ctx.log.debug("call refused", op=e.get("op"), code=refusal.code, trace=ctx.trace)
+                    await msg.respond(_encode(_refused_reply(e, refusal)))
                 except Exception as ex:  # noqa: BLE001
                     _set_last_error(f"handler_error: {ex}")
-                    await msg.respond(_encode(_err_reply(e, "handler_error", str(ex))))
+                    await msg.respond(_encode(_err_reply(e, ERR_HANDLER, str(ex))))
         finally:
-            stats.end(start)
+            if expired is None:  # a dropped call is not a processed message
+                stats.end(start)
 
     # ack_durable acknowledges the source JetStream message (durable cast); None for a
     # non-durable core cast, which needs no ack. On escalation the poison cast is acked before
@@ -808,6 +1067,10 @@ async def start(defn: ThrallDef) -> None:
                         ctx.log.error("cast handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
                         _exit_process(1)
                         return
+                    except Refuse as refusal:
+                        # Nobody waits for a cast, so a refused one is only noted: a normal
+                        # outcome, not a failure, and the state stays as it was.
+                        ctx.log.info("cast refused", op=e.get("op"), code=refusal.code, reason=refusal.message)
                     except Exception as ex:  # noqa: BLE001
                         _set_last_error(f"handler_error: {ex}")
                         ctx.log.error("cast handler failed", op=e.get("op"), err=str(ex))
@@ -1102,6 +1365,7 @@ class _Machine:
         self.data = data
         self._lock = asyncio.Lock()
         self._stats = _MailboxStats()
+        self._gate = _DeadlineGate(self._stats, log)  # turns away calls whose caller stopped waiting
         self._timeout_gen = 0
         self._timer = None
 
@@ -1113,13 +1377,20 @@ class _Machine:
 
     async def send(self, ev: Event, req=None, respond=None, gen=None) -> None:
         start = self._stats.begin()
+        expired = None
         try:
             async with self._lock:
+                if ev.kind == "call" and req is not None and respond is not None:
+                    expired = self._gate.drop(req)
+                    if expired is not None:
+                        respond(expired)  # a call whose caller has given up never becomes an event
+                        return
                 if gen is not None and gen != self._timeout_gen:
                     return  # superseded timeout
                 await self._dispatch(ev, req, respond)
         finally:
-            self._stats.end(start)
+            if expired is None:  # a dropped call is not a processed message
+                self._stats.end(start)
 
     async def _dispatch(self, ev: Event, req, respond) -> None:
         self.ctx.trace = _or_new_trace("" if ev.kind == "timeout" else ((req or {}).get("trace") or ""))
@@ -1142,10 +1413,17 @@ class _Machine:
 
         try:
             out = await _maybe(r.fn(ev, self.data, self.ctx))
+        except Refuse as refusal:
+            # The reaction declined the event by a domain rule: no transition, no data change, and
+            # (unlike a failure) nothing to report as an error.
+            self.log.debug("fsm event refused", state=self.cur, op=ev.op, code=refusal.code)
+            if respond is not None and req is not None:
+                respond(_refused_reply(req, refusal))
+            return
         except Exception as ex:  # noqa: BLE001
             self.log.error("fsm handler failed", state=self.cur, op=ev.op, err=str(ex))
             if respond is not None and req is not None:
-                respond(_err_reply(req, "handler_error", str(ex)))
+                respond(_err_reply(req, ERR_HANDLER, str(ex)))
             return
 
         self.data = out.data

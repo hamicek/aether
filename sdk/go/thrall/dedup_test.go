@@ -22,10 +22,10 @@ func TestDedupKeyPrefersIdemOverID(t *testing.T) {
 
 // WithIdempotencyKey is the caller-side option that stamps the key onto the outgoing envelope.
 func TestWithIdempotencyKeySetsOpt(t *testing.T) {
-	if got := applySendOpts([]SendOption{WithIdempotencyKey("withdraw-42")}).idem; got != "withdraw-42" {
+	if got := (sendOpts{}).with([]SendOption{WithIdempotencyKey("withdraw-42")}).idem; got != "withdraw-42" {
 		t.Fatalf("idem = %q, want %q", got, "withdraw-42")
 	}
-	if got := applySendOpts(nil).idem; got != "" {
+	if got := (sendOpts{}).with(nil).idem; got != "" {
 		t.Fatalf("idem with no options = %q, want empty", got)
 	}
 }

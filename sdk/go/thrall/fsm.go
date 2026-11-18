@@ -141,7 +141,7 @@ func StartFSM[D any](def FSM[D]) error {
 	if err != nil {
 		return err
 	}
-	sharedConn = nc
+	processClient.Store(NewClient(nc, app))
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
 	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
@@ -150,7 +150,7 @@ func StartFSM[D any](def FSM[D]) error {
 		return err
 	}
 
-	m := &fsmRunner[D]{def: def, ctx: ctx, log: log, cur: def.Initial, data: data, stats: &mailboxStats{}}
+	m := newFSMRunner(def, ctx, log, data)
 
 	// Arm the initial state's timeout before any events can arrive.
 	m.mu.Lock()
@@ -232,12 +232,18 @@ type fsmRunner[D any] struct {
 	ctx   *Ctx
 	log   *slog.Logger
 	stats *mailboxStats
+	gate  deadlineGate // turns away calls whose caller has stopped waiting
 
 	mu         sync.Mutex
 	cur        string
 	data       D
 	timer      *time.Timer // the current state's timeout timer (nil = none)
 	timeoutGen uint64      // bumped on every (re)arm so a stale fire is ignored
+}
+
+func newFSMRunner[D any](def FSM[D], ctx *Ctx, log *slog.Logger, data D) *fsmRunner[D] {
+	stats := &mailboxStats{}
+	return &fsmRunner[D]{def: def, ctx: ctx, log: log, cur: def.Initial, data: data, stats: stats, gate: newDeadlineGate(stats, log)}
 }
 
 func (m *fsmRunner[D]) snapshot() (string, D) {
@@ -272,9 +278,12 @@ func (m *fsmRunner[D]) onCastData(data []byte, _ func()) {
 // only for call events; req is the originating envelope (for building the reply).
 func (m *fsmRunner[D]) dispatch(ev Event, trace string, respond func(wire.Envelope), req wire.Envelope) {
 	start := m.stats.begin()
-	defer m.stats.end(start)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if respond != nil && m.gate.drop(req, respond) {
+		return // a call whose caller has given up never becomes an event
+	}
+	defer m.stats.end(start)
 	m.dispatchLocked(ev, trace, respond, req)
 }
 
@@ -304,10 +313,19 @@ func (m *fsmRunner[D]) dispatchLocked(ev Event, trace string, respond func(wire.
 	}
 
 	out, err := r.Fn(ev, m.data, m.ctx)
+	if ref, ok := asRefuse(err); ok {
+		// The reaction declined the event by a domain rule: no transition, no data change, and
+		// (unlike a failure) nothing to report as an error.
+		m.log.Debug("fsm event refused", slog.String("state", m.cur), slog.String("op", ev.Op), slog.String("code", ref.Code))
+		if respond != nil {
+			respond(refusedReply(req, ref))
+		}
+		return
+	}
 	if err != nil {
 		m.log.Error("fsm handler failed", slog.String("state", m.cur), slog.String("op", ev.Op), slog.Any("err", err))
 		if respond != nil {
-			respond(errReply(req, "handler_error", err.Error()))
+			respond(errReply(req, wire.ErrHandler, err.Error()))
 		}
 		return
 	}

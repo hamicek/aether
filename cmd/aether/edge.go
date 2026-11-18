@@ -149,6 +149,11 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		}
 
 		env := edge.BuildEnvelope(route, body, r.URL.Query())
+		if route.Kind != "cast" {
+			// The edge stops waiting after timeout; say so, so a thrall that only gets to this call
+			// later drops it instead of executing a request whose HTTP client already got a 504.
+			env.Deadline = wire.DeadlineAfter(time.Now(), timeout)
+		}
 		data, err := json.Marshal(env)
 		if err != nil {
 			logger.Error("edge: encoding envelope", slog.String("route", r.Method+" "+r.URL.Path), slog.String("err", err.Error()))
@@ -186,12 +191,12 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		if reply.Status == "error" {
 			// Application error from the thrall: log the detail, return a generic status to the caller.
 			status := edge.StatusForReply(reply)
-			var errType, errMsg string
+			var errType, errCode, errMsg string
 			if reply.Error != nil {
-				errType, errMsg = reply.Error.Type, reply.Error.Message
+				errType, errCode, errMsg = reply.Error.Type, reply.Error.Code, reply.Error.Message
 			}
 			logger.Warn("edge: thrall error reply", slog.String("thrall", route.Thrall), slog.String("op", route.Op),
-				slog.String("type", errType), slog.String("message", errMsg))
+				slog.String("type", errType), slog.String("code", errCode), slog.String("message", errMsg))
 			http.Error(w, http.StatusText(status), status)
 			return
 		}

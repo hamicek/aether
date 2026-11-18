@@ -85,6 +85,17 @@ func TestStatusForReply(t *testing.T) {
 	if got := StatusForReply(wire.Envelope{Status: "ok"}); got != http.StatusOK {
 		t.Errorf("ok reply -> %d, want 200", got)
 	}
+	// A call the thrall dropped past its deadline is the edge's own timeout seen from the other
+	// side; a refusal and a failure stay 502.
+	expired := wire.Envelope{Status: "error", Error: &wire.WireError{Type: wire.ErrDeadlineExceeded, Retryable: true}}
+	if got := StatusForReply(expired); got != http.StatusGatewayTimeout {
+		t.Errorf("deadline_exceeded reply: got %d, want 504", got)
+	}
+	for _, typ := range []string{wire.ErrRefused, wire.ErrHandler} {
+		if got := StatusForReply(wire.Envelope{Status: "error", Error: &wire.WireError{Type: typ}}); got != http.StatusBadGateway {
+			t.Errorf("%s reply: got %d, want 502", typ, got)
+		}
+	}
 	if got := StatusForReply(wire.Envelope{Status: "error"}); got != http.StatusBadGateway {
 		t.Errorf("error reply -> %d, want 502", got)
 	}

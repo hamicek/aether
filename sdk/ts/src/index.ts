@@ -1,8 +1,11 @@
-export { defThrall, start, escalate, EscalateError } from "./thrall";
+export { defThrall, start, escalate, EscalateError, refuse, RefuseError, UNSPECIFIED_REFUSAL } from "./thrall";
 export type { ThrallDef, Ctx, CallHandler, CastHandler } from "./thrall";
 export { call, cast, castConfirmed, NotDurableError, useConnection, startChild, stopChild } from "./client";
-export type { CallOpts, CastConfirmedOpts, SpawnSpec } from "./client";
-export type { Envelope, Kind, WireError } from "./envelope";
+export { Client, CallError, asRefusal, refusalCode } from "./client";
+export type { CallOpts, CastOpts, CastConfirmedOpts, SpawnSpec } from "./client";
+export { ErrorType } from "./envelope";
+export type { Envelope, Kind, WireError, HeartbeatMetrics } from "./envelope";
+export { DEFAULT_DEADLINE_SKEW_MS } from "./deadline";
 export { subjects } from "./subjects";
 export { newLogger, levelFromEnv } from "./log";
 export type { Logger, LogLevel, Fields } from "./log";

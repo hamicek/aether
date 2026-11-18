@@ -160,7 +160,7 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	lm.incRestart("worker")
 	lm.incGaveUp("worker")
 	lm.incHeartbeatMiss("worker")
-	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100})
+	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100, ExpiredTotal: 4})
 	lm.recordBacklog("worker", 7)
 
 	w, ok := lm.snapshot()["worker"]
@@ -176,8 +176,32 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	if w.MailboxDepth != 3 || w.MailboxLatMs != 1.5 || w.Processed != 100 {
 		t.Errorf("heartbeat metrics = %+v, want depth 3 / lat 1.5 / processed 100", w)
 	}
+	if w.Expired != 4 {
+		t.Errorf("expired = %d, want 4", w.Expired)
+	}
 	if w.DurableBacklog != 7 {
 		t.Errorf("durable backlog = %v, want 7", w.DurableBacklog)
+	}
+}
+
+// TestExpiredCallsAreExposed covers the deadline-drop counter: a thrall's self-reported count of
+// calls it dropped unexecuted shows up on /metrics, a heartbeat without the field (an SDK that
+// predates it) reads as zero, and the series goes away with the thrall like every per-name series.
+func TestExpiredCallsAreExposed(t *testing.T) {
+	l := newTestLord()
+	l.metrics.recordHeartbeat("ledger", wire.HeartbeatMetrics{ProcessedTotal: 9, ExpiredTotal: 2})
+	if v, ok := metricValue(t, scrape(t, l), `aether_expired_total{name="ledger"}`); !ok || v != 2 {
+		t.Fatalf("aether_expired_total = %v (present %v), want 2", v, ok)
+	}
+
+	l.metrics.recordHeartbeat("legacy", wire.HeartbeatMetrics{ProcessedTotal: 9})
+	if v, ok := metricValue(t, scrape(t, l), `aether_expired_total{name="legacy"}`); !ok || v != 0 {
+		t.Fatalf("aether_expired_total without the field = %v (present %v), want 0", v, ok)
+	}
+
+	l.metrics.forget("ledger")
+	if strings.Contains(scrape(t, l), `aether_expired_total{name="ledger"}`) {
+		t.Error("forget left the expired series behind")
 	}
 }
 

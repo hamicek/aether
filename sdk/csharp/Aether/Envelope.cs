@@ -62,6 +62,11 @@ public sealed class Envelope
 
     [JsonPropertyName("ts")]
     public long? Ts { get; set; }
+
+    // Deadline is the instant (Unix milliseconds) at which the caller of a call stops waiting; a
+    // thrall drops a call whose deadline has passed. Null = no deadline.
+    [JsonPropertyName("deadline")]
+    public long? Deadline { get; set; }
 }
 
 // WireError carries an error inside a reply message. type/message/retryable have no omitempty in Go,
@@ -70,6 +75,11 @@ public sealed class WireError
 {
     [JsonPropertyName("type")]
     public string Type { get; set; } = "";
+
+    // Code is the stable machine-readable code of a refusal (Type == "refused"); null and omitted
+    // for every other error type.
+    [JsonPropertyName("code")]
+    public string? Code { get; set; }
 
     [JsonPropertyName("message")]
     public string Message { get; set; } = "";
