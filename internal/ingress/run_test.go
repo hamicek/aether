@@ -24,6 +24,9 @@ func TestParseFlagsAcceptsDeployedCommandLine(t *testing.T) {
 	if cfg.RegistrySubject != DefaultRegistrySubject {
 		t.Errorf("registry subject = %q, want the family default", cfg.RegistrySubject)
 	}
+	if cfg.RegistryStale != DefaultRegistryStale || cfg.RegistryCache != DefaultRegistryCacheSize {
+		t.Errorf("registry defaults: stale %s, cache %d", cfg.RegistryStale, cfg.RegistryCache)
+	}
 	// A command line that names no limit runs with every limit at its safe default.
 	want := Config{
 		Timeout: DefaultTimeout, ReadHeaderTimeout: DefaultReadHeaderTimeout, ReadTimeout: DefaultReadTimeout,
@@ -55,10 +58,21 @@ func TestParseFlagsLimits(t *testing.T) {
 	for _, args := range [][]string{
 		{"-timeout", "0"}, {"-read-header-timeout", "0"}, {"-read-timeout", "-1s"}, {"-write-timeout", "0"},
 		{"-idle-timeout", "0"}, {"-max-conns", "0"}, {"-max-header-bytes", "0"}, {"-max-body-bytes", "-1"},
+		{"-registry-ttl", "0"}, {"-registry-stale", "-1s"}, {"-registry-cache-size", "0"},
 	} {
 		if _, err := ParseFlags(args, io.Discard); err == nil {
 			t.Errorf("%v must be rejected", args)
 		}
+	}
+}
+
+func TestParseFlagsRegistryStaleCanBeSwitchedOff(t *testing.T) {
+	cfg, err := ParseFlags([]string{"-registry", "-registry-stale", "0", "-registry-cache-size", "16"}, io.Discard)
+	if err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if cfg.RegistryStale != 0 || cfg.RegistryCache != 16 {
+		t.Errorf("parsed to stale %s, cache %d", cfg.RegistryStale, cfg.RegistryCache)
 	}
 }
 

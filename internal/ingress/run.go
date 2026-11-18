@@ -30,6 +30,8 @@ type Config struct {
 	RegistrySubject string
 	RegistryScope   string
 	RegistryTTL     time.Duration
+	RegistryStale   time.Duration
+	RegistryCache   int
 
 	Timeout           time.Duration
 	ReadHeaderTimeout time.Duration
@@ -54,7 +56,9 @@ func ParseFlags(args []string, out io.Writer) (Config, error) {
 	fs.BoolVar(&cfg.UseRegistry, "registry", false, "resolve routes dynamically via the site-registry thrall instead of the static -routes table")
 	fs.StringVar(&cfg.RegistrySubject, "registry-subject", DefaultRegistrySubject, "site-registry resolve call subject (with -registry)")
 	fs.StringVar(&cfg.RegistryScope, "registry-scope", "public", "this ingress's reach: public (only public sites) or vpn (public and vpn sites) (with -registry)")
-	fs.DurationVar(&cfg.RegistryTTL, "registry-ttl", 5*time.Second, "how long a resolved route is cached before the registry is asked again (with -registry)")
+	fs.DurationVar(&cfg.RegistryTTL, "registry-ttl", DefaultRegistryTTL, "how long a resolved route is cached before the registry is asked again (with -registry)")
+	fs.DurationVar(&cfg.RegistryStale, "registry-stale", DefaultRegistryStale, "how long past its TTL a route is still served while the registry is unreachable; 0 = not at all (with -registry)")
+	fs.IntVar(&cfg.RegistryCache, "registry-cache-size", DefaultRegistryCacheSize, "most routable hosts and, separately, most denied hosts kept in the route cache (with -registry)")
 
 	fs.DurationVar(&cfg.Timeout, "timeout", DefaultTimeout, "how long to wait for a web thrall's reply before answering 504; also the deadline the call carries")
 	fs.DurationVar(&cfg.ReadHeaderTimeout, "read-header-timeout", DefaultReadHeaderTimeout, "how long a client may take to send the request line and headers")
@@ -92,6 +96,15 @@ func (c Config) validate() error {
 	}
 	if c.MaxBodyBytes < 0 {
 		return fmt.Errorf("ingress: -max-body-bytes must not be negative, got %d", c.MaxBodyBytes)
+	}
+	if c.RegistryTTL <= 0 {
+		return fmt.Errorf("ingress: -registry-ttl must be positive, got %s", c.RegistryTTL)
+	}
+	if c.RegistryStale < 0 {
+		return fmt.Errorf("ingress: -registry-stale must not be negative, got %s", c.RegistryStale)
+	}
+	if c.RegistryCache < 1 {
+		return fmt.Errorf("ingress: -registry-cache-size must be at least 1, got %d", c.RegistryCache)
 	}
 	return nil
 }
@@ -185,12 +198,15 @@ func bodyLimitFor(maxPayload int64, cfg Config, log *slog.Logger) (int64, error)
 // the source of the table differs.
 func buildProvider(ctx *thrall.Ctx, cfg Config) (RouteProvider, error) {
 	if cfg.UseRegistry {
-		ctx.Log.Info("route provider: site-registry", "subject", cfg.RegistrySubject, "scope", cfg.RegistryScope, "ttl", cfg.RegistryTTL)
+		ctx.Log.Info("route provider: site-registry", "subject", cfg.RegistrySubject, "scope", cfg.RegistryScope,
+			"ttl", cfg.RegistryTTL, "stale", cfg.RegistryStale, "cache_size", cfg.RegistryCache)
 		return NewRegistryRoutes(ctx.NATS, RegistryOptions{
-			Subject: cfg.RegistrySubject,
-			Scope:   cfg.RegistryScope,
-			TTL:     cfg.RegistryTTL,
-			Log:     ctx.Log,
+			Subject:   cfg.RegistrySubject,
+			Scope:     cfg.RegistryScope,
+			TTL:       cfg.RegistryTTL,
+			StaleFor:  cfg.RegistryStale,
+			CacheSize: cfg.RegistryCache,
+			Log:       ctx.Log,
 		})
 	}
 	ctx.Log.Info("route provider: static routes", "routes", cfg.RoutesPath)

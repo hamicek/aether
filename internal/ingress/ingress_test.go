@@ -34,13 +34,13 @@ func TestNormalizeHost(t *testing.T) {
 
 func TestStaticRoutesResolve(t *testing.T) {
 	routes := StaticRoutes{"blog.test": "blog"}
-	if thrall, ok := routes.Resolve("Blog.Test:9000"); !ok || thrall != "blog" {
-		t.Errorf("Resolve normalized host = %q, %v; want blog, true", thrall, ok)
+	if thrall, ok, err := routes.Resolve("Blog.Test:9000"); err != nil || !ok || thrall != "blog" {
+		t.Errorf("Resolve normalized host = %q, %v, %v; want blog, true", thrall, ok, err)
 	}
-	if _, ok := routes.Resolve("nope.test"); ok {
-		t.Error("Resolve of an unknown host must deny (default-deny)")
+	if _, ok, err := routes.Resolve("nope.test"); ok || err != nil {
+		t.Errorf("Resolve of an unknown host = %v, %v; want an authoritative deny", ok, err)
 	}
-	if _, ok := (StaticRoutes{}).Resolve("anything"); ok {
+	if _, ok, _ := (StaticRoutes{}).Resolve("anything"); ok {
 		t.Error("an empty table must deny every host")
 	}
 }
@@ -55,7 +55,7 @@ func TestLoadStaticRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadStaticRoutes: %v", err)
 	}
-	if thrall, ok := routes.Resolve("blog.example"); !ok || thrall != "blog" {
+	if thrall, ok, _ := routes.Resolve("blog.example"); !ok || thrall != "blog" {
 		t.Errorf("normalized key lookup = %q, %v; want blog, true", thrall, ok)
 	}
 
@@ -167,5 +167,27 @@ func TestHandlerDefaultDeny(t *testing.T) {
 	}
 	if rr.Result().Header.Get(TraceHeader) == "" {
 		t.Error("a response the ingress produces itself must carry the trace header too")
+	}
+}
+
+// unreachableRoutes is a route provider whose source cannot be asked.
+type unreachableRoutes struct{}
+
+func (unreachableRoutes) Resolve(string) (string, bool, error) {
+	return "", false, ErrRegistryUnavailable
+}
+
+// TestUnreachableRoutesAre503NotNotFound: "we cannot look the site up" must not read as "the site
+// does not exist".
+func TestUnreachableRoutesAre503NotNotFound(t *testing.T) {
+	h := NewHandler(nil, unreachableRoutes{}, Options{App: "web"})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	res := rr.Result()
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503", res.StatusCode)
+	}
+	if res.Header.Get("Retry-After") == "" {
+		t.Error("a 503 must tell the client to come back")
 	}
 }

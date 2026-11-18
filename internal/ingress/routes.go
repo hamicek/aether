@@ -18,11 +18,17 @@ import (
 )
 
 // RouteProvider maps an inbound Host to a target web thrall. It is the pluggable seam of the
-// ingress: a static table today, a dynamic site-registry client (Wave 1 commons) later, behind the
-// same interface. Resolve returns ok=false when the host is not routable, which the ingress treats
-// as default-deny (404) - a host is reachable only if a provider explicitly allows it.
+// ingress: a static table or a dynamic site-registry client behind the same interface.
+//
+// Resolve has three outcomes, and the ingress answers each differently:
+//   - found: the request is forwarded to thrall;
+//   - not found (found=false, no error): an authoritative "this host is not served here". The
+//     ingress is default-deny, so that is a 404 - a host is reachable only if a provider
+//     explicitly allows it;
+//   - an error: the provider could not tell, because its source is out of reach. That is a 503,
+//     not a 404: "we cannot look the site up right now" must not read as "the site does not exist".
 type RouteProvider interface {
-	Resolve(host string) (thrall string, ok bool)
+	Resolve(host string) (thrall string, found bool, err error)
 }
 
 // StaticRoutes is a fixed Host -> thrall table, the simplest RouteProvider. Keys are normalized on
@@ -30,10 +36,11 @@ type RouteProvider interface {
 // "Blog.Example:8080".
 type StaticRoutes map[string]string
 
-// Resolve implements RouteProvider. An empty table (or an unknown host) denies by default.
-func (s StaticRoutes) Resolve(host string) (string, bool) {
+// Resolve implements RouteProvider. An empty table (or an unknown host) denies by default; a table
+// in memory is never out of reach, so it never returns an error.
+func (s StaticRoutes) Resolve(host string) (string, bool, error) {
 	thrall, ok := s[normalizeHost(host)]
-	return thrall, ok
+	return thrall, ok, nil
 }
 
 // LoadStaticRoutes reads a JSON object of {host: thrall} from path and returns a normalized table.

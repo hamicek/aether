@@ -71,6 +71,9 @@ func NewHandler(nc *nats.Conn, routes RouteProvider, opts Options) http.Handler 
 	return h
 }
 
+// retryAfterSeconds is what a 503 tells the client to wait before trying again.
+const retryAfterSeconds = "1"
+
 // failure is a non-success the ingress itself answers with, as opposed to a response a web thrall
 // produced. cause is a short stable token for logs and dashboards; err carries the detail.
 type failure struct {
@@ -85,8 +88,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	trace := thrall.NewTrace()
 	w.Header().Set(TraceHeader, trace)
 
-	target, ok := h.routes.Resolve(r.Host)
-	if !ok {
+	target, found, err := h.routes.Resolve(r.Host)
+	if err != nil {
+		// The route table is out of reach. That says nothing about whether the site exists, so it is
+		// "try again", not "not found".
+		h.fail(w, r, trace, "", failure{status: http.StatusServiceUnavailable, cause: "routes_unavailable", err: err})
+		return
+	}
+	if !found {
 		// Default-deny: a host with no explicit route does not reach the ether at all.
 		h.fail(w, r, trace, "", failure{status: http.StatusNotFound, cause: "no_route"})
 		return
@@ -141,6 +150,10 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, trace, target str
 		attrs = append(attrs, slog.Any("err", f.err))
 	}
 	h.log.Warn("ingress request failed", attrs...)
+	if f.status == http.StatusServiceUnavailable {
+		// Both 503s are passing states: a thrall being restarted, a registry being asked again.
+		w.Header().Set("Retry-After", retryAfterSeconds)
+	}
 	h.startWriting(w)
 	http.Error(w, http.StatusText(f.status), f.status)
 }

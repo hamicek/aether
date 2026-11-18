@@ -169,3 +169,80 @@ func TestEndToEndRegistry(t *testing.T) {
 		t.Errorf("vpn-only host on public ingress: status = %d, want 404 (scope filter)", denied.status)
 	}
 }
+
+// TestRegistryOutageEndToEnd takes the registry away from a running ingress and brings it back:
+//
+//   - while it is gone, a site that was being served stays up on its last known route, a host the
+//     registry had denied stays a 404, and a host never looked up is a 503 - not a 404, which would
+//     tell the visitor (and a crawler) that the site does not exist;
+//   - once the last known routes are too old to vouch for, the site is a 503 as well;
+//   - when the registry answers again, everything is back without restarting the ingress.
+func TestRegistryOutageEndToEnd(t *testing.T) {
+	srv := embeddedNATS(t)
+	startWebThrall(t, srv, "blog", func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		return thrall.TextResponse(http.StatusOK, "served"), s, nil
+	})
+	nc := connect(t, srv)
+
+	const registrySubject = "aether.ae.site-registry.call"
+	reg := &stubRegistry{sites: map[string]stubSite{"blog.test": {thrall: "blog", visibility: "public"}}}
+	sub := reg.serve(t, nc, registrySubject)
+
+	const ttl, stale = 100 * time.Millisecond, 1500 * time.Millisecond
+	provider, err := ingress.NewRegistryRoutes(nc, ingress.RegistryOptions{
+		Subject: registrySubject, TTL: ttl, StaleFor: stale, RetryAfter: 50 * time.Millisecond, Timeout: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new registry provider: %v", err)
+	}
+	url := front(t, nc, provider, ingress.Options{Timeout: 2 * time.Second})
+
+	// Before the outage: the site is served and an unknown host is denied.
+	if res := get(t, url+"/", "blog.test"); res.status != http.StatusOK {
+		t.Fatalf("before the outage: status = %d, want 200", res.status)
+	}
+	if res := get(t, url+"/", "scanner.test"); res.status != http.StatusNotFound {
+		t.Fatalf("before the outage, unknown host: status = %d, want 404", res.status)
+	}
+	learned := time.Now()
+
+	// The registry goes away, and the cached answers expire.
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * ttl)
+	if res := get(t, url+"/", "blog.test"); res.status != http.StatusOK || res.body != "served" {
+		t.Errorf("during the outage, known site: status = %d, want 200 from the last known route", res.status)
+	}
+	if res := get(t, url+"/", "scanner.test"); res.status != http.StatusNotFound {
+		t.Errorf("during the outage, denied host: status = %d, want the last known 404", res.status)
+	}
+	unknown := get(t, url+"/", "never-seen.test")
+	if unknown.status != http.StatusServiceUnavailable {
+		t.Errorf("during the outage, host never looked up: status = %d, want 503 (not 404)", unknown.status)
+	}
+	if unknown.header.Get("Retry-After") == "" {
+		t.Error("the 503 must carry Retry-After")
+	}
+
+	// The outage outlasts the stale window: the last known route is given up.
+	time.Sleep(time.Until(learned.Add(ttl + stale + 100*time.Millisecond)))
+	if res := get(t, url+"/", "blog.test"); res.status != http.StatusServiceUnavailable {
+		t.Errorf("past the stale window: status = %d, want 503", res.status)
+	}
+
+	// The registry comes back: service resumes on its own.
+	sub = reg.serve(t, nc, registrySubject)
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	res := get(t, url+"/", "blog.test")
+	for deadline := time.Now().Add(3 * time.Second); res.status != http.StatusOK && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+		res = get(t, url+"/", "blog.test")
+	}
+	if res.status != http.StatusOK {
+		t.Errorf("after recovery: status = %d, want 200", res.status)
+	}
+	if res := get(t, url+"/", "never-seen.test"); res.status != http.StatusNotFound {
+		t.Errorf("after recovery, unknown host: status = %d, want an authoritative 404", res.status)
+	}
+}
