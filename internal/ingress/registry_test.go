@@ -41,10 +41,15 @@ type fakeRegistry struct {
 	sites map[string]string
 	down  bool
 	asked []string
+	// whileAsked, when set, runs in the middle of a resolve - where a concurrent request would be.
+	whileAsked func()
 }
 
 func (f *fakeRegistry) resolve(host string) (string, bool, error) {
 	f.asked = append(f.asked, host)
+	if f.whileAsked != nil {
+		f.whileAsked()
+	}
 	if f.down {
 		return "", false, errors.New("no responders")
 	}
@@ -142,6 +147,34 @@ func TestRegistryIsLeftAloneAfterAFailure(t *testing.T) {
 	r.Resolve("host-0.test")
 	if len(reg.asked) != 2 {
 		t.Errorf("the registry was asked %d times after the retry interval, want 2", len(reg.asked))
+	}
+}
+
+// TestRegistryOutageProbeDoesNotHoldUpOtherRequests: once the registry is known to be down, the
+// request that asks again may wait for the whole resolve timeout. Requests arriving meanwhile must
+// be answered from what is known rather than each starting a wait of its own.
+func TestRegistryOutageProbeDoesNotHoldUpOtherRequests(t *testing.T) {
+	r, reg, clock := registryUnderTest(RegistryOptions{TTL: 5 * time.Second, StaleFor: time.Minute, RetryAfter: time.Second})
+	r.Resolve("blog.test")
+	reg.down = true
+	clock.advance(6 * time.Second)
+	r.Resolve("blog.test") // the failure that starts the outage
+	clock.advance(time.Second)
+
+	// The next ask is in flight; two more requests arrive while it is.
+	asksBefore := len(reg.asked)
+	reg.whileAsked = func() {
+		reg.whileAsked = nil
+		if thrall, found, err := r.Resolve("blog.test"); err != nil || !found || thrall != "blog" {
+			t.Errorf("a request during the ask = %q, %v, %v; want the last known route at once", thrall, found, err)
+		}
+		if _, _, err := r.Resolve("never-seen.test"); !errors.Is(err, ErrRegistryUnavailable) {
+			t.Errorf("an unknown host during the ask: %v, want ErrRegistryUnavailable at once", err)
+		}
+	}
+	r.Resolve("blog.test")
+	if got := len(reg.asked) - asksBefore; got != 1 {
+		t.Errorf("the registry was asked %d times, want 1: requests during an ask must not start their own", got)
 	}
 }
 

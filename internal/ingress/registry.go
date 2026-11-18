@@ -203,11 +203,17 @@ func (r *RegistryRoutes) Resolve(host string) (string, bool, error) {
 		r.mu.Unlock()
 		return known.thrall, known.found, nil
 	}
-	if now.Before(r.nextAsk) {
-		// The registry failed a moment ago; do not make this request wait for it to fail again.
-		since := r.downSince
-		r.mu.Unlock()
-		return lastKnown(known, cached, fmt.Errorf("%w (unreachable since %s)", ErrRegistryUnavailable, since.Format(time.RFC3339)))
+	if !r.downSince.IsZero() {
+		if now.Before(r.nextAsk) {
+			// The registry failed a moment ago; do not make this request wait for it to fail again.
+			since := r.downSince
+			r.mu.Unlock()
+			return lastKnown(known, cached, fmt.Errorf("%w (unreachable since %s)", ErrRegistryUnavailable, since.Format(time.RFC3339)))
+		}
+		// This request is the one that asks again. Claim the next interval before letting go of the
+		// lock, so the requests arriving while the ask is in flight - it may take the whole resolve
+		// timeout to fail - are answered from what is known instead of queueing up behind it.
+		r.nextAsk = now.Add(r.retryAfter)
 	}
 	r.mu.Unlock()
 
