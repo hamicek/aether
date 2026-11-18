@@ -1,10 +1,16 @@
-// Package thrall is the Go SDK for building thralls (genservers) in the ether (NATS).
+// Package thrall is the Go SDK for the ether (NATS): building thralls (genservers) and calling
+// them.
 //
 // It mirrors the TS and Python SDKs: the same JSON envelope, the same subjects and the
 // same GenServer semantics. A non-durable thrall reads call/cast/info from a single
 // wildcard subscription; a durable thrall (AETHER_DURABLE=1) reads call/info over core,
 // but cast from a durable JetStream consumer with ack (survives a crash). State is
 // protected by a mutex = a serialized mailbox.
+//
+// The calling side needs no thrall: a Client is built from a bare NATS connection (client.go), and
+// a handler's Ctx and the package-level Call are that same client. A call ends in a reply, a typed
+// *CallError when the target answered with an error (a refusal carries a stable Code - see Refuse),
+// or the NATS error when nobody answered. The wire contract itself is re-exported in wire.go.
 package thrall
 
 import (

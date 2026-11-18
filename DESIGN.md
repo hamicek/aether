@@ -177,14 +177,20 @@ results on - deliberately not a full SDK (no behaviours); parity is held by the 
 {
   "v": 1,
   "id": "abc-123",
+  "trace": "t-9f2",
   "kind": "call",
   "from": "gateway",
   "to": "counter",
   "op": "get",
   "payload": {},
-  "ts": 1730000000000
+  "ts": 1730000000000,
+  "deadline": 1730000005000
 }
 ```
+`deadline` is the instant (Unix ms) at which the caller stops waiting: its send time plus its
+timeout. A thrall drops a call whose deadline has passed before it starts handling it (§9c). It is
+only ever set on a `call`; `idem` (an optional idempotency key, §13c) and `trace` (the correlation
+id of §13b) are the other optional fields of a request.
 
 **Reply (on `_INBOX`, correlated via `id`):**
 ```json
@@ -198,6 +204,36 @@ results on - deliberately not a full SDK (no behaviours); parity is held by the 
   "error": { "type": "handler_error", "message": "key not found", "retryable": false }
 }
 ```
+`error.type` says what kind of "no" this is, so a caller never has to read the message to decide:
+
+| `type` | Meaning | The thrall afterwards |
+|---|---|---|
+| `refused` | the thrall declined the request by a rule of its domain; `error.code` is its stable machine code for the rule (§8) | unchanged, healthy - a refusal is a normal answer |
+| `handler_error` | the handler failed at this request | alive, state unchanged, failure recorded as its last error |
+| `unknown_op` | no call handler for the `op` | unaffected |
+| `escalated` | the handler asked to be crashed (§8) | restarts through `init` |
+| `deadline_exceeded` | the call's deadline had passed before the thrall got to it; nothing ran, hence `retryable: true` (§9c) | unaffected |
+
+An FSM thrall additionally answers `no_transition` and `guard_rejected` for an event its current
+state does not act on.
+
+**Refusal** (the one error reply that carries a `code`):
+```json
+{
+  "v": 1, "id": "abc-123", "kind": "reply", "status": "error",
+  "error": { "type": "refused", "code": "insufficient_funds",
+             "message": "the balance is 3, the withdrawal 5", "retryable": false }
+}
+```
+
+**The envelope grows only additively.** Every field added after the first version - `trace`,
+`idem`, `deadline`, `error.code`, the heartbeat's `describe` and `expired_total` - is optional and
+omitted when empty, so peers of different ages interoperate in both directions: an old caller sends
+no `deadline` (its calls are handled whenever they are dequeued, as before) and reads a refusal as
+the `"<type>: <message>"` error string it has always got; a new caller talking to an old thrall gets
+`handler_error` with no `code`, i.e. the generic failure. The golden fixtures in `testdata/wire`
+pin the shape for all SDKs, and the cross-language test (`sdk/go/thrall/crosslang_test.go`) runs
+the refusal and the deadline drop through every pairing of the Go, TS and Python SDKs.
 
 **Cast (no reply):**
 ```json
@@ -261,9 +297,111 @@ await cast("counter", "inc");
 const value = await call<number>("counter", "get", {}, { timeoutMs: 5000 }); // -> 2
 ```
 
+### The client - calling from anywhere
+
+Calling a thrall needs nothing but a NATS connection. The SDKs expose that as a **client**: no
+lord, no injected environment, no running thrall. A gateway, a CLI, a test, or a library that other
+thralls import all produce the same envelope a handler's own `ctx.call` does, so nothing outside
+the runtime has to mirror the envelope by hand.
+
+```go
+c := thrall.NewClient(nc, "ujito")                       // the app it addresses by default
+raw, err := c.Call("denik", "stav", req, 3*time.Second)  // json.RawMessage
+stav, err := thrall.CallInto[StavReply](c, "denik", "stav", req, 3*time.Second)   // typed
+doc, err := thrall.CallInto[GetReply](c, "store", "get", get, 2*time.Second,
+    thrall.InApp("ae"),                                  // a thrall in another app
+    thrall.WithTrace(trace),                             // carry the caller's trace
+    thrall.WithIdempotencyKey(key))                      // dedup a retry (§13c)
+perRequest := c.With(thrall.WithTrace(trace))            // a derived client, defaults bound
+```
+```ts
+const c = new Client(nc, "ujito");
+const stav = await c.call<StavReply>("denik", "stav", req, { timeoutMs: 3000 });
+const doc = await c.call<GetReply>("store", "get", get, { app: "ae", trace, idempotencyKey: key });
+const perRequest = c.with({ trace });
+```
+```python
+c = aether.Client(nc, "ujito")
+stav = await c.call("denik", "stav", req, timeout=3.0)
+doc = await c.call("store", "get", get, app="ae", trace=trace, idempotency_key=key)
+per_request = c.with_(trace=trace)
+```
+
+There is one implementation. A handler's `ctx.call` is the client bound to the thrall's connection
+and app, carrying the trace of the message being handled; the package-level `call` is the client of
+the thrall running in the process. In Go both satisfy the `thrall.Caller` interface, which is what
+a library should accept: handed a `Ctx` it propagates the trace, handed a `Client` it works
+anywhere. A call resolves to the reply payload or fails in one of two distinguishable ways: a
+**typed call error** when the target answered with an error reply (`*thrall.CallError` /
+`CallError` / `aether.CallError`, exposing `type`, `code`, `message`, `retryable`), or the **NATS
+error** when no reply arrived (timeout, no responders).
+
+For the rare code that works at the envelope level - a test double standing in for a thrall, a
+bridge to another transport - the Go SDK re-exports the wire contract from `internal/wire`
+(`thrall.Envelope`, `thrall.WireError`, `thrall.CallSubject`, `thrall.OKReply`,
+`thrall.ErrorReply`, the kind / status / error-type constants). They are aliases of the wire types,
+so there is still exactly one definition.
+
+### Refusing a request
+
+A handler has three ways to say that a request did not go through, and they mean different things:
+
+- **A refusal** = "I understood, I am fine, and the answer is no." A rule of the thrall's domain
+  forbids what was asked: not enough funds, the day is already closed. This is a normal outcome of
+  a healthy thrall, not a failure.
+- **A returned/thrown error** = "this request failed, but I'm fine."
+- **An escalation** = "I can't safely continue - crash me" (next section).
+
+```go
+return nil, s, thrall.Refuse("insufficient_funds", "the balance is 3, the withdrawal 5")   // Go
+```
+```ts
+refuse("insufficient_funds", "the balance is 3, the withdrawal 5");                         // TS
+```
+```python
+raise aether.Refuse("insufficient_funds", "the balance is 3, the withdrawal 5")             # Python
+```
+
+The caller gets an error reply of type `refused` carrying the **code** and the **message**, which
+its SDK surfaces as the typed call error:
+
+```go
+if code := thrall.RefusalCode(err); code != "" { /* a rule said no: switch on code */ }
+var ce *thrall.CallError
+if errors.As(err, &ce) && ce.Refused() { /* ce.Code, ce.Message */ }
+```
+```ts
+if (err instanceof CallError && err.refused) { /* err.code, err.reason */ }
+```
+```python
+except aether.CallError as err:
+    if err.refused: ...  # err.code, err.message
+```
+
+The **code is contract, the message is prose.** A code is what callers branch on, so it is part of
+the thrall's published contract: name it after the rule and never reword it. The message is for
+people and may change freely. Before refusals existed a domain "no" travelled as `handler_error`
+and callers had to recognise it by the text of the message, which broke the moment a sentence was
+rephrased and made every refusal look like a fault.
+
+A refusal is deliberately *not* a failure anywhere in the runtime: the thrall's state is left as it
+was (as for any error), it is **not** recorded as the thrall's `last_error`, it counts as a
+processed message, it is logged at debug rather than as an error, and it is not stored in the
+idempotency cache (only successful replies are). A refused **cast** has no caller to tell and is
+only noted in the log.
+
+**A refusal is never forwarded implicitly.** If a handler calls another thrall, that thrall
+refuses, and the handler returns the call's error as it is, the caller of the *handler* gets a plain
+`handler_error` - the typed call error (what a caller receives) and the refusal a handler returns
+are two different types on purpose. A code belongs to the contract of the thrall that issued it; if
+it were passed up automatically, a store's `revision_conflict` would pose as the answer of whatever
+thrall happened to sit in front of the store, and that thrall's genuine failure would not show up
+as its last error. Passing a refusal on is one explicit line:
+`if r, ok := thrall.AsRefusal(err); ok { return nil, s, thrall.Refuse(r.Code, r.Message) }`.
+
 ### Let it crash - escalation
 
-A handler has two ways to signal failure, and they mean different things:
+Beside a refusal, a handler has two ways to signal *failure*, and they mean different things:
 
 - **A returned/thrown error** = "this request failed, but I'm fine." The caller gets an error reply
   (`type: "handler_error"`), a failed cast is logged, and the thrall keeps running with its state.
@@ -377,6 +515,44 @@ gateway.call("counter","get")
    ^
 gateway <-- the NATS request returns 2 (or a TimeoutError after timeoutMs)
 ```
+
+### The deadline: a call nobody waits for is not executed
+
+The mailbox is serialized, so a call can sit behind a slow handler for longer than its caller is
+willing to wait. Without anything else, the caller times out, the thrall later reaches the call and
+executes it anyway - and when the user retries, the write happens twice.
+
+So every call says when its caller stops waiting. The caller stamps `deadline = now + timeout` on
+the envelope; the thrall, at the last moment before the handler would run (once the mailbox lock is
+held), checks it and **drops** an expired call: the handler does not run, the drop is logged at
+warn with the op, the trace and how late the call was, it is counted in the thrall's
+`expired_total` heartbeat metric (`aether_expired_total{name}` on the lord, and not in
+`processed_total`), and the reply is `deadline_exceeded` with `retryable: true`. An envelope
+without a deadline behaves exactly as before. The built-in HTTP edge and `aether call` stamp the
+deadline too, since they are callers like any other.
+
+**What it does not do.** A deadline narrows the window, it does not close it: a handler that
+*starts* just before the deadline still finishes after the caller gave up. It turns "every
+timed-out call is executed later" into "only a call that was already running is". A caller that
+must not write twice sends an **idempotency key** as well (§13c); the two are complementary.
+
+**Clocks.** The deadline is stamped by the caller's clock and judged by the callee's, so the callee
+allows a skew tolerance: a call is dropped only when `now > deadline + tolerance`. The default is
+**250 ms**, overridable per thrall process with `AETHER_DEADLINE_SKEW_MS` (a thrall inherits the
+lord's environment, so setting it on the lord covers the node; `0` judges the deadline exactly).
+
+- On **one host** caller and callee read the same clock, so the true skew is zero and the tolerance
+  only costs something: a call that expired less than 250 ms ago is still executed.
+- **Across nodes** kept by NTP the clocks differ by milliseconds to a few tens of milliseconds;
+  250 ms absorbs that with a wide margin, so a healthy deployment never drops a live call.
+
+The cost of the margin is small against the window a deadline cannot close anyway (the handler that
+started just in time), which is why one default serves both cases instead of a per-topology knob.
+The failure modes of a clock that is wrong by *more* than the tolerance are asymmetric and safe. A
+callee running ahead refuses live calls immediately with `deadline_exceeded` - loud, nothing
+executed, retryable - which shows up as a climbing `aether_expired_total` and points straight at
+the clock. A callee running behind executes an expired call, which is simply the behavior without a
+deadline. Neither direction can make a thrall execute something twice on its own.
 
 ---
 
@@ -874,7 +1050,8 @@ shared stream.
 already holds the registry, the lifecycle stream, restart windows and JetStream), so it exposes a
 Prometheus `/metrics` HTTP endpoint (opt-in, `[observability] metrics_addr`). Crucially the SDKs do
 **not** each carry a metrics client - that would fight the thin-SDK principle. Instead a thrall
-attaches its self-metrics (mailbox depth, last handler latency, processed count) to the heartbeat
+attaches its self-metrics (mailbox depth, last handler latency, processed count, and the count of
+calls dropped past their deadline, §9c) to the heartbeat
 it already sends every 2s, and the lord folds them in alongside its own supervision counters
 (thrall count by status, restarts, gave-ups, heartbeat misses) and the durable backlog it reads
 from JetStream (`num_pending`). The endpoint is the lord's own HTTP server, independent of the
@@ -970,6 +1147,10 @@ aligned with the rest of the design:
   Because the same enriched label set writes and deletes a series, a stopped dynamic thrall still
   leaves no orphan. The allowlist is a global observability *policy* (which keys are label-safe),
   which is why it sits in `[observability]` rather than being scattered per thrall.
+
+A **refusal** (§8) never becomes `last_error`: it is the domain declining a request, not the thrall
+failing at one, and a thrall that answers "no" all day is healthy. Likewise a call dropped past its
+deadline (§9c) is not an error of the thrall; it has its own counter, `expired_total`.
 
 `last_error` resets on restart, like `processed_total` - it is process-local. On an *escalation* the
 thrall would die before its next scheduled beat, so it publishes one final "dying breath" heartbeat
@@ -1121,7 +1302,10 @@ node-local by permission, and SIGHUP credential rotation - §11b/§14), and a Do
 | Area | Decision |
 |---|---|
 | Runtime | a Go binary, embedded NATS (default) or an external cluster (config switch) |
-| Wire format | a JSON envelope, `kind` + `op` dispatch |
+| Wire format | a JSON envelope, `kind` + `op` dispatch; it grows only additively, so peers of different ages interoperate (§7) |
+| Call outcomes | a reply, a typed **refusal** (`refused` + a stable `code`: the domain said no, the thrall is healthy), a failure (`handler_error`), or a crash (`escalated`) - told apart by `error.type`, never by message text (§7, §8) |
+| Call deadline | the caller stamps when it stops waiting; a thrall drops an expired call before handling it (250 ms skew tolerance, `AETHER_DEADLINE_SKEW_MS`); complements, does not replace, an idempotency key (§9c) |
+| Client | calling needs only a NATS connection: one client implementation behind `ctx.call`, the package-level call and standalone code, in all three SDKs; the Go SDK re-exports the wire contract so nothing outside mirrors it (§8) |
 | SDK home base | TS/Bun (`@hamicek/aether`); plus Python and Go |
 | SDK behaviours | GenServer thrall (`Def`/`Start`), a state-machine thrall (`FSM`/`StartFSM`, a `gen_statem` analogue: states, guards, state timeouts) and an event manager (`EventManager`/`StartEvent`, a `gen_event` analogue: an ordered set of handlers, one event fanned out to all) - all on the same serialized mailbox; each behaviour stays domain-neutral, applications build on top |
 | Topology | a declarative `aether.toml`; behavior in code |

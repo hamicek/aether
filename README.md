@@ -72,6 +72,9 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Spawn** | ✅ | The lord starts thralls as OS processes, injects the `AETHER_*` env, watches their exit code |
 | **Polyglot SDK** | ✅ | **TS/Bun**, **Python**, **Go** - the same wire contract, indistinguishable to the lord. A thin **C#** client (consume + cast + durable mailbox) for data-processing thralls - see `sdk/csharp` and `examples/csharp-consumer` |
 | **Messaging** | ✅ | `call` (sync request/reply), `cast` (fire-and-forget), a serialized mailbox |
+| **Client** | ✅ | calling a thrall needs only a NATS connection: `thrall.NewClient` / `new Client` / `aether.Client` work outside a handler, address a thrall in another app, carry a trace and an idempotency key; Go adds the typed `CallInto[T]`. Go + TS + Python - see [Calling a thrall](#calling-a-thrall-the-client) |
+| **Typed refusals** | ✅ | `Refuse(code, message)` from a handler -> the caller gets a typed error with a stable machine code, told apart from a failure by type, not by message text; a refusal is not the thrall's last error. Go + TS + Python - see [Refusing a request](#refusing-a-request) |
+| **Call deadline** | ✅ | every call says when its caller stops waiting; a thrall drops an expired call instead of executing it later (`aether_expired_total`). Go + TS + Python - see [Calling a thrall](#calling-a-thrall-the-client) |
 | **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
@@ -202,6 +205,86 @@ return s, thrall.Escalate("balance underflow")     // Go
 ```python
 raise aether.Escalate("balance underflow")         # Python
 ```
+
+### Refusing a request
+
+A third outcome sits beside "it worked" and "it failed": the thrall is healthy and the answer is
+**no**, because a rule of its domain forbids the request. Refuse with a stable machine **code** (part
+of the thrall's contract - callers branch on it) and a human **message** (free to reword):
+
+```ts
+import { refuse } from "@hamicek/aether";
+handleCall: { withdraw: (amt, s) => { if (amt > s) refuse("insufficient_funds", `the balance is ${s}`); return [s - amt, s - amt]; } }
+```
+```go
+return nil, s, thrall.Refuse("insufficient_funds", "the balance is 3")     // Go
+```
+```python
+raise aether.Refuse("insufficient_funds", "the balance is 3")              # Python
+```
+
+The caller gets a typed error and never has to read the message to decide:
+
+```go
+switch thrall.RefusalCode(err) {              // "" when err is not a refusal
+case "insufficient_funds": // 409, show the rule
+case "":                   // a failure or a transport error: 502
+}
+var ce *thrall.CallError                      // or the full error: Type, Code, Message, Retryable
+if errors.As(err, &ce) && ce.Refused() { ... }
+```
+```ts
+if (err instanceof CallError && err.refused) { /* err.code, err.reason */ }
+```
+```python
+except aether.CallError as err:               # a RuntimeError, str(err) == "<type>: <message>"
+    if err.refused: ...                       # err.code, err.message
+```
+
+A refusal is a normal outcome, not a fault: the state is left as it was, it is **not** the thrall's
+`last error` in `aether describe`, and it counts as a processed message. It is also never forwarded
+implicitly - a handler that returns a downstream call's error produces a plain `handler_error` even
+if the downstream thrall refused; to pass a refusal on, refuse again with its code (`DESIGN.md` §8).
+
+### Calling a thrall (the client)
+
+Calling needs nothing but a NATS connection - no lord, no injected environment, no running thrall.
+A gateway, a CLI, a test or a shared library all use the same client a handler's `ctx.call` is
+built on:
+
+```go
+c := thrall.NewClient(nc, "ujito")                                   // addresses app "ujito" by default
+stav, err := thrall.CallInto[StavReply](c, "denik", "stav", req, 3*time.Second)
+doc, err := thrall.CallInto[GetReply](c, "store", "get", get, 2*time.Second,
+    thrall.InApp("ae"), thrall.WithTrace(trace), thrall.WithIdempotencyKey(key))
+```
+```ts
+const c = new Client(nc, "ujito");
+const doc = await c.call<GetReply>("store", "get", get, { app: "ae", trace, idempotencyKey: key, timeoutMs: 2000 });
+```
+```python
+c = aether.Client(nc, "ujito")
+doc = await c.call("store", "get", get, app="ae", trace=trace, idempotency_key=key, timeout=2.0)
+```
+
+`InApp` / `app` reaches a thrall deployed in another app namespace (a shared service). In Go,
+`CallInto` takes any `thrall.Caller` - a `*Client` or a handler's `*Ctx` - so a library written
+against `Caller` propagates the trace when called from a handler and works standalone otherwise.
+A call fails either with the typed `CallError` (the target answered with an error) or with the NATS
+error (no answer: timeout, no responders). Code that genuinely works at the envelope level (a test
+double answering as a thrall) gets the wire types from the Go SDK - `thrall.Envelope`,
+`thrall.WireError`, `thrall.CallSubject`, `thrall.OKReply`, `thrall.ErrorReply` - instead of
+mirroring them.
+
+**Deadline.** Every call carries the instant its caller stops waiting (`now + timeout`). A thrall
+that only gets to the call after that - it was queued behind a slow handler - **drops** it instead
+of executing a request nobody is waiting for; otherwise the caller's retry would run the write
+twice. The drop is logged, counted in `aether_expired_total{name}`, and answered with a retryable
+`deadline_exceeded`. The deadline is judged with a 250 ms clock-skew tolerance
+(`AETHER_DEADLINE_SKEW_MS`, `0` = exact) - zero skew on one host, NTP-level skew across nodes. It
+narrows the double-write window, it does not close it (a handler that started just in time still
+finishes late): pair it with an idempotency key where a duplicate write would hurt. Details in
+`DESIGN.md` §9c.
 
 ## State machine (FSM) behaviour
 
@@ -567,6 +650,7 @@ works the same embedded or external. Exposed series:
 | `aether_mailbox_depth{name}` | gauge | messages a thrall currently holds (self-reported) |
 | `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
 | `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
+| `aether_expired_total{name}` | counter | calls a thrall dropped unexecuted because their caller's deadline had passed (self-reported); a steady climb means callers time out behind a slow handler, or the node's clock is off |
 | `aether_durable_backlog{name}` | gauge | pending casts in a durable thrall's stream (JetStream `num_pending`) |
 | `aether_thrall_rss_bytes{name}` | gauge | thrall resident memory, summed over its process group |
 | `aether_thrall_cpu_percent{name}` | gauge | thrall CPU usage %, a delta over the sample interval, summed over its process group |
