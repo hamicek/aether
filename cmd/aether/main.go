@@ -446,7 +446,9 @@ func callCmd(argv []string) {
 	nc := connect(ep)
 	defer nc.Close()
 
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload, TS: time.Now().UnixMilli()}
+	now := time.Now()
+	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: nats.NewInbox(), Kind: wire.KindCall, To: name, Op: op, Payload: payload,
+		TS: now.UnixMilli(), Deadline: wire.DeadlineAfter(now, *timeout)}
 	data, _ := json.Marshal(req)
 	msg, err := nc.Request(wire.Call(ep.App, name), data, *timeout)
 	if err != nil {

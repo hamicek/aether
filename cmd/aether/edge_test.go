@@ -38,9 +38,11 @@ func TestEdgeHandlerBridge(t *testing.T) {
 
 	// Fake thrall "counter": replies to call ops, and records casts.
 	gotCast := make(chan wire.Envelope, 1)
+	gotCall := make(chan wire.Envelope, 8)
 	if _, err := nc.Subscribe(wire.Call(app, "counter"), func(m *nats.Msg) {
 		var req wire.Envelope
 		_ = json.Unmarshal(m.Data, &req)
+		gotCall <- req
 		reply := wire.Envelope{V: 1, Kind: wire.KindReply, Status: "ok"}
 		switch req.Op {
 		case "value":
@@ -85,6 +87,12 @@ func TestEdgeHandlerBridge(t *testing.T) {
 		if strings.TrimSpace(body) != `{"value":3}` {
 			t.Fatalf("body = %q, want the thrall reply", body)
 		}
+		// The call tells the thrall when the edge stops waiting (the 1 s edge timeout), so a call
+		// the thrall only gets to after the HTTP client got its 504 is dropped, not executed.
+		env := <-gotCall
+		if wait := env.Deadline - env.TS; env.Deadline == 0 || wait < 900 || wait > 1100 {
+			t.Fatalf("call deadline = %d (ts %d), want ts + ~1000 ms", env.Deadline, env.TS)
+		}
 	})
 
 	// cast -> 202 and the message reaches the ether
@@ -102,6 +110,9 @@ func TestEdgeHandlerBridge(t *testing.T) {
 		case env := <-gotCast:
 			if env.Op != "inc" {
 				t.Fatalf("cast op = %q, want inc", env.Op)
+			}
+			if env.Deadline != 0 {
+				t.Fatalf("a cast must not carry a deadline, got %d", env.Deadline)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("cast not delivered to the ether")

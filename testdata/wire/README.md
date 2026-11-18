@@ -1,8 +1,10 @@
 # Wire contract fixtures
 
-Canonical JSON envelopes for the wire contract, shared by all three SDK parity test suites
-(Go, TypeScript, Python). They pin the `Envelope` / `WireError` shape and cover every `Kind`,
-the `omitempty` fields (`minimal`) and an error reply (`reply_error`).
+Canonical JSON envelopes for the wire contract, shared by the SDK parity test suites
+(Go, TypeScript, Python, C#). They pin the `Envelope` / `WireError` shape and cover every `Kind`,
+the `omitempty` fields (`minimal`), an error reply (`reply_error`), a call with a deadline
+(`call_deadline`), a refusal (`reply_refused`), the reply to a call dropped past its deadline
+(`reply_deadline_exceeded`) and a heartbeat reporting dropped calls (`hb_expired`).
 
 **Go is the source of truth.** Regenerate after any intentional contract change:
 

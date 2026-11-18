@@ -2,28 +2,6 @@ package thrall
 
 import "github.com/hamicek/aether/internal/wire"
 
-// SendOption customizes an outgoing call/cast, e.g. an idempotency key.
-type SendOption func(*sendOpts)
-
-type sendOpts struct {
-	idem string
-}
-
-// WithIdempotencyKey attaches a stable idempotency key to a call/cast. On an idempotent thrall a
-// retry carrying the same key is not re-processed: a duplicate cast is skipped and a duplicate
-// call returns the first reply. See AE-077.
-func WithIdempotencyKey(key string) SendOption {
-	return func(o *sendOpts) { o.idem = key }
-}
-
-func applySendOpts(opts []SendOption) sendOpts {
-	var o sendOpts
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
-}
-
 // dedupKey is the idempotency key an idempotent thrall deduplicates on: the caller-supplied Idem
 // when set, else the per-send envelope ID. Keying on ID never conflates two distinct sends (each
 // mints a fresh ID) but still catches an exact redelivery of the same message.

@@ -27,11 +27,13 @@ import (
 )
 
 // mailboxStats collects the thrall's self-metrics reported on each heartbeat: how many
-// messages it currently holds (depth), how long the most recent handler took (latency), and
-// how many it has processed in total. begin/end bracket every handled message.
+// messages it currently holds (depth), how long the most recent handler took (latency), how
+// many it has processed in total, and how many calls it dropped unexecuted because their deadline
+// had passed. begin/end bracket every handled message; a dropped call ends with drop instead.
 type mailboxStats struct {
 	depth     atomic.Int64
 	processed atomic.Uint64
+	expired   atomic.Uint64
 	lastNs    atomic.Int64 // duration of the most recent handler, in nanoseconds
 }
 
@@ -46,11 +48,19 @@ func (s *mailboxStats) end(start time.Time) {
 	s.depth.Add(-1)
 }
 
+// drop accounts a message that left the mailbox without being handled (an expired call): it no
+// longer counts toward the depth, and it is not a processed message nor a latency sample.
+func (s *mailboxStats) drop() {
+	s.expired.Add(1)
+	s.depth.Add(-1)
+}
+
 func (s *mailboxStats) snapshot() wire.HeartbeatMetrics {
 	return wire.HeartbeatMetrics{
 		MailboxDepth:     int(s.depth.Load()),
 		MailboxLatencyMs: float64(s.lastNs.Load()) / float64(time.Millisecond),
 		ProcessedTotal:   s.processed.Load(),
+		ExpiredTotal:     s.expired.Load(),
 	}
 }
 
@@ -130,8 +140,6 @@ func opNames[V any](handlers map[string]V) []string {
 	return ops
 }
 
-var sharedConn *nats.Conn // for Call/Cast from this thrall
-
 // Start connects the thrall to the ether and runs its lifecycle. It blocks until a
 // controlled shutdown (ctl:drain), then calls Terminate and disconnects.
 // connectOptions builds the NATS connect options for a thrall: its name plus, when
@@ -176,7 +184,7 @@ func Start[S any](def Def[S]) error {
 	if err != nil {
 		return err
 	}
-	sharedConn = nc
+	processClient.Store(NewClient(nc, app))
 	log := obs.NewLogger().With(slog.String("component", "thrall"), slog.String("app", app), slog.String("name", name))
 	ctx := &Ctx{NATS: nc, Name: name, App: app, Log: log, SingletonEpoch: singletonEpochFromEnv()}
 
@@ -212,6 +220,9 @@ func Start[S any](def Def[S]) error {
 		_ = nc.Flush()
 	}
 
+	// Turns away calls whose caller has stopped waiting, before their handler runs.
+	gate := newDeadlineGate(stats, log)
+
 	// Optional in-memory dedup by idempotency key. Accessed only under mu (the mailbox lock),
 	// so it needs no lock of its own. Nil unless the thrall opts in.
 	var dedup *dedupCache
@@ -224,16 +235,20 @@ func Start[S any](def Def[S]) error {
 		if json.Unmarshal(msg.Data, &e) != nil {
 			return
 		}
+		respond := func(reply wire.Envelope) { _ = msg.Respond(mustJSON(reply)) }
 		start := stats.begin()
-		defer stats.end(start)
 		mu.Lock()
 		defer mu.Unlock()
+		if gate.drop(e, respond) {
+			return
+		}
+		defer stats.end(start)
 		ctx.Trace = orNewTrace(e.Trace)
 		ctx.MsgID = e.ID
 		log.Debug("handling call", slog.String("op", e.Op), slog.String("trace", ctx.Trace))
 		h, ok := def.HandleCall[e.Op]
 		if !ok {
-			_ = msg.Respond(mustJSON(errReply(e, "unknown_op", "unknown call op: "+e.Op)))
+			respond(errReply(e, wire.ErrUnknownOp, "unknown call op: "+e.Op))
 			return
 		}
 		dkey := ""
@@ -243,7 +258,7 @@ func Start[S any](def Def[S]) error {
 		if dkey != "" {
 			if cached, seen := dedup.get(dkey); seen {
 				// A duplicate call: return the first reply instead of re-running the handler.
-				_ = msg.Respond(mustJSON(okReply(e, json.RawMessage(cached))))
+				respond(okReply(e, json.RawMessage(cached)))
 				return
 			}
 		}
@@ -251,23 +266,30 @@ func Start[S any](def Def[S]) error {
 		if esc, ok := asEscalate(herr); ok {
 			// Reply the caller before we crash, so it learns of the restart instead of
 			// hanging until timeout; flush so the reply leaves before the process exits.
-			_ = msg.Respond(mustJSON(errReply(e, "escalated", esc.Reason)))
+			respond(errReply(e, wire.ErrEscalated, esc.Reason))
 			lastErr.set("escalated: " + esc.Reason)
 			dyingBreath() // let the lord record the reason before the process dies
 			log.Error("handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
 			exitProcess(1)
 			return
 		}
+		if ref, ok := asRefuse(herr); ok {
+			// A refusal is the domain saying no, not the thrall failing: the caller gets the code,
+			// the state stays as it was, and nothing is recorded as this thrall's last error.
+			log.Debug("call refused", slog.String("op", e.Op), slog.String("code", ref.Code), slog.String("trace", ctx.Trace))
+			respond(refusedReply(e, ref))
+			return
+		}
 		if herr != nil {
 			lastErr.set("handler_error: " + herr.Error())
-			_ = msg.Respond(mustJSON(errReply(e, "handler_error", herr.Error())))
+			respond(errReply(e, wire.ErrHandler, herr.Error()))
 			return
 		}
 		state = next
 		if dkey != "" {
 			dedup.put(dkey, mustMarshal(reply)) // cache only a successful reply
 		}
-		_ = msg.Respond(mustJSON(okReply(e, reply)))
+		respond(okReply(e, reply))
 	}
 
 	// ackDurable acknowledges the source JetStream message (durable cast); it is nil for a
@@ -309,6 +331,12 @@ func Start[S any](def Def[S]) error {
 			dyingBreath() // let the lord record the reason before the process dies
 			log.Error("cast handler escalated - self-terminating for restart", slog.String("op", e.Op), slog.String("reason", esc.Reason))
 			exitProcess(1)
+			return
+		}
+		if ref, ok := asRefuse(herr); ok {
+			// Nobody waits for a cast, so a refused one is only noted: it is a normal outcome, not
+			// a failure, and the state stays as it was.
+			log.Info("cast refused", slog.String("op", e.Op), slog.String("code", ref.Code), slog.String("reason", ref.Message))
 			return
 		}
 		if herr != nil {
@@ -466,91 +494,6 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 	}
 }
 
-// Call = synchronous request/reply (GenServer.call) to another thrall. Called outside a
-// handler (standalone) it mints a fresh trace; from within a handler use Ctx.Call to
-// propagate the current trace instead.
-func Call(target, op string, payload any, timeout time.Duration, opts ...SendOption) (json.RawMessage, error) {
-	if sharedConn == nil {
-		return nil, fmt.Errorf("no connection - call Start() first")
-	}
-	return doCall(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout, applySendOpts(opts).idem)
-}
-
-// Cast = fire-and-forget (GenServer.cast) to another thrall. Mints a fresh trace; from within
-// a handler use Ctx.Cast to propagate the current trace.
-func Cast(target, op string, payload any, opts ...SendOption) error {
-	if sharedConn == nil {
-		return fmt.Errorf("no connection - call Start() first")
-	}
-	return doCast(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, applySendOpts(opts).idem)
-}
-
-// Call is the trace-propagating request/reply from inside a handler: the downstream message
-// carries the trace of the message currently being handled.
-func (c *Ctx) Call(target, op string, payload any, timeout time.Duration, opts ...SendOption) (json.RawMessage, error) {
-	return doCall(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout, applySendOpts(opts).idem)
-}
-
-// Cast is the trace-propagating fire-and-forget from inside a handler.
-func (c *Ctx) Cast(target, op string, payload any, opts ...SendOption) error {
-	return doCast(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, applySendOpts(opts).idem)
-}
-
-// CastConfirmed is a cast to a durable thrall that returns only once the message is durably
-// stored in the target's mailbox. A nil error means stored; any error means the message may not
-// be stored and the caller decides whether to retry (with the same WithIdempotencyKey, so a retry
-// of a message that did land is deduplicated). A target without a durable mailbox fails with
-// ErrNotDurable and nothing is sent. Mints a fresh trace; from within a handler use
-// Ctx.CastConfirmed. See confirm.go.
-func CastConfirmed(target, op string, payload any, timeout time.Duration, opts ...SendOption) error {
-	if sharedConn == nil {
-		return fmt.Errorf("no connection - call Start() first")
-	}
-	return doCastConfirmed(sharedConn, os.Getenv("AETHER_APP"), newTrace(), target, op, payload, timeout, applySendOpts(opts).idem)
-}
-
-// CastConfirmed is the trace-propagating confirmed cast from inside a handler.
-func (c *Ctx) CastConfirmed(target, op string, payload any, timeout time.Duration, opts ...SendOption) error {
-	return doCastConfirmed(c.NATS, c.App, orNewTrace(c.Trace), target, op, payload, timeout, applySendOpts(opts).idem)
-}
-
-func doCall(nc *nats.Conn, app, trace, target, op string, payload any, timeout time.Duration, idem string) (json.RawMessage, error) {
-	req := wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCall, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-	msg, err := nc.Request(wire.Call(app, target), mustJSON(req), timeout)
-	if err != nil {
-		return nil, err
-	}
-	var reply wire.Envelope
-	if err := json.Unmarshal(msg.Data, &reply); err != nil {
-		return nil, err
-	}
-	if reply.Status == "error" {
-		return nil, fmt.Errorf("%s: %s", reply.Error.Type, reply.Error.Message)
-	}
-	return reply.Payload, nil
-}
-
-func doCast(nc *nats.Conn, app, trace, target, op string, payload any, idem string) error {
-	return nc.Publish(wire.Cast(app, target), mustJSON(newCastEnvelope(trace, target, op, payload, idem)))
-}
-
-// newCastEnvelope builds the envelope shared by the plain and the confirmed cast.
-func newCastEnvelope(trace, target, op string, payload any, idem string) wire.Envelope {
-	return wire.Envelope{V: 1, ID: nats.NewInbox(), Trace: trace, Idem: idem, Kind: wire.KindCast, To: target, Op: op, Payload: mustMarshal(payload), TS: time.Now().UnixMilli()}
-}
-
-// newTrace mints a fresh correlation id for an edge (a message that starts a new operation).
-func newTrace() string { return nats.NewInbox() }
-
-// orNewTrace returns the given trace, or a fresh one when it is empty (the message came in
-// without a trace, so this thrall is the edge that starts one).
-func orNewTrace(trace string) string {
-	if trace == "" {
-		return newTrace()
-	}
-	return trace
-}
-
 // StartChild asks the lord to spawn a new thrall at runtime - a child not in the
 // manifest (a driver per connection, a worker per request). The lord supervises it
 // one_for_one, like a manifest child but outside any group strategy. Returns the
@@ -586,8 +529,8 @@ func (c *Ctx) lordControl(op string, payload any, timeout time.Duration) (json.R
 	if err := json.Unmarshal(msg.Data, &reply); err != nil {
 		return nil, err
 	}
-	if reply.Status == "error" {
-		return nil, fmt.Errorf("%s: %s", reply.Error.Type, reply.Error.Message)
+	if reply.Status == wire.StatusError {
+		return nil, callErrorFrom(reply.Error)
 	}
 	return reply.Payload, nil
 }
@@ -678,15 +621,6 @@ func startLordLivenessFencing(nc *nats.Conn, name string, log *slog.Logger, stop
 	return nil
 }
 
-func okReply(req wire.Envelope, payload any) wire.Envelope {
-	return wire.Envelope{V: 1, ID: req.ID, Kind: wire.KindReply, Status: "ok", Payload: mustMarshal(payload)}
-}
-
-func errReply(req wire.Envelope, typ, message string) wire.Envelope {
-	return wire.Envelope{V: 1, ID: req.ID, Kind: wire.KindReply, Status: "error",
-		Error: &wire.WireError{Type: typ, Message: message, Retryable: false}}
-}
-
 func lastToken(subject string) string {
 	for i := len(subject) - 1; i >= 0; i-- {
 		if subject[i] == '.' {
@@ -694,14 +628,4 @@ func lastToken(subject string) string {
 		}
 	}
 	return subject
-}
-
-func mustJSON(e wire.Envelope) []byte {
-	b, _ := json.Marshal(e)
-	return b
-}
-
-func mustMarshal(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
 }

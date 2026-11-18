@@ -149,6 +149,11 @@ func edgeHandler(nc *nats.Conn, app string, router *edge.Router, timeout time.Du
 		}
 
 		env := edge.BuildEnvelope(route, body, r.URL.Query())
+		if route.Kind != "cast" {
+			// The edge stops waiting after timeout; say so, so a thrall that only gets to this call
+			// later drops it instead of executing a request whose HTTP client already got a 504.
+			env.Deadline = wire.DeadlineAfter(time.Now(), timeout)
+		}
 		data, err := json.Marshal(env)
 		if err != nil {
 			logger.Error("edge: encoding envelope", slog.String("route", r.Method+" "+r.URL.Path), slog.String("err", err.Error()))
