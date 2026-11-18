@@ -249,3 +249,27 @@ func TestDurableCastStopsInsideABatch(t *testing.T) {
 	}
 	t.Fatalf("casts still owed after the drain = %d, want %d (all but the one handled)", pending, backlog-1)
 }
+
+// TestDurableCastIdleStopIsImmediate: an idle durable consumer returns as soon as it is told to
+// stop, instead of waiting out the fetch it is blocked in.
+func TestDurableCastIdleStopIsImmediate(t *testing.T) {
+	nc, _ := durableCastEnv(t, "dur", "idle")
+	stop := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		consumeDurableCast(nc, "dur", "idle", discardLogger(), stop, func([]byte, func()) {})
+	}()
+	time.Sleep(150 * time.Millisecond) // the consumer exists and is inside a fetch
+
+	began := time.Now()
+	close(stop)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeDurableCast did not return after stop")
+	}
+	if took := time.Since(began); took > 200*time.Millisecond {
+		t.Errorf("an idle durable consumer took %v to stop, want it to stop at once", took)
+	}
+}

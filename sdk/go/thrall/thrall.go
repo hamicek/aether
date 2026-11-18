@@ -14,6 +14,7 @@
 package thrall
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -636,24 +637,38 @@ func stopping(stop <-chan struct{}) bool {
 }
 
 // verbLoop reads messages from a synchronous subscription and passes them to the handler
-// (serialized - one message at a time), until stop arrives.
+// (serialized - one message at a time), until stop arrives. A stop does not wait out the read
+// in progress: the subscription is closed, which makes a blocked read return at once, so an idle
+// thrall drains immediately. Messages the subscription still buffered are not handled; a message
+// already taken is.
 func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Msg)) {
-	for {
+	returned := make(chan struct{})
+	defer close(returned)
+	go func() {
 		select {
 		case <-stop:
-			return
-		default:
+			_ = sub.Unsubscribe()
+		case <-returned:
 		}
-		msg, err := sub.NextMsg(500 * time.Millisecond)
+	}()
+	for {
+		if stopping(stop) {
+			return
+		}
+		msg, err := sub.NextMsg(verbPollInterval)
 		if err == nats.ErrTimeout {
 			continue
 		}
 		if err != nil {
-			return
+			return // the subscription was closed: a stop, or the connection went away
 		}
 		handle(msg)
 	}
 }
+
+// verbPollInterval is how long one read waits for a message. It no longer bounds how fast a stop
+// is noticed (the stop closes the subscription); it only keeps the loop turning.
+const verbPollInterval = 500 * time.Millisecond
 
 // Durable consumer tuning. Fetching in batches amortizes the per-message server round-trip
 // (a Fetch(1) loop pays one round-trip per cast, which caps drain throughput). The batch is
@@ -662,7 +677,7 @@ func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Ms
 // MaxAckPending (>= batch) bounds the in-flight unacked messages the server will hand out.
 const (
 	durableBatchSize     = 128
-	durableFetchMaxWait  = 500 * time.Millisecond // keep the stop signal responsive
+	durableFetchMaxWait  = 500 * time.Millisecond // one fetch; a stop cancels it sooner
 	durableAckWait       = 30 * time.Second
 	durableMaxAckPending = 512
 )
@@ -692,15 +707,26 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 			return
 		}
 	}
-	for {
+	// A fetch in progress is abandoned the moment stop arrives, so an idle durable thrall drains
+	// at once instead of waiting out the fetch.
+	untilStop, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
 		select {
 		case <-stop:
-			return
-		default:
+			cancel()
+		case <-untilStop.Done():
 		}
-		msgs, err := sub.Fetch(durableBatchSize, nats.MaxWait(durableFetchMaxWait))
+	}()
+	for {
+		if stopping(stop) {
+			return
+		}
+		fetch, done := context.WithTimeout(untilStop, durableFetchMaxWait)
+		msgs, err := sub.Fetch(durableBatchSize, nats.Context(fetch))
+		done()
 		if err != nil {
-			continue // timeout / no messages
+			continue // timeout / no messages / stopping
 		}
 		for _, m := range msgs {
 			// A drain does not wait for the rest of the batch: with a backlog that is up to

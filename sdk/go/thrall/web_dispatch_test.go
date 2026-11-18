@@ -462,3 +462,47 @@ func TestWebServeFnLeavesTheSharedValueAlone(t *testing.T) {
 		t.Error("a malformed payload must be a handler error")
 	}
 }
+
+// TestIdleDrainIsImmediate: a thrall with nothing in hand stops as soon as it is told to. The
+// readers are woken by the stop rather than left to time out their current read, which would add
+// up to half a second to every node shutdown, group restart and StopChild.
+func TestIdleDrainIsImmediate(t *testing.T) {
+	defs := map[string]func() error{
+		"genserver": func() error {
+			return Start(Def[struct{}]{Init: func(*Ctx) (struct{}, error) { return struct{}{}, nil }})
+		},
+		"web, serialized": func() error {
+			return StartWeb(WebDef[struct{}]{
+				Handle: func(HTTPRequest, struct{}, *Ctx) (HTTPResponse, struct{}, error) {
+					return TextResponse(200, "ok"), struct{}{}, nil
+				},
+			})
+		},
+		"web, concurrent": func() error { return StartWeb(serveDef(&site{gate: newGate()}, 4)) },
+	}
+	for name, start := range defs {
+		t.Run(name, func(t *testing.T) {
+			eth := dispatchEther(t)
+			stopped := startWebForDrain(t, eth, start)
+			time.Sleep(50 * time.Millisecond) // the readers are back in a blocking read
+
+			drain, _ := json.Marshal(wire.Envelope{V: 1, Kind: wire.KindCtl, Op: "drain"})
+			began := time.Now()
+			if err := eth.Conn().Publish(wire.Ctl("web"), drain); err != nil {
+				t.Fatalf("publish drain: %v", err)
+			}
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Errorf("drain ended with: %v", err)
+				}
+			case <-time.After(clientTimeout):
+				t.Fatal("the thrall did not stop")
+			}
+			// Far below the 500 ms a read used to be waited out for, with room for a slow machine.
+			if took := time.Since(began); took > 200*time.Millisecond {
+				t.Errorf("an idle thrall took %v to drain, want it to stop at once", took)
+			}
+		})
+	}
+}
