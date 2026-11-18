@@ -45,7 +45,7 @@ func main() {
 	}
 	switch os.Args[1] {
 	case "up":
-		up(os.Args[2:])
+		os.Exit(up(os.Args[2:]))
 	case "ps":
 		psCmd(os.Args[2:])
 	case "describe":
@@ -68,7 +68,15 @@ func main() {
 	}
 }
 
-func up(argv []string) {
+// exitGaveUp is the exit status of `aether up` when the lord ended the node because it gave up on
+// a thrall (on_give_up = "exit"). It is its own status so that the supervisor's record tells this
+// apart from a start-up error (1) and a usage error (2).
+const exitGaveUp = 3
+
+// up runs a node until it is told to stop and returns the process exit status: 0 after a shutdown
+// that was asked for, exitGaveUp when the lord ended the node itself. It returns rather than exits
+// so that the deferred cleanup (the bus, the endpoint file) runs on both ways out.
+func up(argv []string) int {
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	manifestPath := fs.String("f", "aether.toml", "path to the manifest")
 	_ = fs.Parse(argv)
@@ -124,9 +132,25 @@ func up(argv []string) {
 		log.Fatalf("start: %v", err)
 	}
 
-	<-ctx.Done()
-	logger.Info("shutdown: graceful drain of thralls")
-	root.Stop()
+	select {
+	case <-ctx.Done():
+		logger.Info("shutdown: graceful drain of thralls")
+		root.Stop()
+		// A give-up that coincided with the stop signal still decides the status: the supervisor
+		// must not read a node that failed as one that stopped cleanly.
+		select {
+		case err := <-root.Failed():
+			logger.Error("node failed while stopping", slog.String("error", err.Error()), slog.Int("exit_status", exitGaveUp))
+			return exitGaveUp
+		default:
+			return 0
+		}
+	case err := <-root.Failed():
+		logger.Error("node failed: draining the remaining thralls and exiting non-zero",
+			slog.String("error", err.Error()), slog.Int("exit_status", exitGaveUp))
+		root.Stop()
+		return exitGaveUp
+	}
 }
 
 // psCmd prints the current state of thralls from the KV registry.

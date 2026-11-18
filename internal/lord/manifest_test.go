@@ -888,3 +888,30 @@ route."POST /x" = { thrall = "worker", op = "x", kind = "cast", schema = "bad.js
 		}
 	})
 }
+
+// TestLoadManifestOnGiveUp: what the lord does after giving up on a thrall is a manifest setting
+// whose default is the behaviour from before it existed, and a typo is a load error rather than a
+// silently ignored wish.
+func TestLoadManifestOnGiveUp(t *testing.T) {
+	body := func(setting string) string {
+		return "app = \"demo\"\n" + setting + "\n[[thrall]]\nname = \"counter\"\ncmd  = \"run counter\"\n"
+	}
+	for setting, want := range map[string]string{
+		"":                        GiveUpContinue,
+		`on_give_up = "continue"`: GiveUpContinue,
+		`on_give_up = "exit"`:     GiveUpExit,
+	} {
+		m, err := LoadManifest(writeManifest(t, body(setting)))
+		if err != nil {
+			t.Fatalf("%q: LoadManifest: %v", setting, err)
+		}
+		if m.OnGiveUp != want {
+			t.Errorf("%q: OnGiveUp = %q, want %q", setting, m.OnGiveUp, want)
+		}
+	}
+
+	_, err := LoadManifest(writeManifest(t, body(`on_give_up = "restart"`)))
+	if err == nil || !strings.Contains(err.Error(), "on_give_up") {
+		t.Fatalf("an unknown on_give_up must fail the load and name the setting, got %v", err)
+	}
+}

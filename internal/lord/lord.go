@@ -70,6 +70,11 @@ type Lord struct {
 
 	exits chan exit // watchers -> supervisor loop; serializes restart decisions
 
+	// failed carries the reason the lord stopped supervising of its own accord (see Failed). It
+	// holds at most one value: the first give-up that ends the node.
+	failed   chan error
+	failOnce sync.Once
+
 	appCtx     context.Context
 	procCtx    context.Context
 	procCancel context.CancelFunc
@@ -150,6 +155,7 @@ func New(m *Manifest, eth *ether.Ether) (*Lord, error) {
 		log:                obs.NewLogger().With(slog.String("component", "lord"), slog.String("app", m.App)),
 		metrics:            newLordMetrics(),
 		exits:              make(chan exit, len(m.Thralls)+8),
+		failed:             make(chan error, 1),
 		procCtx:            procCtx,
 		procCancel:         procCancel,
 		ready:              map[string]bool{},
@@ -619,10 +625,48 @@ func (l *Lord) overIntensity(ch *child) bool {
 			l.log.Error("restart-intensity exceeded - giving up", slog.String("name", ch.spec.Name), slog.Int("starts", n), slog.Duration("within", window))
 			l.metrics.incGaveUp(ch.spec.Name)
 			l.emit("gave_up", ch.spec.Name, 0)
+			l.escalateGiveUp(ch, n, window)
 			return true
 		}
 	}
 	return false
+}
+
+// GaveUpError is why a lord with on_give_up = "exit" ended its node: it could not keep a thrall
+// of the manifest running.
+type GaveUpError struct {
+	Thrall string        // the thrall the lord gave up on
+	Starts int           // how many times it was started ...
+	Within time.Duration // ... within this window
+}
+
+func (e *GaveUpError) Error() string {
+	return fmt.Sprintf("gave up on thrall %q after %d starts within %s", e.Thrall, e.Starts, e.Within)
+}
+
+// Failed yields - at most once - the reason the lord stopped supervising of its own accord. Today
+// that is one thing: it gave up on a thrall of the manifest and the manifest says on_give_up =
+// "exit". From then on the lord restarts nothing; whoever runs it is expected to Stop it and exit
+// non-zero, so that the supervisor above (the one thing that can still fix the node) takes over.
+// With the default on_give_up it never yields.
+func (l *Lord) Failed() <-chan error { return l.failed }
+
+// escalateGiveUp ends the node after a give-up when the manifest asks for it. A dynamic child is
+// exempt: it is not part of the node the manifest declares - the thrall that spawned it is the
+// one that knows it exists and decides what its loss means - so it is only retired, as before.
+func (l *Lord) escalateGiveUp(ch *child, starts int, window time.Duration) {
+	if l.manifest.OnGiveUp != GiveUpExit || ch.dynamic {
+		return
+	}
+	l.failOnce.Do(func() {
+		l.log.Error(`a thrall of the manifest cannot be kept running and on_give_up = "exit" - shutting the node down so that its supervisor restarts it`,
+			slog.String("name", ch.spec.Name))
+		l.emit("node_exit", ch.spec.Name, 0)
+		// Nothing is restarted from here on: the supervisor loop and the singleton loops see the
+		// lord as stopping, and Stop (called by whoever reads Failed) drains what is still up.
+		l.draining.Store(true)
+		l.failed <- &GaveUpError{Thrall: ch.spec.Name, Starts: starts, Within: window}
+	})
 }
 
 // backoff waits restartBackoff; returns true if shutdown arrived in the meantime.

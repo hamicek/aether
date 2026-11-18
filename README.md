@@ -76,7 +76,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Typed refusals** | ✅ | `Refuse(code, message)` from a handler -> the caller gets a typed error with a stable machine code, told apart from a failure by type, not by message text; a refusal is not the thrall's last error. Go + TS + Python - see [Refusing a request](#refusing-a-request) |
 | **Call deadline** | ✅ | every call says when its caller stops waiting; a thrall drops an expired call instead of executing it later (`aether_expired_total`). Go + TS + Python - see [Calling a thrall](#calling-a-thrall-the-client) |
 | **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
-| **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff |
+| **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff; `on_give_up = "exit"` ends the node (exit status 3) when a thrall is given up on, for the supervisor above to restart it |
 | **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
@@ -391,6 +391,7 @@ in all three SDKs (`startEvent`/`defEvent` in TS, `start_event`/`def_event` in P
 app = "demo"
 strategy = "one_for_one"                 # | one_for_all | rest_for_one
 restart_intensity = { max = 3, within_ms = 5000 }
+# on_give_up = "exit"                    # after giving up on a thrall: continue (default) | exit the node
 
 [nats]
 mode = "embedded"                        # | external (+ url = "nats://...")
@@ -404,6 +405,16 @@ scope   = "local"                        # | singleton
 durable = false                          # true -> cast over JetStream
 # fencing = false                        # opt out of lord-liveness fencing (see below)
 ```
+
+**When the lord gives up.** A thrall started more than `max` times within `within_ms` is not
+restarted again (logged, `aether_gave_up_total`, a `gave_up` event). By default the lord then
+carries on without it - which leaves a node that looks up from outside while part of it is dead.
+With `on_give_up = "exit"` the lord instead drains the node and `aether up` exits with **status 3**,
+so the supervisor above it (systemd `Restart=always`, a container restart policy) starts the whole
+node afresh. Set it on every node whose lord is supervised; leave the default for a node nothing
+restarts. A permanent cause then shows as a crash loop of the node, paced by the supervisor's own
+back-off and visible in its record. It covers manifest thralls (not dynamic children or
+singletons). Details: [DESIGN.md §9](./DESIGN.md).
 
 By default every thrall self-terminates when it can no longer verify its lord's lease, so no
 thrall outlives its lord. On a shared external bus a KV hiccup then reaps the whole tree. Set
@@ -790,7 +801,7 @@ works the same embedded or external. Exposed series:
 | `aether_up` | gauge | 1 while the lord is running |
 | `aether_thralls{status}` | gauge | thralls by current status (`starting`/`ready`/`down`/`stale`) |
 | `aether_restarts_total{name}` | counter | restarts per thrall |
-| `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded) |
+| `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded). With `on_give_up = "exit"` the node exits right after, so alert on the supervisor's restart count there, not on this |
 | `aether_heartbeat_misses_total{name}` | counter | detected heartbeat outages |
 | `aether_mailbox_depth{name}` | gauge | messages a thrall has received and not finished: waiting and running (self-reported) |
 | `aether_in_flight{name}` | gauge | handlers a thrall is running right now (self-reported); `mailbox_depth - in_flight` is what waits. 0 or 1 for a serialized thrall, up to its concurrency for a concurrent web thrall |

@@ -497,6 +497,7 @@ The separation: **thrall behavior = code** (in the SDK), **tree topology = a dec
 app = "demo"
 strategy = "one_for_one"                 # one_for_one | one_for_all | rest_for_one
 restart_intensity = { max = 3, within_ms = 5000 }
+# on_give_up = "exit"                    # continue (default) | exit - see "When the lord gives up"
 
 [nats]
 mode = "embedded"                        # embedded | external
@@ -537,6 +538,47 @@ replicas = 3                             # -> queue group, a pool of 3 workers
 A programmatic API on top (a DynamicSupervisor, §12) adds a thrall at runtime (`ctx.StartChild` /
 `ctx.StopChild`); the default path is still the manifest.
 
+### When the lord gives up
+
+`restart_intensity` bounds a crash loop: a thrall started more than `max` times within `within_ms`
+is not restarted again. The lord logs it at error, counts it (`aether_gave_up_total{name}`) and
+emits a `gave_up` event - always. What happens *next* is `on_give_up`:
+
+- **`continue`** (the default, and the behaviour before the setting existed). The thrall stays
+  down and the lord carries on supervising the rest. The cost is a **half-dead node**: the lord is
+  running, so whatever watches the lord process sees a healthy node, while a thrall - possibly the
+  one the whole site depends on - is gone until someone redeploys. It is still the right default
+  for a node nothing supervises (`aether up` in a terminal, a detached dev node): exiting there
+  would take the healthy thralls down too, with nothing to bring anything back.
+- **`exit`** - the OTP answer. A supervisor that cannot keep a child alive within its intensity
+  stops its children and fails itself, so the decision moves up to *its* supervisor. The lord
+  emits `node_exit`, stops restarting anything, drains the node, and `aether up` exits with
+  **status 3** (1 is a start-up error, 2 a usage error). The supervisor above - systemd with
+  `Restart=always`, a container restart policy - starts the whole node afresh: a clean bus, every
+  thrall through `init`.
+
+**A deploy tool should write `on_give_up = "exit"` for every node whose lord runs under a process
+supervisor that restarts it, and leave it out otherwise.** Under a supervisor, `continue` is the
+worst of both: the one thing that could repair the node is told everything is fine.
+
+**If the cause is permanent** (a broken binary, a missing dependency) the node crash-loops as a
+whole - by design, and where it can be seen: the lord's log ends each round with the same give-up
+and `node failed` lines, the supervisor records each non-zero exit (`systemctl status` shows
+status 3 and the restart count), and the loop is paced by the supervisor's own back-off
+(`RestartSec`, or a container's back-off) on top of the time the lord needs to give up. The lord
+adds no back-off of its own and does not try to hide the loop: whether to keep retrying forever or
+to stop after a burst (`StartLimitBurst`) is the outer supervisor's policy, not the node's. The
+price of `exit` is that the healthy thralls restart with the broken one on every round; a node
+where that is worse than a missing thrall should stay on `continue` - and alert on
+`aether_gave_up_total`.
+
+Scope. `on_give_up` covers the thralls of the manifest, under any strategy (a group restart that
+is given up on counts the same). A **dynamic child** (`ctx.StartChild`) is exempt: it is not part
+of the node the manifest declares, so giving up on it retires it as before and the thrall that
+spawned it decides what its loss means. A **singleton** has its own loop and no intensity budget -
+it is retried for as long as the lord runs and is never given up on, so this setting does not
+apply to it (nor to the built-in `[[edge.http]]` servers, which are singletons).
+
 ---
 
 ## 9b. Lord lifecycle (step by step)
@@ -548,8 +590,8 @@ A programmatic API on top (a DynamicSupervisor, §12) adds a thrall at runtime (
 3. The thrall (SDK) connects, subscribes, starts a heartbeat. The lord sees the heartbeat -> status
    `ready`, emits `ready` on `aether._lord.events`.
 4. **The watch loop** watches the signals: the PID exit code and the heartbeat. An abnormal crash ->
-   restart per policy + backoff, bounded by `restart_intensity` (exceeding it -> escalation per the
-   `strategy`).
+   restart per policy + backoff, bounded by `restart_intensity` (exceeding it -> the lord gives up
+   on the thrall and, with `on_give_up = "exit"`, ends the node - §9).
 5. **Graceful shutdown** (on Ctrl-C / restart): `ctl:drain` -> grace period -> `SIGTERM` -> fallback
    `SIGKILL`. After a drain the thrall finishes the in-flight message, calls `terminate`, and
    disconnects.

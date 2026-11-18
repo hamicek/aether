@@ -16,14 +16,17 @@ import (
 
 // Manifest = the contents of aether.toml (the supervision tree topology).
 type Manifest struct {
-	App              string        `toml:"app"`
-	Strategy         string        `toml:"strategy"` // one_for_one | one_for_all | rest_for_one
-	RestartIntensity Intensity     `toml:"restart_intensity"`
-	Nats             ether.Config  `toml:"nats"`
-	Observability    Observability `toml:"observability"`
-	Liveness         Liveness      `toml:"liveness"`
-	Thralls          []ThrallSpec  `toml:"thrall"`
-	Edge             Edge          `toml:"edge"`
+	App              string    `toml:"app"`
+	Strategy         string    `toml:"strategy"` // one_for_one | one_for_all | rest_for_one
+	RestartIntensity Intensity `toml:"restart_intensity"`
+	// OnGiveUp is what the lord does once it gives up restarting a thrall of the manifest (the
+	// restart intensity was exceeded): GiveUpContinue (the default) or GiveUpExit.
+	OnGiveUp      string        `toml:"on_give_up"`
+	Nats          ether.Config  `toml:"nats"`
+	Observability Observability `toml:"observability"`
+	Liveness      Liveness      `toml:"liveness"`
+	Thralls       []ThrallSpec  `toml:"thrall"`
+	Edge          Edge          `toml:"edge"`
 }
 
 // Observability configures the runtime's telemetry. An empty MetricsAddr keeps the
@@ -56,6 +59,21 @@ type Liveness struct {
 	HeartbeatIntervalMs int `toml:"heartbeat_interval_ms"` // how often a thrall heartbeats (default 2000)
 	StaleAfterMisses    int `toml:"stale_after_misses"`    // missed intervals before "stale" (default 3)
 }
+
+// What the lord does after giving up on a thrall of the manifest. Either way the give-up itself
+// is logged, counted (aether_gave_up_total) and emitted as a gave_up event.
+const (
+	// GiveUpContinue leaves the thrall down and carries on supervising the rest of the node. A
+	// node that is not under a process supervisor has nothing better to do: exiting would take
+	// the healthy thralls down with nobody to bring anything back. The price is a node that is
+	// "up" for whatever watches the lord while part of it is dead until someone steps in.
+	GiveUpContinue = "continue"
+	// GiveUpExit is the OTP answer: a supervisor that cannot keep its children alive stops them
+	// all and fails itself, so that the supervisor above it decides. The lord drains the node and
+	// `aether up` exits non-zero. For a node whose lord is itself supervised (systemd with
+	// Restart=always, a container restart policy), which then starts the whole node afresh.
+	GiveUpExit = "exit"
+)
 
 // Intensity = the restart-intensity window (max restarts within a given time).
 type Intensity struct {
@@ -197,6 +215,9 @@ func (m *Manifest) applyDefaults() {
 	if m.Nats.Mode == "" {
 		m.Nats.Mode = "embedded"
 	}
+	if m.OnGiveUp == "" {
+		m.OnGiveUp = GiveUpContinue
+	}
 	// Liveness: clamp the interval (non-positive -> default, too-small -> floor) and default the
 	// miss count, so a missing or nonsensical [liveness] section keeps today's 2s / 3-miss behaviour.
 	m.Liveness.HeartbeatIntervalMs = obs.ClampHeartbeatIntervalMs(m.Liveness.HeartbeatIntervalMs)
@@ -242,6 +263,11 @@ func (m *Manifest) validate() error {
 	// caught here at load rather than later when the embedded server is built.
 	if m.Nats.Leaf != nil && m.App == "" {
 		return fmt.Errorf("nats.leaf requires a top-level app (the leaf exports aether.<app>.>)")
+	}
+	switch m.OnGiveUp {
+	case GiveUpContinue, GiveUpExit:
+	default:
+		return fmt.Errorf("on_give_up = %q is invalid (use %q or %q)", m.OnGiveUp, GiveUpContinue, GiveUpExit)
 	}
 	// The app sits in the subject's app position (aether.<app>.…); a leading underscore is reserved
 	// for the runtime's own channels there (aether._lord.…, aether._fleet.…), so an app named that
