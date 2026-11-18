@@ -194,3 +194,58 @@ func TestDurableCastStopsOnEmptyStream(t *testing.T) {
 		t.Fatal("consumeDurableCast did not return after stop")
 	}
 }
+
+// TestDurableCastStopsInsideABatch: a drain must not make a durable thrall work through the batch
+// it has already fetched. With a backlog that is up to 128 handlers, which outlasts the lord's
+// grace period, so the process would be killed inside a handler and never terminate properly. The
+// consumer stops after the cast it is handling; the rest of the batch stays unacknowledged and is
+// redelivered to the next process.
+func TestDurableCastStopsInsideABatch(t *testing.T) {
+	const (
+		app     = "dur"
+		name    = "draining"
+		backlog = 40 // well inside one batch
+	)
+	nc, js := durableCastEnv(t, app, name)
+	for i := 0; i < backlog; i++ {
+		if _, err := js.Publish(wire.Cast(app, name), []byte(fmt.Sprintf(`{"payload":{"n":%d}}`, i))); err != nil {
+			t.Fatalf("publish %d: %v", i, err)
+		}
+	}
+
+	stop := make(chan struct{})
+	handled := 0 // touched only by the consumer goroutine until it has returned
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		consumeDurableCast(nc, app, name, discardLogger(), stop, func([]byte, func()) {
+			handled++
+			if handled == 1 {
+				close(stop) // the drain arrives while the first cast of the batch is being handled
+			}
+		})
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("consumeDurableCast did not return after stop")
+	}
+	if handled != 1 {
+		t.Fatalf("the consumer handled %d casts after the drain began, want it to stop after the one in hand", handled)
+	}
+
+	// The cast in hand was acknowledged; the rest of the fetched batch was not, so it comes back.
+	var pending int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		ci, err := js.ConsumerInfo(wire.Stream(app, name), name)
+		if err != nil {
+			t.Fatalf("ConsumerInfo: %v", err)
+		}
+		if pending = ci.NumAckPending + int(ci.NumPending); pending == backlog-1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("casts still owed after the drain = %d, want %d (all but the one handled)", pending, backlog-1)
+}

@@ -625,6 +625,16 @@ func replier(nc *nats.Conn, msg *nats.Msg, e wire.Envelope, lastErr *lastError, 
 	}
 }
 
+// stopping reports whether the thrall has been told to stop.
+func stopping(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // verbLoop reads messages from a synchronous subscription and passes them to the handler
 // (serialized - one message at a time), until stop arrives.
 func verbLoop(sub *nats.Subscription, stop <-chan struct{}, handle func(*nats.Msg)) {
@@ -693,6 +703,12 @@ func consumeDurableCast(nc *nats.Conn, app, name string, log *slog.Logger, stop 
 			continue // timeout / no messages
 		}
 		for _, m := range msgs {
+			// A drain does not wait for the rest of the batch: with a backlog that is up to
+			// durableBatchSize handlers, far past the lord's grace period. The casts not yet
+			// handled stay unacknowledged and are redelivered to the next process.
+			if stopping(stop) {
+				return
+			}
 			m := m
 			// On escalation processCast acks (synchronously) before it crashes, so the poison
 			// cast is not redelivered; the happy path returns here and we ack in arrival order.
