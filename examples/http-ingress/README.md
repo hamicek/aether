@@ -1,5 +1,11 @@
 # http-ingress - expose a web thrall over HTTP
 
+> The ingress itself is a component of aether now: the program is `cmd/http-ingress`, its core
+> `internal/ingress`, and its flags, limits and status codes are documented in the top-level
+> `README.md` ("HTTP ingress for web thralls"). This directory is the **demo** - a web thrall behind
+> it. `main.go` here is only a wrapper kept so that `go build ./examples/http-ingress` still yields
+> the same binary for tooling that has not moved to `./cmd/http-ingress` yet.
+
 A generic HTTP front door for the **"a thrall IS the web server"** model (AE-091/092). The web thrall
 (`blog`) is a plain genserver that answers `http_request -> http_response` and **owns no port**; the
 ingress maps the request's `Host` header to a thrall, forwards the whole request over NATS, and writes
@@ -16,7 +22,7 @@ host->subject forwarder - it does no path routing (that is the web thrall's job)
 export GOTOOLCHAIN=local
 mise exec go@latest -- go build -o bin/aether ./cmd/aether
 mise exec go@latest -- go build -o bin/blog ./examples/http-ingress/blog
-mise exec go@latest -- go build -o bin/http-ingress ./examples/http-ingress
+mise exec go@latest -- go build -o bin/http-ingress ./cmd/http-ingress
 
 cd examples/http-ingress
 ../../bin/aether up -f aether.toml
@@ -65,9 +71,9 @@ runtime without restarting the ingress:
 - The provider calls the registry's `resolve` op (`host` + the ingress's `scope`) and routes to the
   returned thrall. Reuse is over the **wire contract**, not a code import - the registry lives in the
   private `ae-commons` repo and is reached purely by its NATS envelope.
-- **Caching:** resolve is a call per request, so results are cached for `-registry-ttl`. A registry
-  outage (timeout / no responders) denies that one request but is never cached, so it cannot latch a
-  host into a stale "not found".
+- **Caching:** resolve is a call per request, so results are cached for `-registry-ttl`.
+- **Outage:** when the registry cannot be reached, the last known answer of a host keeps being served
+  for `-registry-stale` (default 5m) past its TTL; a host with no such answer gets **503**, not 404.
 - **Scope:** a `public` ingress sees only public sites; a `vpn` ingress sees both. The scope travels
   in the resolve request and the public/vpn filter stays in the registry, so the ingress keeps its
   default-deny behaviour unchanged.
@@ -80,5 +86,5 @@ runtime without restarting the ingress:
   default-deny behaviour.
 - **Dumb forwarder.** No path routing, no middleware, no business logic in the ingress - all of that
   lives in the web thrall. TLS, certificates and rate limiting belong in a reverse proxy in front.
-- Request bodies are size-capped before they enter the ether; a reply with no status is treated as an
-  upstream fault (502), not forwarded as an invalid HTTP status.
+- A request is one bus message: a body over what the bus carries (about 714 KiB by default) is answered
+  413, never truncated; a reply with no status, or too large for the bus, is an upstream fault (502).

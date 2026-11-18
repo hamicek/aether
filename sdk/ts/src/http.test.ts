@@ -36,6 +36,15 @@ const cases: Record<string, HTTPRequest | HTTPResponse> = {
     query: "q=cats&q=dogs&safe=1",
     headers: { Accept: ["text/html"], "X-Tag": ["a", "b"] },
   },
+  req_facts: {
+    method: "POST",
+    path: "/api/login",
+    host: "shop.example",
+    scheme: "https",
+    client_ip: "203.0.113.7",
+    headers: { "X-Forwarded-For": ["203.0.113.7"], "X-Forwarded-Proto": ["https"] },
+    body: "eyJ1c2VyIjoiYW5uIn0=",
+  },
   resp_html: { status: 200, headers: { "Content-Type": ["text/html; charset=utf-8"] }, body: "PGgxPmhpPC9oMT4=" },
   resp_json: { status: 201, headers: { "Content-Type": ["application/json"] }, body: "eyJvayI6dHJ1ZX0=" },
   resp_cookies: { status: 200, headers: { "Set-Cookie": ["a=1", "b=2"] }, body: "b2s=" },
@@ -77,6 +86,23 @@ test("defWeb answers http_request with the handler's response and threads state"
   const [resp, next] = await handler!(req, 4, {} as Ctx);
   expect(next).toBe(5);
   expect(bodyText(resp as HTTPResponse)).toBe("path=/hello hits=5");
+});
+
+test("request facts are additive: absent from an old ingress, readable from a new one", async () => {
+  const def = defWeb<null>({
+    name: "web",
+    handle: (req, s) => [textResponse(200, `${req.scheme ?? "?"}://${req.host ?? "?"} from ${req.client_ip ?? "?"}`), s],
+  });
+  const handler = def.handleCall![OP_HTTP_REQUEST]!;
+  // An ingress that predates the facts sends none: the handler sees them as undefined.
+  const [fromOld] = await handler({ method: "GET", path: "/" }, null, {} as Ctx);
+  expect(bodyText(fromOld as HTTPResponse)).toBe("?://? from ?");
+  // A new ingress states them; everything the old contract carried is still where it was.
+  const stated = golden("req_facts") as HTTPRequest;
+  expect(stated.method).toBe("POST");
+  expect(bodyText(stated)).toBe('{"user":"ann"}');
+  const [fromNew] = await handler(stated, null, {} as Ctx);
+  expect(bodyText(fromNew as HTTPResponse)).toBe("https://shop.example from 203.0.113.7");
 });
 
 test("defWeb requires a handle", () => {

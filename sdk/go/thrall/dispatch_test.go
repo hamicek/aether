@@ -317,6 +317,55 @@ func holdMailbox(t *testing.T, client *Client, target string, entered <-chan str
 	}
 }
 
+// TestReplyTooLargeIsAnsweredNotDropped: a reply that does not fit one bus message cannot be sent.
+// The caller must learn that at once, as a typed error, instead of waiting out its timeout; the
+// thrall records it as its last error and carries on.
+func TestReplyTooLargeIsAnsweredNotDropped(t *testing.T) {
+	eth := dispatchEther(t)
+	nc := eth.Conn()
+	awaitBeat := heartbeats(t, nc, "archive")
+	runThrall(t, eth, "ae", "archive", func() error {
+		return Start(Def[struct{}]{
+			Init: func(*Ctx) (struct{}, error) { return struct{}{}, nil },
+			HandleCall: map[string]CallFn[struct{}]{
+				"bulk": func(p json.RawMessage, s struct{}, _ *Ctx) (any, struct{}, error) {
+					var size int
+					if err := json.Unmarshal(p, &size); err != nil {
+						return nil, s, err
+					}
+					return strings.Repeat("x", size), s, nil
+				},
+			},
+		})
+	})
+	client := NewClient(nc, "ae")
+
+	small, err := CallInto[string](client, "archive", "bulk", 1024, clientTimeout)
+	if err != nil || len(small) != 1024 {
+		t.Fatalf("a reply that fits: %d bytes, %v", len(small), err)
+	}
+
+	started := time.Now()
+	_, err = client.Call("archive", "bulk", nc.MaxPayload()+1, 5*time.Second)
+	var ce *CallError
+	if !errors.As(err, &ce) || ce.Type != ErrReplyTooLarge || ce.Retryable {
+		t.Fatalf("an oversized reply = %v, want a non-retryable %s error", err, ErrReplyTooLarge)
+	}
+	if !strings.HasPrefix(ce.Message, "reply of ") || !strings.Contains(ce.Message, "does not fit one bus message") {
+		t.Errorf("the error must say what happened, got %q", ce.Message)
+	}
+	if waited := time.Since(started); waited > 4*time.Second {
+		t.Errorf("the caller waited %v: it must be answered, not left to time out", waited)
+	}
+
+	awaitBeat("the oversized reply as last error", func(m wire.HeartbeatMetrics) bool {
+		return m.Describe != nil && strings.HasPrefix(m.Describe.LastError, ErrReplyTooLarge+": ")
+	})
+	if _, err := CallInto[string](client, "archive", "bulk", 16, clientTimeout); err != nil {
+		t.Errorf("the thrall must carry on after an oversized reply: %v", err)
+	}
+}
+
 // TestTimedOutCallIsNotExecutedLater is the scenario the deadline exists for: a call waits in the
 // mailbox behind a slow handler, its caller times out, and when the thrall finally gets to it, it
 // must not run - otherwise the caller's retry would execute the write a second time.

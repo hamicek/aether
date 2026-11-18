@@ -26,6 +26,10 @@ func httpGoldenCases() map[string]any {
 			Body:    []byte{0x00, 0x01, 0xff, 0x10}},
 		"req_query_multi": HTTPRequest{Method: "GET", Path: "/search", Query: "q=cats&q=dogs&safe=1",
 			Headers: map[string][]string{"X-Tag": {"a", "b"}, "Accept": {"text/html"}}},
+		"req_facts": HTTPRequest{Method: "POST", Path: "/api/login",
+			Host: "shop.example", Scheme: "https", ClientIP: "203.0.113.7",
+			Headers: map[string][]string{"X-Forwarded-For": {"203.0.113.7"}, "X-Forwarded-Proto": {"https"}},
+			Body:    []byte(`{"user":"ann"}`)},
 		"resp_html": HTTPResponse{Status: 200,
 			Headers: map[string][]string{"Content-Type": {"text/html; charset=utf-8"}},
 			Body:    []byte("<h1>hi</h1>")},
@@ -70,7 +74,7 @@ func TestHTTPGolden(t *testing.T) {
 // TestHTTPRoundTrip proves the canonical form is a fixed point: unmarshalling a golden fixture back
 // into its type and marshalling it again yields the exact same bytes.
 func TestHTTPRoundTrip(t *testing.T) {
-	reqs := map[string]bool{"req_get": true, "req_post_binary": true, "req_query_multi": true}
+	reqs := map[string]bool{"req_get": true, "req_post_binary": true, "req_query_multi": true, "req_facts": true}
 	for name := range httpGoldenCases() {
 		raw, err := os.ReadFile(httpGoldenPath(name))
 		if err != nil {
@@ -123,7 +127,7 @@ func TestHTTPOmitEmpty(t *testing.T) {
 	if got := string(req); got != `{"method":"GET","path":"/"}` {
 		t.Errorf("minimal request: got %s", got)
 	}
-	for _, field := range []string{"query", "headers", "body"} {
+	for _, field := range []string{"query", "host", "scheme", "client_ip", "headers", "body"} {
 		if strings.Contains(string(req), `"`+field+`"`) {
 			t.Errorf("minimal request unexpectedly contains %q: %s", field, req)
 		}
@@ -131,6 +135,50 @@ func TestHTTPOmitEmpty(t *testing.T) {
 	resp, _ := json.Marshal(HTTPResponse{Status: 204})
 	if got := string(resp); got != `{"status":204}` {
 		t.Errorf("minimal response: got %s, want {\"status\":204}", got)
+	}
+}
+
+// legacyHTTPRequest is the http_request payload as it was before the ingress stated the request
+// facts (host, scheme, client_ip). It stands in for a web thrall built against the old contract.
+type legacyHTTPRequest struct {
+	Method  string              `json:"method"`
+	Path    string              `json:"path"`
+	Query   string              `json:"query,omitempty"`
+	Headers map[string][]string `json:"headers,omitempty"`
+	Body    []byte              `json:"body,omitempty"`
+}
+
+// TestHTTPRequestFactsAreAdditive proves both directions of compatibility for the request facts:
+// an old web thrall reads a request from a new ingress (the extra fields are ignored, nothing it
+// knew moved), and a new web thrall reads a request from an old ingress (the facts are simply
+// empty, which the contract defines as "not stated").
+func TestHTTPRequestFactsAreAdditive(t *testing.T) {
+	fromNewIngress, err := os.ReadFile(httpGoldenPath("req_facts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old legacyHTTPRequest
+	if err := json.Unmarshal(fromNewIngress, &old); err != nil {
+		t.Fatalf("old thrall, new ingress: %v", err)
+	}
+	if old.Method != "POST" || old.Path != "/api/login" || string(old.Body) != `{"user":"ann"}` ||
+		old.Headers["X-Forwarded-For"][0] != "203.0.113.7" {
+		t.Errorf("old thrall misread a request from a new ingress: %+v", old)
+	}
+
+	fromOldIngress, err := json.Marshal(legacyHTTPRequest{Method: "GET", Path: "/", Query: "a=1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cur HTTPRequest
+	if err := json.Unmarshal(fromOldIngress, &cur); err != nil {
+		t.Fatalf("new thrall, old ingress: %v", err)
+	}
+	if cur.Method != "GET" || cur.Path != "/" || cur.Query != "a=1" {
+		t.Errorf("new thrall misread a request from an old ingress: %+v", cur)
+	}
+	if cur.Host != "" || cur.Scheme != "" || cur.ClientIP != "" {
+		t.Errorf("facts an old ingress never stated must stay empty, got %+v", cur)
 	}
 }
 

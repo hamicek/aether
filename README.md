@@ -91,6 +91,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Singleton** | ✅ | `scope="singleton"` -> a distributed KV-CAS lock: **at most one _live_ instance within the app** (overlap bounded by the lock TTL), not a strict single-writer - see [Singleton fencing](#singleton-fencing-liveness-not-write-exclusivity) |
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
+| **HTTP ingress for web thralls** | ✅ | `http-ingress` -> a Host-routed front door: forwards a whole HTTP request as one call to a **web thrall** (a thrall that *is* the web server and owns no port), with timeouts, a connection cap, a body limit the bus can carry, serve-stale routing and trustworthy client facts - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
 | **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
 | **Idempotence** | ✅ | opt-in per thrall -> dedup a call/cast by an idempotency key: a duplicate cast is skipped, a duplicate call returns the first reply. In-memory (the thrall's lifetime), complements the event-log command-key. Go + TS + Python - see [Durability](#durability) |
 
@@ -106,7 +107,10 @@ idempotent on name, a supervising thrall can re-spawn its children blindly from 
 
 ```
 cmd/aether/           CLI: up | ps | events | fleet | cast | call
+cmd/http-ingress/     HTTP ingress for web thralls: Host -> thrall, one request = one call (an edge thrall)
 internal/
+  ingress/            the ingress itself: handler, limits, route providers (static file, site-registry),
+                      request facts, access log
   ether/              embedded NATS / external connection (mode switch, incl. [nats.leaf], [nats.security])
   lord/               supervisor: manifest, supervisor loop, restart strategies,
                       graceful drain, durable stream provisioning, singleton lock
@@ -129,6 +133,7 @@ examples/eventsourced/ event-sourced rebuild demo - state that survives a restar
 examples/dynamic-topology/ dynamic children re-established by their owner after a lord restart
 examples/webserver/   built-in HTTP edge (ingress) - routes mapped to a thrall op, no code
 examples/webserver-custom/ custom edge via the SDK helper (StartEdge), alongside the ingress
+examples/http-ingress/ a web thrall (blog) behind cmd/http-ingress - "a thrall is the web server"
 examples/live-dashboard/ live push to the browser over SSE, subject-scoped per client
 examples/tracing/     trace propagation across call/cast hops
 examples/fencing-token/ write-side fencing token (ctx.SingletonEpoch) against a resource
@@ -469,6 +474,110 @@ mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 })
 // on drain: stream.Close(); srv.Shutdown(ctx)
 ```
+
+## HTTP ingress for web thralls
+
+The built-in edge above keeps HTTP *at the edge*: a route maps to a thrall operation and the thrall
+never sees HTTP. A **web thrall** is the inverse - a thrall that *is* the web server. It answers one
+operation, `http_request`, with an `http_response`, does its own path routing and **owns no port**
+(`thrall.StartWeb` / `startWeb` / `start_web`). What puts it on the network is `http-ingress`
+(`cmd/http-ingress`): it owns the HTTP socket, maps the request's `Host` to a web thrall, forwards
+the whole request as **one call** over the bus and writes the reply back. Adding a site is a route,
+not a new server.
+
+```bash
+go build -o bin/http-ingress ./cmd/http-ingress
+```
+```toml
+[[thrall]]
+name  = "ingress"
+cmd   = "./bin/http-ingress -addr 127.0.0.1:7391 -routes routes.json"   # or -registry
+scope = "singleton"          # it binds a port: one active instance
+```
+
+It is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it like any other. Run it
+**behind a reverse proxy** that terminates TLS (Caddy, nginx) and bind it to loopback. Demo:
+`examples/http-ingress/`.
+
+**Routing** is default-deny: only a host a route provider admits reaches the ether.
+
+- `-routes routes.json` - a static `{host: thrall}` file.
+- `-registry` - each host is resolved against a `site-registry` thrall over the bus, so sites are
+  published and retired at runtime. Answers are cached for `-registry-ttl`. If the registry cannot
+  be reached, the last known answer of a host keeps being served for `-registry-stale` past its TTL,
+  and a host with no such answer gets **503, not 404** - "we cannot look it up" must not read as
+  "the site does not exist".
+
+**One request is one bus message**, in both directions, so sizes are bounded by the bus
+(`max_payload`, 1 MiB by default) rather than by an arbitrary number:
+
+- the request body limit is derived from the connection's max payload, leaving room for the headers,
+  the envelope and base64: about **714 KiB** on a default bus. A larger body is answered **413**
+  before anything is forwarded - never truncated;
+- a response that does not fit is a **502** whose log line names the cause. (Streaming and replies
+  split over several messages are not supported.)
+
+**What the client is told**, when the ingress answers itself:
+
+| Status | When |
+|---|---|
+| 404 | no route for the host (default-deny) |
+| 408 | the request body did not arrive within `-read-timeout` |
+| 413 | the body is over the limit, or the request does not fit one bus message |
+| 431 | the request line and headers are over `-max-header-bytes` |
+| 502 | the thrall answered with an error, with no usable status, or with a response too large for the bus |
+| 503 | the thrall is not running, or the route table cannot be reached (with `Retry-After`) |
+| 504 | no reply within `-timeout` - also when the thrall dropped the call past its deadline |
+
+Everything else is the web thrall's own response, forwarded as is. A web thrall answers its own
+"no" as an HTTP response, so the ingress does not map refusal codes to statuses.
+
+**Every call carries a deadline and a trace.** The call goes through the SDK client, so it states
+when the ingress stops waiting (`-timeout`): a thrall that only gets to the request later drops it
+instead of doing work nobody is waiting for. The trace is minted per request, is the handler's
+`ctx.Trace` (its own calls continue it), appears in every log line of the request and is returned to
+the browser in the **`X-Aether-Trace`** response header.
+
+**Request facts a client cannot fake.** The `http_request` payload carries `host` (the Host the
+request was addressed to), `scheme` (`http` / `https`) and `client_ip`. The ingress derives them from
+its own connection and consults `X-Forwarded-For` / `X-Forwarded-Proto` **only when its peer is a
+trusted proxy** (`-trusted-proxies`, default loopback - where the reverse proxy runs when both share
+a host; list the proxy's address when it reaches the ingress from elsewhere, e.g. a container
+bridge). The client is the nearest address in the chain that is not a trusted proxy. Forwarding
+headers a client sent never reach the thrall: `X-Forwarded-*`, `Forwarded` and `X-Real-IP` are
+dropped and `X-Forwarded-For` / `-Proto` / `-Host` rewritten from the established facts. An ingress
+that predates the fields leaves them empty; treat an empty `client_ip` as "not stated", never as
+trusted.
+
+**Limits** - every one has a safe default and can be tuned, none can be switched off:
+
+| Flag | Default | Bounds |
+|---|---|---|
+| `-timeout` | `5s` | waiting for the web thrall's reply (then 504); also the call's deadline |
+| `-read-header-timeout` | `5s` | the client sending the request line and headers |
+| `-read-timeout` | `30s` | the client sending the whole request, body included (then 408) |
+| `-write-timeout` | `30s` | the client reading the response, counted from when the ingress has it |
+| `-idle-timeout` | `2m` | a keep-alive connection between requests |
+| `-max-conns` | `256` | connections served at once; further ones wait to be accepted |
+| `-max-header-bytes` | `65536` | request line plus headers (then 431) |
+| `-max-body-bytes` | `0` | request body (then 413); `0` = what one bus message carries, a higher value is lowered to that |
+| `-trusted-proxies` | `127.0.0.0/8,::1/128` | whose forwarding headers are believed; empty = nobody's |
+| `-registry-ttl` | `5s` | how long a resolved route is used before the registry is asked again |
+| `-registry-stale` | `5m` | how long past its TTL a route is served while the registry is unreachable; `0` = not at all |
+| `-registry-cache-size` | `4096` | cached routable hosts and, separately, cached denied hosts |
+
+Also: `-addr` (default `:7391`), `-routes`, `-registry`, `-registry-subject`
+(default `aether.ae.site-registry.call`), `-registry-scope` (`public` | `vpn`).
+
+**Log.** One `http access` line per request - method, host, path, status, duration, trace, client
+address, thrall, body sizes - and **no query string, headers or bodies**, which is where tokens and
+cookies travel. Every response the ingress produces itself is preceded by an `ingress request
+failed` line with the same trace, a stable `cause` (`no_route`, `routes_unavailable`,
+`body_too_large`, `request_too_large`, `body_timeout`, `thrall_unavailable`, `thrall_timeout`,
+`thrall_error`, `response_too_large`, `invalid_reply`) and the underlying error.
+
+`go build ./examples/http-ingress` still yields the same binary (a wrapper over the same program),
+for tooling that has not moved to `./cmd/http-ingress` yet. Design: [DESIGN.md §12b](./DESIGN.md).
 
 ## Durability
 

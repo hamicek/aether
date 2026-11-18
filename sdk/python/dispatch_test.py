@@ -125,6 +125,24 @@ class DispatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aether.refusal_code(raised.exception), "")
         await self._heartbeat("account", lambda m: m.get("describe", {}).get("last_error") == "handler_error: disk on fire")
 
+    async def test_reply_too_large_is_answered_not_dropped(self):
+        await self._start_peer("ae", "account")
+        account = aether.Client(self.nc, "ae")
+        max_payload = self.nc.max_payload
+        self.assertEqual(len(await account.call("account", "bulk", {"bytes": 1024})), 1024)
+
+        # The caller is told at once what happened - well inside its timeout, not by it running out.
+        started = time.monotonic()
+        with self.assertRaises(aether.CallError) as raised:
+            await account.call("account", "bulk", {"bytes": max_payload + 1}, timeout=5)
+        err = raised.exception
+        self.assertEqual((err.type, err.retryable), ("reply_too_large", False))
+        self.assertRegex(err.message, rf"^reply of \d+ bytes does not fit one bus message \(at most {max_payload} bytes\)$")
+        self.assertLess(time.monotonic() - started, 4)
+
+        self.assertEqual(await account.call("account", "balance"), 3)  # the thrall carries on
+        await self._heartbeat("account", lambda m: m.get("describe", {}).get("last_error", "").startswith("reply_too_large: "))
+
     async def test_timed_out_call_is_not_executed_later(self):
         await self._start_peer("ae", "ledger", skew_ms=0)  # caller and thrall share this host's clock
         ledger = aether.Client(self.nc, "ae")

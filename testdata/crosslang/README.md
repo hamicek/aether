@@ -15,6 +15,7 @@ Both peers answer the same operations, so a test can treat them interchangeably:
 | `hold` | `{ms}` | `"released"` after holding the mailbox for `ms` |
 | `write` | - | how many times `write` has run, including this one |
 | `writes` | - | how many times `write` has run |
+| `bulk` | `{bytes}` | a string of that many bytes (to produce a reply too large for the bus) |
 | `relay` | `{app, target, op, payload, timeout_ms}` | what the peer saw when it made that call itself |
 
 `relay` is how a test puts the peer on the calling side: its reply is `{ok: true, payload}` or

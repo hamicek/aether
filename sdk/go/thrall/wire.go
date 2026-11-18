@@ -8,6 +8,7 @@ package thrall
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/hamicek/aether/internal/wire"
 )
@@ -39,6 +40,7 @@ const (
 	ErrEscalated        = wire.ErrEscalated
 	ErrRefused          = wire.ErrRefused
 	ErrDeadlineExceeded = wire.ErrDeadlineExceeded
+	ErrReplyTooLarge    = wire.ErrReplyTooLarge
 )
 
 // CallSubject is the subject a thrall receives calls on: aether.<app>.<name>.call.
@@ -63,6 +65,13 @@ func okReply(req wire.Envelope, payload any) wire.Envelope { return OKReply(req,
 
 func errReply(req wire.Envelope, typ, message string) wire.Envelope {
 	return ErrorReply(req, wire.WireError{Type: typ, Message: message})
+}
+
+// tooLargeReply builds the reply sent in place of one that did not fit a bus message. The text is
+// part of the wire contract's golden fixtures, so every SDK words it the same way.
+func tooLargeReply(req wire.Envelope, size int, maxPayload int64) wire.Envelope {
+	return errReply(req, wire.ErrReplyTooLarge,
+		fmt.Sprintf("reply of %d bytes does not fit one bus message (at most %d bytes)", size, maxPayload))
 }
 
 func mustJSON(e wire.Envelope) []byte {

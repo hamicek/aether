@@ -187,6 +187,18 @@ func TestClientCarriesTraceAndIdempotencyKey(t *testing.T) {
 	if req := nextRequest(t, seen); req.Trace == "" {
 		t.Fatal("a call without a caller trace must mint one")
 	}
+
+	// An edge that has to know the trace before it sends (to log it, to return it) mints it itself.
+	minted := NewTrace()
+	if minted == "" || minted == NewTrace() {
+		t.Fatalf("NewTrace must mint a fresh, non-empty trace each time, got %q", minted)
+	}
+	if _, err := client.Call("account", "balance", nil, clientTimeout, WithTrace(minted)); err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	if req := nextRequest(t, seen); req.Trace != minted {
+		t.Fatalf("a minted trace must travel as given: got %q, want %q", req.Trace, minted)
+	}
 }
 
 // TestCallIntoDecodesTheReply: the typed form marshals the request and unmarshals the reply into T.

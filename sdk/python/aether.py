@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 import nats
+from nats.errors import MaxPayloadError
 from nats.js.errors import KeyNotFoundError, NotFoundError
 
 
@@ -367,6 +368,7 @@ ERR_UNKNOWN_OP = "unknown_op"  # the thrall has no call handler for the op
 ERR_ESCALATED = "escalated"  # the handler asked to be crashed; the thrall restarts after replying
 ERR_REFUSED = "refused"  # the thrall declined the request by a domain rule; error.code says which
 ERR_DEADLINE_EXCEEDED = "deadline_exceeded"  # the call was dropped unexecuted past its deadline
+ERR_REPLY_TOO_LARGE = "reply_too_large"  # the handler ran, but its reply did not fit one bus message
 
 
 class CallError(RuntimeError):
@@ -938,6 +940,13 @@ def _err_reply(req: dict, type_: str, message: str) -> dict:
     }
 
 
+def _too_large_reply(req: dict, size: int, max_payload: int) -> dict:
+    """The reply sent in place of one that did not fit a bus message. The text is part of the wire
+    contract's golden fixtures, so every SDK words it the same way."""
+    return _err_reply(req, ERR_REPLY_TOO_LARGE,
+                      f"reply of {size} bytes does not fit one bus message (at most {max_payload} bytes)")
+
+
 async def start(defn: ThrallDef) -> None:
     """Connect the thrall to the ether and run its lifecycle."""
     url = os.environ.get("AETHER_NATS_URL")
@@ -984,6 +993,20 @@ async def start(defn: ThrallDef) -> None:
         await _publish_heartbeat(nc, name, stats, describe)
         await nc.flush()
 
+    async def respond(msg, e: dict, reply: dict) -> None:
+        """Send the reply to call e. A reply larger than one bus message cannot be sent at all;
+        dropping it would leave the caller waiting out its timeout with nothing to go on, so it is
+        told what happened instead."""
+        data = _encode(reply)
+        try:
+            await msg.respond(data)
+        except MaxPayloadError:
+            too_large = _too_large_reply(e, len(data), nc.max_payload)
+            _set_last_error(f"{ERR_REPLY_TOO_LARGE}: {too_large['error']['message']}")
+            ctx.log.error("reply too large for the bus", op=e.get("op"), trace=e.get("trace"),
+                          bytes=len(data), max_payload=nc.max_payload)
+            await msg.respond(_encode(too_large))
+
     async def process_call(e: dict, msg) -> None:
         nonlocal state
         start = stats.begin()
@@ -992,32 +1015,32 @@ async def start(defn: ThrallDef) -> None:
             async with lock:
                 expired = gate.drop(e)
                 if expired is not None:
-                    await msg.respond(_encode(expired))
+                    await respond(msg, e, expired)
                     return
                 ctx.trace = _or_new_trace(e.get("trace") or "")
                 ctx.msg_id = e.get("id") or ""
                 ctx.log.debug("handling call", op=e.get("op"), trace=ctx.trace)
                 handler = defn.handle_call.get(e.get("op"))
                 if handler is None:
-                    await msg.respond(_encode(_err_reply(e, ERR_UNKNOWN_OP, f"unknown call op: {e.get('op')}")))
+                    await respond(msg, e, _err_reply(e, ERR_UNKNOWN_OP, f"unknown call op: {e.get('op')}"))
                     return
                 dkey = _dedup_key(e) if dedup is not None else ""  # empty -> not deduped
                 if dkey:
                     cached, seen = dedup.get(dkey)
                     if seen:
                         # A duplicate call: return the first reply instead of re-running the handler.
-                        await msg.respond(_encode(_ok_reply(e, cached)))
+                        await respond(msg, e, _ok_reply(e, cached))
                         return
                 try:
                     reply, state = await _maybe(handler(e.get("payload"), state, ctx))
                     if dkey:
                         dedup.put(dkey, reply)  # cache only a successful reply
-                    await msg.respond(_encode(_ok_reply(e, reply)))
+                    await respond(msg, e, _ok_reply(e, reply))
                 except Escalate as esc:
                     # Reply the caller before we crash, so it learns of the restart instead of
                     # hanging until timeout; the dying breath then flushes both the reply and the
                     # final heartbeat (carrying the reason) before the process exits.
-                    await msg.respond(_encode(_err_reply(e, ERR_ESCALATED, esc.reason)))
+                    await respond(msg, e, _err_reply(e, ERR_ESCALATED, esc.reason))
                     _set_last_error(f"escalated: {esc.reason}")
                     await dying_breath()
                     ctx.log.error("handler escalated - self-terminating for restart", op=e.get("op"), reason=esc.reason)
@@ -1027,10 +1050,10 @@ async def start(defn: ThrallDef) -> None:
                     # A refusal is the domain saying no, not the thrall failing: the caller gets
                     # the code, the state stays as it was, and nothing is recorded as the last error.
                     ctx.log.debug("call refused", op=e.get("op"), code=refusal.code, trace=ctx.trace)
-                    await msg.respond(_encode(_refused_reply(e, refusal)))
+                    await respond(msg, e, _refused_reply(e, refusal))
                 except Exception as ex:  # noqa: BLE001
                     _set_last_error(f"handler_error: {ex}")
-                    await msg.respond(_encode(_err_reply(e, ERR_HANDLER, str(ex))))
+                    await respond(msg, e, _err_reply(e, ERR_HANDLER, str(ex)))
         finally:
             if expired is None:  # a dropped call is not a processed message
                 stats.end(start)
@@ -1157,6 +1180,13 @@ def run(defn: ThrallDef) -> None:
 # marshals to base64), so the contract is binary-safe and identical across languages. Headers
 # mirror http.Header (a key maps to one or more values). Query is the raw query string without the
 # leading '?'.
+#
+# host, scheme and client_ip are the facts only the ingress can vouch for: the host the request was
+# addressed to (as the client sent it, port included when there was one), "http" or "https" as the
+# client reached the site, and the client's IP address (no port). The ingress derives them from its
+# own connection and from the reverse proxies it is configured to trust, so read these rather than
+# X-Forwarded-* headers. An ingress that predates them leaves them out; an empty value means "not
+# stated", never a trusted default - do not rate-limit or authorize on an empty client_ip.
 
 OP_HTTP_REQUEST = "http_request"
 
@@ -1168,6 +1198,9 @@ class HTTPRequest:
     query: str = ""
     headers: dict[str, list[str]] = field(default_factory=dict)
     body: str = ""  # base64
+    host: str = ""
+    scheme: str = ""
+    client_ip: str = ""
 
     @staticmethod
     def from_wire(d: dict) -> "HTTPRequest":
@@ -1177,12 +1210,21 @@ class HTTPRequest:
             query=d.get("query", "") or "",
             headers=d.get("headers", {}) or {},
             body=d.get("body", "") or "",
+            host=d.get("host", "") or "",
+            scheme=d.get("scheme", "") or "",
+            client_ip=d.get("client_ip", "") or "",
         )
 
     def to_wire(self) -> dict:
         out: dict = {"method": self.method, "path": self.path}
         if self.query:
             out["query"] = self.query
+        if self.host:
+            out["host"] = self.host
+        if self.scheme:
+            out["scheme"] = self.scheme
+        if self.client_ip:
+            out["client_ip"] = self.client_ip
         if self.headers:
             out["headers"] = self.headers
         if self.body:

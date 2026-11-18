@@ -16,6 +16,7 @@ import (
 //   - Type ErrHandler / ErrUnknownOp / ErrEscalated: the request failed in the thrall.
 //   - Type ErrDeadlineExceeded: the thrall got to the call after its deadline and dropped it
 //     unexecuted (Retryable is true).
+//   - Type ErrReplyTooLarge: the handler ran, but its reply did not fit one bus message.
 //
 // A thrall built with an SDK that predates refusals reports everything as ErrHandler with an empty
 // Code. A call that got no reply at all does not produce a CallError but the NATS error

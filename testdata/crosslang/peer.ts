@@ -38,6 +38,7 @@ await start(
         return [next.writes, next];
       },
       writes: (_p, s) => [s.writes, s],
+      bulk: (p, s) => ["x".repeat((p as { bytes: number }).bytes), s],
       relay: async (p, s, ctx) => {
         const r = p as Relay;
         try {

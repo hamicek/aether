@@ -52,6 +52,9 @@ func goldenCases() map[string]Envelope {
 		// The reply to a call dropped unexecuted because its deadline had passed.
 		"reply_deadline_exceeded": {V: 1, ID: "c-11", Kind: KindReply, Status: StatusError,
 			Error: &WireError{Type: ErrDeadlineExceeded, Message: "call expired 1200 ms before it could be handled", Retryable: true}},
+		// The reply sent in place of one that was too large for a bus message.
+		"reply_too_large": {V: 1, ID: "c-11", Kind: KindReply, Status: StatusError,
+			Error: &WireError{Type: ErrReplyTooLarge, Message: "reply of 1500000 bytes does not fit one bus message (at most 1048576 bytes)"}},
 		"hb_expired": {V: 1, Kind: KindHB, To: "account", TS: 1700000000008,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 1, MailboxLatencyMs: 0.5, ProcessedTotal: 7, ExpiredTotal: 2})},
 	}

@@ -6,6 +6,13 @@
 // marshals to base64), so the contract is binary-safe and identical across languages. Headers
 // mirror http.Header (a key maps to one or more values, preserving a repeated Set-Cookie). Query
 // is the raw query string without the leading '?'.
+//
+// host, scheme and client_ip are the facts only the ingress can vouch for: the host the request was
+// addressed to (as the client sent it, port included when there was one), "http" or "https" as the
+// client reached the site, and the client's IP address (no port). The ingress derives them from its
+// own connection and from the reverse proxies it is configured to trust, so read these rather than
+// X-Forwarded-* headers. An ingress that predates them leaves them out; a missing value means "not
+// stated", never a trusted default - do not rate-limit or authorize on a missing client_ip.
 
 import { defThrall, start, type Ctx, type ThrallDef } from "./thrall";
 
@@ -15,6 +22,9 @@ export interface HTTPRequest {
   method: string;
   path: string;
   query?: string;
+  host?: string;
+  scheme?: string;
+  client_ip?: string;
   headers?: Record<string, string[]>;
   body?: string; // base64
 }

@@ -1,12 +1,13 @@
-// Package ingress is the translation core of the HTTP ingress: resolve an inbound request's Host to
-// a web thrall, forward the whole request as an http_request call over NATS, and write the
-// http_response back. It depends only on the wire contract, not on the lord or the manifest, so it
-// stays a small, testable core; the HTTP server and the edge lifecycle live in the `main` package
-// that drives it (built on thrall.StartEdge).
+// Package ingress is the HTTP ingress of the "web thrall is pure NATS" model (AE-091): resolve an
+// inbound request's Host to a web thrall, forward the whole request as one http_request call over
+// NATS, and write the http_response back. The thrall is the web server and does its own path
+// routing; the ingress knows only Host -> thrall. It is the complement of [[edge.http]] (route ->
+// operation, internal/edge), not a replacement.
 //
-// This is the generic host->subject forwarder of the "web thrall is pure NATS" model (AE-091): the
-// thrall is the web server and does its own path routing; the ingress knows only Host -> thrall. It
-// is the complement of [[edge.http]] (route -> operation, internal/edge), not a replacement.
+// The package is the whole program behind the cmd/http-ingress binary: Run parses the command line
+// and runs the ingress as an edge thrall (thrall.StartEdge), NewHandler is the HTTP <-> envelope
+// translation, and a RouteProvider (a static table or the site-registry client) supplies the route
+// table. It depends on the wire contract and the SDK, not on the lord or the manifest.
 package ingress
 
 import (
@@ -17,11 +18,17 @@ import (
 )
 
 // RouteProvider maps an inbound Host to a target web thrall. It is the pluggable seam of the
-// ingress: a static table today, a dynamic site-registry client (Wave 1 commons) later, behind the
-// same interface. Resolve returns ok=false when the host is not routable, which the ingress treats
-// as default-deny (404) - a host is reachable only if a provider explicitly allows it.
+// ingress: a static table or a dynamic site-registry client behind the same interface.
+//
+// Resolve has three outcomes, and the ingress answers each differently:
+//   - found: the request is forwarded to thrall;
+//   - not found (found=false, no error): an authoritative "this host is not served here". The
+//     ingress is default-deny, so that is a 404 - a host is reachable only if a provider
+//     explicitly allows it;
+//   - an error: the provider could not tell, because its source is out of reach. That is a 503,
+//     not a 404: "we cannot look the site up right now" must not read as "the site does not exist".
 type RouteProvider interface {
-	Resolve(host string) (thrall string, ok bool)
+	Resolve(host string) (thrall string, found bool, err error)
 }
 
 // StaticRoutes is a fixed Host -> thrall table, the simplest RouteProvider. Keys are normalized on
@@ -29,10 +36,11 @@ type RouteProvider interface {
 // "Blog.Example:8080".
 type StaticRoutes map[string]string
 
-// Resolve implements RouteProvider. An empty table (or an unknown host) denies by default.
-func (s StaticRoutes) Resolve(host string) (string, bool) {
+// Resolve implements RouteProvider. An empty table (or an unknown host) denies by default; a table
+// in memory is never out of reach, so it never returns an error.
+func (s StaticRoutes) Resolve(host string) (string, bool, error) {
 	thrall, ok := s[normalizeHost(host)]
-	return thrall, ok
+	return thrall, ok, nil
 }
 
 // LoadStaticRoutes reads a JSON object of {host: thrall} from path and returns a normalized table.
