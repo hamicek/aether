@@ -88,50 +88,68 @@ type failure struct {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The ingress is the edge that starts the operation, so it mints the trace: the web thrall's
-	// handler sees it as ctx.Trace and passes it on to whatever it calls.
-	trace := thrall.NewTrace()
-	w.Header().Set(TraceHeader, trace)
+	ex := exchange{
+		start: time.Now(),
+		// The ingress is the edge that starts the operation, so it mints the trace: the web
+		// thrall's handler sees it as ctx.Trace and passes it on to whatever it calls.
+		trace: thrall.NewTrace(),
+		facts: h.trusted.facts(r),
+	}
+	w.Header().Set(TraceHeader, ex.trace)
 
+	resp, failed := h.forward(w, r, &ex)
+	h.startWriting(w)
+	if failed != nil {
+		h.logFailure(r, ex, *failed)
+		writeFailure(w, *failed)
+		ex.status = failed.status
+	} else {
+		writeResponse(w, resp, ex.trace)
+		ex.status, ex.bytesOut = resp.Status, len(resp.Body)
+	}
+	h.logAccess(r, ex)
+}
+
+// forward takes a request to its web thrall and returns the thrall's response, or the failure the
+// ingress answers with itself. It records in ex what it learns on the way (the target, the size of
+// the body), which the log lines need whichever way the request ends.
+func (h *handler) forward(w http.ResponseWriter, r *http.Request, ex *exchange) (wire.HTTPResponse, *failure) {
 	target, found, err := h.routes.Resolve(r.Host)
 	if err != nil {
 		// The route table is out of reach. That says nothing about whether the site exists, so it is
 		// "try again", not "not found".
-		h.fail(w, r, trace, "", failure{status: http.StatusServiceUnavailable, cause: "routes_unavailable", err: err})
-		return
+		return wire.HTTPResponse{}, &failure{status: http.StatusServiceUnavailable, cause: "routes_unavailable", err: err}
 	}
 	if !found {
 		// Default-deny: a host with no explicit route does not reach the ether at all.
-		h.fail(w, r, trace, "", failure{status: http.StatusNotFound, cause: "no_route"})
-		return
+		return wire.HTTPResponse{}, &failure{status: http.StatusNotFound, cause: "no_route"}
 	}
+	ex.target = target
 
 	// The limit is checked before anything is forwarded: the thrall never sees a part of a request.
 	body, failed := readBody(w, r, h.maxBody)
 	if failed != nil {
-		h.fail(w, r, trace, target, *failed)
-		return
+		return wire.HTTPResponse{}, failed
 	}
-	req := requestToWire(r, body, h.trusted.facts(r))
+	ex.bytesIn = len(body)
+	req := requestToWire(r, body, ex.facts)
 
 	// The call goes through the SDK client, so it is the same envelope a thrall's own call
 	// produces: it carries the trace and the instant the ingress stops waiting, and a thrall that
 	// only gets to it after that drops it instead of doing work nobody is waiting for.
-	resp, err := thrall.CallInto[wire.HTTPResponse](h.client, target, wire.OpHTTPRequest, req, h.timeout, thrall.WithTrace(trace))
+	resp, err := thrall.CallInto[wire.HTTPResponse](h.client, target, wire.OpHTTPRequest, req, h.timeout, thrall.WithTrace(ex.trace))
 	if err != nil {
-		h.fail(w, r, trace, target, failureForCall(err))
-		return
+		failed := failureForCall(err)
+		return wire.HTTPResponse{}, &failed
 	}
 	if !forwardableStatus(resp.Status) {
 		// A reply that carries no status, or one HTTP cannot express, is an upstream fault - not
 		// something to forward as a 200 (see AE-091 review) or to hand to the HTTP server, which
 		// rejects a status outside its range by panicking.
-		h.fail(w, r, trace, target, failure{status: http.StatusBadGateway, cause: "invalid_reply",
-			err: fmt.Errorf("http_response status %d is not a final HTTP status", resp.Status)})
-		return
+		return wire.HTTPResponse{}, &failure{status: http.StatusBadGateway, cause: "invalid_reply",
+			err: fmt.Errorf("http_response status %d is not a final HTTP status", resp.Status)}
 	}
-	h.startWriting(w)
-	writeResponse(w, resp, trace)
+	return resp, nil
 }
 
 // startWriting starts the write clock: from here the client has the write timeout to take the
@@ -142,24 +160,13 @@ func (h *handler) startWriting(w http.ResponseWriter) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(h.writeTimeout))
 }
 
-// fail answers a request the ingress could not forward and says why in the log.
-func (h *handler) fail(w http.ResponseWriter, r *http.Request, trace, target string, f failure) {
-	attrs := []any{
-		slog.Int("status", f.status), slog.String("cause", f.cause),
-		slog.String("host", r.Host), slog.String("trace", trace),
-	}
-	if target != "" {
-		attrs = append(attrs, slog.String("thrall", target))
-	}
-	if f.err != nil {
-		attrs = append(attrs, slog.Any("err", f.err))
-	}
-	h.log.Warn("ingress request failed", attrs...)
+// writeFailure writes a response the ingress produces itself: the bare status text, nothing about
+// the inside of the node.
+func writeFailure(w http.ResponseWriter, f failure) {
 	if f.status == http.StatusServiceUnavailable {
 		// Both 503s are passing states: a thrall being restarted, a registry being asked again.
 		w.Header().Set("Retry-After", retryAfterSeconds)
 	}
-	h.startWriting(w)
 	http.Error(w, http.StatusText(f.status), f.status)
 }
 
