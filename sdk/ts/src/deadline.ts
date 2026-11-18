@@ -43,6 +43,13 @@ export function overdueMs(e: Envelope, nowMs: number, skewMs: number): number | 
   return overdue > skewMs ? overdue : undefined;
 }
 
+// expiresInMs is how long from nowMs a thrall would start dropping the call: its deadline plus the
+// skew tolerance. undefined for a call without a deadline, which never expires.
+export function expiresInMs(e: Envelope, nowMs: number, skewMs: number): number | undefined {
+  if (!e.deadline || e.deadline <= 0) return undefined;
+  return e.deadline + skewMs - nowMs;
+}
+
 // expiredReply is the reply to a call dropped past its deadline. The caller is normally gone, but
 // one whose clock disagrees with ours is still waiting and should learn at once that nothing ran -
 // hence retryable.

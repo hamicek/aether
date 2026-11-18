@@ -57,6 +57,11 @@ func goldenCases() map[string]Envelope {
 			Error: &WireError{Type: ErrReplyTooLarge, Message: "reply of 1500000 bytes does not fit one bus message (at most 1048576 bytes)"}},
 		"hb_expired": {V: 1, Kind: KindHB, To: "account", TS: 1700000000008,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 1, MailboxLatencyMs: 0.5, ProcessedTotal: 7, ExpiredTotal: 2})},
+		// A concurrent web thrall: 5 requests held, 4 of them in their handlers (so 1 waiting),
+		// and the self-description saying how many may run at once.
+		"hb_concurrent": {V: 1, Kind: KindHB, To: "web", TS: 1700000000009,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 5, MailboxLatencyMs: 12.5, ProcessedTotal: 40, InFlight: 4,
+				Describe: &ThrallDescribe{CallOps: []string{"http_request"}, Version: "1.0.0", Concurrency: 4}})},
 	}
 }
 

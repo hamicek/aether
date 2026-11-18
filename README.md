@@ -92,6 +92,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Dynamic supervisor** | ✅ | `ctx.StartChild(spec)` / `ctx.StopChild(name)` -> spawn/stop thralls at runtime, supervised one_for_one, outside manifest groups; idempotent on name |
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 | **HTTP ingress for web thralls** | ✅ | `http-ingress` -> a Host-routed front door: forwards a whole HTTP request as one call to a **web thrall** (a thrall that *is* the web server and owns no port), with timeouts, a connection cap, a body limit the bus can carry, serve-stale routing and trustworthy client facts - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
+| **Concurrent web thrall** | ✅ | a web thrall written as `Serve` handles up to `Concurrency` requests at once (default 32) over a value built once and shared; `Handle` stays serialized and threads its state. Queued requests expire by their deadline, drain waits for in-flight ones, the heartbeat reports `in_flight`. Go + TS + Python - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
 | **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
 | **Idempotence** | ✅ | opt-in per thrall -> dedup a call/cast by an idempotency key: a duplicate cast is skipped, a duplicate call returns the first reply. In-memory (the thrall's lifetime), complements the event-log command-key. Go + TS + Python - see [Durability](#durability) |
 
@@ -495,7 +496,27 @@ cmd   = "./bin/http-ingress -addr 127.0.0.1:7391 -routes routes.json"   # or -re
 scope = "singleton"          # it binds a port: one active instance
 ```
 
-It is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it like any other. Run it
+**One request at a time, or many.** A web thrall is written in one of two shapes. `Handle` threads
+a state from one request to the next and is serialized by the mailbox like every thrall. `Serve`
+has no next state and runs up to `Concurrency` requests at once (default 32), so a slow request
+does not hold up the others - the right shape for a gateway:
+
+```go
+thrall.StartWeb(thrall.WebDef[*site]{
+    Init:  func(ctx *thrall.Ctx) (*site, error) { return newSite(ctx), nil }, // built once, shared
+    Serve: func(req thrall.HTTPRequest, s *site, ctx *thrall.Ctx) (thrall.HTTPResponse, error) {
+        return s.route(req, ctx), nil // runs concurrently: s is read-only or guards itself
+    },
+    Concurrency: 16, // optional; 0 = 32, 1 = serialized
+})
+```
+
+The shared value is never replaced by the runtime; what must change one request at a time belongs
+in an ordinary thrall the handler calls. Requests beyond the limit wait and are dropped when their
+caller's deadline passes. TS (`serve`, `concurrency`) and Python (`serve=`, `concurrency=`) are the
+same. Details and the rules for shared state: [DESIGN.md §12b](./DESIGN.md).
+
+The ingress is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervises it like any other. Run it
 **behind a reverse proxy** that terminates TLS (Caddy, nginx) and bind it to loopback. Demo:
 `examples/http-ingress/`.
 
@@ -759,7 +780,8 @@ works the same embedded or external. Exposed series:
 | `aether_restarts_total{name}` | counter | restarts per thrall |
 | `aether_gave_up_total{name}` | counter | thralls the lord stopped restarting (intensity exceeded) |
 | `aether_heartbeat_misses_total{name}` | counter | detected heartbeat outages |
-| `aether_mailbox_depth{name}` | gauge | messages a thrall currently holds (self-reported) |
+| `aether_mailbox_depth{name}` | gauge | messages a thrall has received and not finished: waiting and running (self-reported) |
+| `aether_in_flight{name}` | gauge | handlers a thrall is running right now (self-reported); `mailbox_depth - in_flight` is what waits. 0 or 1 for a serialized thrall, up to its concurrency for a concurrent web thrall |
 | `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
 | `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
 | `aether_expired_total{name}` | counter | calls a thrall dropped unexecuted because their caller's deadline had passed (self-reported); a steady climb means callers time out behind a slow handler, or the node's clock is off |

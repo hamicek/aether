@@ -12,17 +12,19 @@ import (
 )
 
 func main() {
+	// Serve is the shape of a web thrall that keeps nothing between requests: requests run
+	// concurrently (up to thrall.DefaultWebConcurrency), so a slow one does not hold up the rest.
 	def := thrall.WebDef[struct{}]{
-		Handle: func(req thrall.HTTPRequest, s struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, struct{}, error) {
+		Serve: func(req thrall.HTTPRequest, _ struct{}, ctx *thrall.Ctx) (thrall.HTTPResponse, error) {
 			switch req.Path {
 			case "/":
 				return thrall.HTMLResponse(http.StatusOK,
-					page("the blog", "<p>Served straight from a NATS thrall - it owns no port of its own.</p>")), s, nil
+					page("the blog", "<p>Served straight from a NATS thrall - it owns no port of its own.</p>")), nil
 			case "/about":
 				return thrall.HTMLResponse(http.StatusOK,
-					page("about", "<p>A web thrall answers <code>http_request</code>; the ingress does the HTTP.</p>")), s, nil
+					page("about", "<p>A web thrall answers <code>http_request</code>; the ingress does the HTTP.</p>")), nil
 			default:
-				return thrall.HTMLResponse(http.StatusNotFound, page("not found", "<p>No such page.</p>")), s, nil
+				return thrall.HTMLResponse(http.StatusNotFound, page("not found", "<p>No such page.</p>")), nil
 			}
 		},
 		Version: "0.1.0",

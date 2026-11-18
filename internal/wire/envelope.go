@@ -138,11 +138,17 @@ func (e Envelope) Expired(now time.Time, skew time.Duration) (overdue time.Durat
 // expired_total is the cumulative count of calls dropped unexecuted because their deadline had
 // passed; such a call is not counted in processed_total. It is omitted while zero, so the payload
 // of a thrall that never dropped a call is unchanged from before the field existed.
+//
+// in_flight is the number of handlers running at this instant. mailbox_depth counts every message
+// received and not yet finished, so mailbox_depth - in_flight is what is waiting for its turn. A
+// serialized thrall reports 0 or 1 here; a concurrent web thrall up to its concurrency (see
+// ThrallDescribe.Concurrency). Omitted while zero.
 type HeartbeatMetrics struct {
 	MailboxDepth     int     `json:"mailbox_depth"`
 	MailboxLatencyMs float64 `json:"mailbox_latency_ms"`
 	ProcessedTotal   uint64  `json:"processed_total"`
 	ExpiredTotal     uint64  `json:"expired_total,omitempty"`
+	InFlight         int     `json:"in_flight,omitempty"`
 	// Describe is the thrall's self-description (its operations, version and last failure). It is
 	// optional so an older SDK - or a heartbeat that predates the feature - omits it entirely and
 	// the lord's liveness path is unaffected. Static fields (ops, version) repeat on every beat by
@@ -162,10 +168,16 @@ type HeartbeatMetrics struct {
 // escalation; both are empty until one happens and, like ProcessedTotal, reset on restart. Metadata
 // is deliberately absent: it is a deployment fact the operator declares in the manifest, so the lord
 // fills it in from the ThrallSpec rather than round-tripping it through the thrall.
+//
+// Concurrency is how many handlers the thrall may run at once. It is omitted by a serialized
+// thrall (the GenServer default: one message at a time) and set only by a web thrall that serves
+// requests concurrently, so its presence is what tells an operator that the thrall's handlers
+// interleave.
 type ThrallDescribe struct {
 	CallOps     []string `json:"call_ops,omitempty"`
 	CastOps     []string `json:"cast_ops,omitempty"`
 	Version     string   `json:"version,omitempty"`
 	LastError   string   `json:"last_error,omitempty"`
 	LastErrorMs int64    `json:"last_error_ms,omitempty"`
+	Concurrency int      `json:"concurrency,omitempty"`
 }

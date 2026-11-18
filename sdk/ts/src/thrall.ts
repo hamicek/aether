@@ -8,7 +8,7 @@ import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
 import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
 import { DedupCache, dedupKey } from "./dedup";
-import { deadlineSkewMs, expiredReply, overdueMs } from "./deadline";
+import { deadlineSkewMs, expiredReply, expiresInMs, overdueMs } from "./deadline";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -112,6 +112,9 @@ export function refusedReply(req: Envelope, refusal: RefuseError): Envelope {
 // SDK's exitProcess var) so it stays swappable; production exits for real.
 let exitProcess: (code: number) => void = (code) => process.exit(code);
 
+// trace and msgId describe the message being handled, so a Ctx is only valid for the handler
+// invocation it was passed to: do not keep it for later. A serialized thrall reuses one Ctx for
+// every message; a concurrent web thrall (WebDef.serve) hands each request its own.
 export interface Ctx {
   // WE DO NOT HIDE NATS BEHIND THE THRALL - full access to JetStream, KV, its own subjects.
   nats: NatsConnection;
@@ -171,8 +174,35 @@ export function defThrall<S>(def: ThrallDef<S>): ThrallDef<S> {
   return def;
 }
 
+// SERIALIZED is the concurrency of a GenServer: one message at a time.
+export const SERIALIZED = 1;
+
+// The concurrency of a definition travels with it under a key this module keeps to itself, so it
+// is not a field a thrall author can set: the only way to get a definition that runs its calls
+// concurrently is defWeb with a serve handler (http.ts), whose shape has no state to thread.
+const concurrencyKey = Symbol("aether.concurrency");
+
+// withConcurrency marks def as serving up to n calls at once. For the web helper only - it is not
+// exported from the package.
+export function withConcurrency<S>(def: ThrallDef<S>, n: number): ThrallDef<S> {
+  return Object.defineProperty(def, concurrencyKey, { value: n, enumerable: false });
+}
+
+// concurrencyOf is how many call handlers def runs at once: SERIALIZED unless defWeb said otherwise.
+export function concurrencyOf<S>(def: ThrallDef<S>): number {
+  return (def as { [concurrencyKey]?: number })[concurrencyKey] ?? SERIALIZED;
+}
+
 // start connects the thrall to the ether and runs its lifecycle.
+//
+// How many call handlers may run at once is a property of the definition. Normally it is
+// SERIALIZED - the GenServer every thrall is: one mailbox, one handler at a time, each handler's
+// returned state replacing the previous one. A web thrall defined with a serve handler runs above
+// that: its calls leave the mailbox for a CallPool, and the state init returned becomes a value
+// shared by every handler that the runtime never replaces (a handler's returned state is ignored,
+// which is why the only way in is a handler shape that has none).
 export async function start<S>(def: ThrallDef<S>): Promise<void> {
+  const concurrency = concurrencyOf(def);
   const env: Env = readEnv();
   const name = def.name || env.name;
   if (typeof def.init !== "function") throw new Error(`thrall ${name}: init is required`);
@@ -180,21 +210,28 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   const nc = await open(env);
   useConnection(nc); // so this thrall can call()/cast() other thralls
   const log = newLogger({ component: "thrall", app: env.app, name });
-  const ctx: Ctx = {
-    nats: nc,
-    name,
-    app: env.app,
-    log,
-    trace: "",
-    msgId: "",
-    singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
-    call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: opts.trace || ctx.trace }),
-    cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
-    castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
-    append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
-    startChild: (spec, opts) => startChild(nc, spec, opts),
-    stopChild: (childName, opts) => stopChild(nc, childName, opts),
+  const singletonEpoch = fenceConfigFromEnv()?.epoch ?? 0;
+  // newCtx builds a Ctx whose call/cast carry its own trace. The mailbox has one and rewrites its
+  // trace and msgId per message; a concurrent web thrall builds one per request.
+  const newCtx = (trace: string, msgId: string): Ctx => {
+    const c: Ctx = {
+      nats: nc,
+      name,
+      app: env.app,
+      log,
+      trace,
+      msgId,
+      singletonEpoch,
+      call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: opts.trace || c.trace }),
+      cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: c.trace }),
+      castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: c.trace }),
+      append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
+      startChild: (spec, opts) => startChild(nc, spec, opts),
+      stopChild: (childName, opts) => stopChild(nc, childName, opts),
+    };
+    return c;
   };
+  const ctx = newCtx("", "");
 
   let state: S = await def.init(ctx);
 
@@ -237,6 +274,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
       d.last_error = lastErr.msg;
       d.last_error_ms = lastErr.ms;
     }
+    if (concurrency > SERIALIZED) d.concurrency = concurrency;
     return d;
   };
   // dyingBreath publishes one final heartbeat carrying the last error and flushes it, so the lord
@@ -250,25 +288,56 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   // beginJob runs at enqueue time (before the serialized job), so mailbox_depth counts messages
   // waiting in the promise chain - matching the Go/Python SDKs, where begin() runs before the
   // mailbox lock.
-  const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
+  // replier builds the function that answers call e. A reply larger than one bus message cannot be
+  // sent at all. Dropping it would leave the caller waiting out its timeout with nothing to go on,
+  // so it is told what happened instead.
+  const replier = (e: Envelope, respond: (data: Uint8Array) => void) => (reply: Envelope): void => {
+    const data = encode(reply);
+    try {
+      respond(data);
+    } catch (err) {
+      if ((err as NatsError)?.code !== ErrorCode.MaxPayloadExceeded) throw err;
+      const maxPayload = nc.info?.max_payload ?? 0;
+      const tooLarge = tooLargeReply(e, data.length, maxPayload);
+      setLastError(`${ErrorType.replyTooLarge}: ${tooLarge.error!.message}`);
+      log.error("reply too large for the bus", { op: e.op, trace: e.trace, bytes: data.length, max_payload: maxPayload });
+      respond(encode(tooLarge));
+    }
+  };
+
+  // answerFailedCall answers a call whose handler threw. Shared by the mailbox and the concurrent
+  // pool, so a failure means the same thing on both.
+  const answerFailedCall = async (e: Envelope, trace: string, err: unknown, send: (reply: Envelope) => void): Promise<void> => {
+    const esc = asEscalate(err);
+    if (esc) {
+      // Reply the caller before we crash, so it learns of the restart instead of
+      // hanging until timeout; the dying breath then flushes both the reply and the final
+      // heartbeat (carrying the reason) before the process exits.
+      send(errReply(e, ErrorType.escalated, esc.reason));
+      setLastError(`escalated: ${esc.reason}`);
+      await dyingBreath();
+      log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
+      exitProcess(1);
+      return;
+    }
+    const refusal = asRefuse(err);
+    if (refusal) {
+      // A refusal is the domain saying no, not the thrall failing: the caller gets the
+      // code, the state stays as it was, and nothing is recorded as the last error.
+      log.debug("call refused", { op: e.op, code: refusal.code, trace });
+      send(refusedReply(e, refusal));
+      return;
+    }
+    setLastError(`handler_error: ${String(err)}`);
+    send(errReply(e, ErrorType.handler, String(err)));
+  };
+
+  const mailboxCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
     const start = stats.begin();
-    // A reply larger than one bus message cannot be sent at all. Dropping it would leave the
-    // caller waiting out its timeout with nothing to go on, so it is told what happened instead.
-    const send = (reply: Envelope): void => {
-      const data = encode(reply);
-      try {
-        respond(data);
-      } catch (err) {
-        if ((err as NatsError)?.code !== ErrorCode.MaxPayloadExceeded) throw err;
-        const maxPayload = nc.info?.max_payload ?? 0;
-        const tooLarge = tooLargeReply(e, data.length, maxPayload);
-        setLastError(`${ErrorType.replyTooLarge}: ${tooLarge.error!.message}`);
-        log.error("reply too large for the bus", { op: e.op, trace: e.trace, bytes: data.length, max_payload: maxPayload });
-        respond(encode(tooLarge));
-      }
-    };
+    const send = replier(e, respond);
     return serialize(async () => {
       if (gate.drop(e, send)) return;
+      stats.started();
       ctx.trace = orNewTrace(e.trace);
       ctx.msgId = e.id ?? "";
       log.debug("handling call", { op: e.op, trace: ctx.trace });
@@ -293,28 +362,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
           send(okReply(e, reply));
         } catch (err) {
-          const esc = asEscalate(err);
-          if (esc) {
-            // Reply the caller before we crash, so it learns of the restart instead of
-            // hanging until timeout; the dying breath then flushes both the reply and the final
-            // heartbeat (carrying the reason) before the process exits.
-            send(errReply(e, ErrorType.escalated, esc.reason));
-            setLastError(`escalated: ${esc.reason}`);
-            await dyingBreath();
-            log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
-            exitProcess(1);
-            return;
-          }
-          const refusal = asRefuse(err);
-          if (refusal) {
-            // A refusal is the domain saying no, not the thrall failing: the caller gets the
-            // code, the state stays as it was, and nothing is recorded as the last error.
-            log.debug("call refused", { op: e.op, code: refusal.code, trace: ctx.trace });
-            send(refusedReply(e, refusal));
-            return;
-          }
-          setLastError(`handler_error: ${String(err)}`);
-          send(errReply(e, ErrorType.handler, String(err)));
+          await answerFailedCall(e, ctx.trace, err, send);
         }
       } finally {
         stats.end(start);
@@ -322,12 +370,47 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     });
   };
 
+  // onCall is what a received call goes to: the mailbox above, or - for a concurrent web thrall -
+  // a pool that runs up to concurrency handlers at once over the state init returned. That state
+  // is captured here and never reassigned, so the handlers share it; each gets its own Ctx, since
+  // trace and msgId differ per request. Idempotency dedup belongs to the mailbox and is not
+  // consulted here (startWeb never asks for it).
+  let onCall = mailboxCall;
+  let pool: CallPool | undefined;
+  if (concurrency > SERIALIZED) {
+    const shared = state;
+    const calls = (pool = new CallPool(concurrency, gate, stats));
+    onCall = (e, respond) => {
+      const send = replier(e, respond);
+      const served = calls.submit(e, send, async () => {
+        const reqCtx = newCtx(orNewTrace(e.trace), e.id ?? "");
+        log.debug("handling call", { op: e.op, trace: reqCtx.trace });
+        const handler = def.handleCall?.[e.op ?? ""];
+        if (!handler) {
+          send(errReply(e, ErrorType.unknownOp, `unknown call op: ${e.op}`));
+          return;
+        }
+        try {
+          const [reply] = await handler(e.payload, shared, reqCtx);
+          send(okReply(e, reply));
+        } catch (err) {
+          await answerFailedCall(e, reqCtx.trace, err, send);
+        }
+      });
+      // The handler answers its own failures, so a rejection here happened while answering (the
+      // bus went away mid-reply). It is logged; nobody awaits this promise, and an unhandled
+      // rejection would end the process for one lost reply.
+      return served.catch((err) => log.error("serving a call failed outside its handler", { op: e.op, trace: e.trace, err: String(err) }));
+    };
+  }
+
   // ackDurable acknowledges the source JetStream message (durable cast); undefined for a
   // non-durable core cast, which needs no ack. On escalation the poison cast is acked before
   // the crash, so it is not redelivered into a loop after the restart.
   const onCast = (e: Envelope, ackDurable?: () => Promise<void>): Promise<void> => {
     const start = stats.begin();
     return serialize(async () => {
+      stats.started();
       ctx.trace = orNewTrace(e.trace);
       ctx.msgId = e.id ?? "";
       log.debug("handling cast", { op: e.op, trace: ctx.trace });
@@ -386,7 +469,10 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     for await (const msg of ctlSub) {
       const e = decode(msg.data);
       if (e.op === "drain" || e.op === "shutdown") {
-        await tail; // finish draining the in-flight mailbox
+        // Finish what was already received: the pooled calls that are running or waiting for a
+        // slot (new ones are no longer taken), then the mailbox.
+        await pool?.drain();
+        await tail;
         await def.terminate?.(e.op, state);
         await nc.drain();
         process.exit(0);
@@ -481,8 +567,13 @@ export async function consumeDurableCast(
 // processed = cumulative count of handled messages, expired = cumulative count of calls dropped
 // unexecuted because their deadline had passed. begin/end bracket every handled message; a dropped
 // call ends with drop instead, so it is neither a processed message nor a latency sample.
+//
+// A message is accounted in three steps: begin when it is received, started when its turn comes
+// and its handler is about to run, end when the handler has returned (a dropped call ends with
+// drop instead of started/end). So depth - running is what is still waiting.
 export class MailboxStats {
   private depth = 0;
+  private running = 0;
   private processed = 0;
   private expired = 0;
   private lastMs = 0;
@@ -492,9 +583,15 @@ export class MailboxStats {
     return performance.now();
   }
 
+  // started marks the message's turn: it stops waiting and its handler runs. Paired with end.
+  started(): void {
+    this.running++;
+  }
+
   end(start: number): void {
     this.lastMs = performance.now() - start;
     this.processed++;
+    this.running--;
     this.depth--;
   }
 
@@ -503,11 +600,12 @@ export class MailboxStats {
     this.depth--;
   }
 
-  // snapshot is the heartbeat payload. expired_total is omitted while zero, matching the Go
-  // omitempty tag, so a thrall that never dropped a call reports the shape it always did.
+  // snapshot is the heartbeat payload. expired_total and in_flight are omitted while zero, matching
+  // the Go omitempty tags, so an idle thrall that never dropped a call reports the shape it always did.
   snapshot(): HeartbeatMetrics {
     const m: HeartbeatMetrics = { mailbox_depth: this.depth, mailbox_latency_ms: this.lastMs, processed_total: this.processed };
     if (this.expired > 0) m.expired_total = this.expired;
+    if (this.running > 0) m.in_flight = this.running;
     return m;
   }
 }
@@ -528,10 +626,114 @@ export class DeadlineGate {
   drop(e: Envelope, respond: (reply: Envelope) => void): boolean {
     const overdue = overdueMs(e, Date.now(), this.skewMs);
     if (overdue === undefined) return false;
+    this.expire(e, overdue, respond);
+    return true;
+  }
+
+  // expire turns away a call whose deadline has passed, overdue ms ago.
+  expire(e: Envelope, overdue: number, respond: (reply: Envelope) => void): void {
     this.stats.drop();
     this.log.warn("dropping expired call - its caller stopped waiting", { op: e.op, trace: e.trace, overdue_ms: overdue });
     respond(expiredReply(e, overdue));
-    return true;
+  }
+
+  // expiresInMs is how long from now this gate would start dropping the call; undefined for a
+  // call without a deadline.
+  expiresInMs(e: Envelope): number | undefined {
+    return expiresInMs(e, Date.now(), this.skewMs);
+  }
+}
+
+// CallPool is what a concurrent web thrall has in place of the serialized mailbox for its calls:
+// it runs up to limit handlers at once and makes the rest wait their turn. "At once" means
+// interleaved at their awaits on the one event loop - a handler that never awaits still runs to
+// completion alone.
+//
+// Waiting is bounded by the caller, not by a queue length. A call that finds every slot taken
+// waits for one; if its deadline passes first it is dropped right then - unexecuted, accounted and
+// answered exactly as the deadline gate drops a call - so calls nobody waits for any more do not
+// pile up behind slow handlers. A call that carries no deadline waits as long as it takes. Slots
+// are handed out in arrival order, but a concurrent thrall makes no ordering promise.
+export class CallPool {
+  private active = 0;
+  private readonly waiting: Array<{ grant: (taken: boolean) => void; timer?: ReturnType<typeof setTimeout> }> = [];
+  private readonly pending = new Set<Promise<void>>();
+  private draining = false;
+
+  constructor(
+    private readonly limit: number,
+    private readonly gate: DeadlineGate,
+    private readonly stats: MailboxStats,
+  ) {}
+
+  // submit takes one received call. handle runs when a slot is free and the call's caller is still
+  // waiting; otherwise the call is dropped and respond carries the deadline_exceeded reply. The
+  // returned promise settles when the call is finished or dropped; it rejects only if handle does.
+  submit(e: Envelope, respond: (reply: Envelope) => void, handle: () => Promise<void>): Promise<void> {
+    if (this.draining) return Promise.resolve(); // a draining thrall takes no new calls
+    const done = this.serve(e, respond, handle).finally(() => this.pending.delete(done));
+    this.pending.add(done);
+    return done;
+  }
+
+  private async serve(e: Envelope, respond: (reply: Envelope) => void, handle: () => Promise<void>): Promise<void> {
+    const received = this.stats.begin();
+    if (!(await this.acquire(e))) {
+      this.gate.expire(e, Date.now() - (e.deadline ?? 0), respond);
+      return;
+    }
+    try {
+      // The slot may have come free at the very moment the deadline passed; the gate decides, as
+      // it does for the mailbox, at the last moment before the handler would run.
+      if (this.gate.drop(e, respond)) return;
+      this.stats.started();
+      try {
+        await handle();
+      } finally {
+        this.stats.end(received);
+      }
+    } finally {
+      this.release();
+    }
+  }
+
+  // acquire waits for a free slot; false means the call's deadline (plus the skew tolerance)
+  // passed first, and no slot was taken.
+  private acquire(e: Envelope): Promise<boolean> {
+    if (this.active < this.limit) {
+      this.active++;
+      return Promise.resolve(true);
+    }
+    return new Promise<boolean>((grant) => {
+      const waiter: { grant: (taken: boolean) => void; timer?: ReturnType<typeof setTimeout> } = { grant };
+      const wait = this.gate.expiresInMs(e);
+      if (wait !== undefined) {
+        // One past the tolerance, so a call dropped here is expired by the gate's own rule.
+        waiter.timer = setTimeout(() => {
+          this.waiting.splice(this.waiting.indexOf(waiter), 1);
+          grant(false);
+        }, Math.max(0, wait) + 1);
+      }
+      this.waiting.push(waiter);
+    });
+  }
+
+  // release hands the slot to the longest-waiting call, or frees it.
+  private release(): void {
+    const next = this.waiting.shift();
+    if (!next) {
+      this.active--;
+      return;
+    }
+    clearTimeout(next.timer);
+    next.grant(true);
+  }
+
+  // drain stops taking new calls and resolves once every call already submitted has finished or
+  // been dropped.
+  async drain(): Promise<void> {
+    this.draining = true;
+    while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
   }
 }
 

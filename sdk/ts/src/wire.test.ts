@@ -65,6 +65,14 @@ const cases: Record<string, Envelope> = {
     payload: { mailbox_depth: 1, mailbox_latency_ms: 0.5, processed_total: 7, expired_total: 2 },
     ts: 1700000000008,
   },
+  hb_concurrent: {
+    v: 1, kind: "hb", to: "web",
+    payload: {
+      mailbox_depth: 5, mailbox_latency_ms: 12.5, processed_total: 40, in_flight: 4,
+      describe: { call_ops: ["http_request"], version: "1.0.0", concurrency: 4 },
+    },
+    ts: 1700000000009,
+  },
 };
 
 for (const [name, env] of Object.entries(cases)) {

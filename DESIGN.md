@@ -228,7 +228,7 @@ state does not act on.
 ```
 
 **The envelope grows only additively.** Every field added after the first version - `trace`,
-`idem`, `deadline`, `error.code`, the heartbeat's `describe` and `expired_total` - is optional and
+`idem`, `deadline`, `error.code`, the heartbeat's `describe`, `expired_total` and `in_flight` - is optional and
 omitted when empty, so peers of different ages interoperate in both directions: an old caller sends
 no `deadline` (its calls are handled whenever they are dequeued, as before) and reads a refusal as
 the `"<type>: <message>"` error string it has always got; a new caller talking to an old thrall gets
@@ -828,6 +828,65 @@ Each SDK ships a helper (`StartWeb` / `startWeb` / `start_web`) so the author wr
 plus ergonomic response constructors (HTML/text/JSON). It does not replace models A/B: use
 `[[edge.http]]` to put HTTP in front of an existing thrall's operations, and the web thrall + ingress
 when the thrall itself is the web app.
+
+**A web thrall serves requests concurrently - if its handler says it can.** A web thrall that
+inherited the GenServer mailbox served one request at a time: one slow request (a stalled thrall
+behind it, a chain of calls) held every other request of every user, the health check included. A
+gateway is the one kind of thrall for which that is the wrong default, so the web helper has two
+handler shapes, and **the shape, not a flag, decides how requests run**:
+
+| | `Handle` / `handle` | `Serve` / `serve` |
+|---|---|---|
+| signature | `(req, state, ctx) -> (resp, next state)` | `(req, shared, ctx) -> resp` |
+| requests at once | one - the serialized mailbox, as every thrall | up to `Concurrency` (default **32**) |
+| the value from `Init` | threaded: each request gets what the previous one returned | shared: built once, handed to every request, never replaced by the runtime |
+| ordering | arrival order | none between requests |
+
+The rule a `Serve` handler lives by: **the mailbox no longer stands between two requests.** What
+the shared value holds after `Init` is what every request sees. Treat it as read-only (clients,
+configuration, parsed templates, embedded files need nothing), or make what changes safe yourself -
+in Go a mutex, an atomic or a type that already is; in TS and Python, where handlers interleave only
+at an `await`, by keeping a change within one stretch without an `await` (a read, an `await`, then a
+write based on that read is a lost update). State that must change one request at a time belongs in
+an ordinary thrall the handler calls: its mailbox is the lock, which is what a GenServer is for.
+`ctx` is per request in a `Serve` thrall (its trace and message id are that request's) and must not
+be kept.
+
+It is hard to misuse on purpose. A handler written against the mailbox has the `Handle` shape, and
+there is no way to run that shape concurrently: `Handle` with `Concurrency > 1`, or both shapes at
+once, is refused at start instead of ignored, and an ordinary thrall (`Start`, FSM, event manager)
+has no concurrency setting at all - **GenServer semantics are unchanged**. `Concurrency = 1` with
+`Serve` runs through the mailbox, exactly as `Handle` does. Nothing switches over by itself: a web
+thrall written before this keeps its `Handle` shape and its one-at-a-time behaviour until its
+author moves it to `Serve`.
+
+What stays true in the concurrent mode:
+
+- **The deadline (§9c).** A request that finds every slot taken waits for one. The gate still
+  decides at the last moment before the handler runs - and a request whose deadline passes *while
+  it waits* is dropped right then (same log line, same `expired_total`, same `deadline_exceeded`
+  reply), not when a slot eventually frees. So the queue is bounded by how long callers are willing
+  to wait (the ingress stamps 5 s on every request), not by a count; a call without a deadline
+  waits as long as it takes, as before. A hard cap on queued work is a separate concern (overload
+  protection, deliberately not part of this).
+- **Drain.** A draining thrall stops reading, finishes every request it had already received -
+  those in their handlers and those still waiting (which run or expire) - flushes their replies,
+  and only then terminates. The serialized path now waits for its in-flight handler too, whether or
+  not the thrall has a `Terminate` hook.
+- **Metrics.** `mailbox_depth` counts requests received and not finished; the new `in_flight` is how
+  many are in their handlers right now, so `mailbox_depth - in_flight` is the queue. `describe`
+  carries `concurrency` for a concurrent web thrall (absent = serialized). On the lord:
+  `aether_in_flight{name}`, and `aether describe` prints the concurrency.
+- **Idempotency keys.** The in-memory dedup (§13c) belongs to the serialized mailbox and a web
+  thrall never enabled it (`WebDef` has no such option, and the ingress sends no key), so nothing
+  changes: a request's idempotency is the business of the thrall that does the write.
+- **Escalation** still crashes the process - with the other requests that were in flight.
+
+The three SDKs behave the same. Before this change all three serialized web requests (in TS and
+Python an `async` handler did *not* interleave with the next request: the mailbox awaited it), and
+all three now offer the same two shapes with the same default. The one honest difference is what
+"at once" means: goroutines in Go, interleaving at `await` on a single event loop in TS and Python,
+where a handler that blocks the loop still blocks every other request.
 
 **The ingress (`cmd/http-ingress`, core in `internal/ingress`; AE-092/093, a component since AE-095).**
 The generic host->subject forwarder that puts web thralls on the network: an edge thrall

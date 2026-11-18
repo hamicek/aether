@@ -24,13 +24,16 @@ type Entry struct {
 	Status    string `json:"status"` // starting | ready | down | stale
 	UpdatedMs int64  `json:"updated_ms"`
 
-	Version         string            `json:"version,omitempty"`
-	ExpectedVersion string            `json:"expected_version,omitempty"`
-	CallOps         []string          `json:"call_ops,omitempty"`
-	CastOps         []string          `json:"cast_ops,omitempty"`
-	LastError       string            `json:"last_error,omitempty"`
-	LastErrorMs     int64             `json:"last_error_ms,omitempty"`
-	Metadata        map[string]string `json:"metadata,omitempty"`
+	Version         string   `json:"version,omitempty"`
+	ExpectedVersion string   `json:"expected_version,omitempty"`
+	CallOps         []string `json:"call_ops,omitempty"`
+	CastOps         []string `json:"cast_ops,omitempty"`
+	LastError       string   `json:"last_error,omitempty"`
+	LastErrorMs     int64    `json:"last_error_ms,omitempty"`
+	// Concurrency is how many handlers the thrall runs at once, as it reports itself; absent for a
+	// serialized thrall (see wire.ThrallDescribe).
+	Concurrency int               `json:"concurrency,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
 }
 
 // NamedEntry = an Entry together with its key (the thrall's name) - for listing.

@@ -160,7 +160,7 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	lm.incRestart("worker")
 	lm.incGaveUp("worker")
 	lm.incHeartbeatMiss("worker")
-	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100, ExpiredTotal: 4})
+	lm.recordHeartbeat("worker", wire.HeartbeatMetrics{MailboxDepth: 3, MailboxLatencyMs: 1.5, ProcessedTotal: 100, ExpiredTotal: 4, InFlight: 2})
 	lm.recordBacklog("worker", 7)
 
 	w, ok := lm.snapshot()["worker"]
@@ -179,8 +179,35 @@ func TestMetricsSnapshotReflectsRecordedValues(t *testing.T) {
 	if w.Expired != 4 {
 		t.Errorf("expired = %d, want 4", w.Expired)
 	}
+	if w.InFlight != 2 {
+		t.Errorf("in flight = %d, want 2", w.InFlight)
+	}
 	if w.DurableBacklog != 7 {
 		t.Errorf("durable backlog = %v, want 7", w.DurableBacklog)
+	}
+}
+
+// TestInFlightHandlersAreExposed: a thrall's count of handlers running right now is a gauge next
+// to its mailbox depth, so the two together tell running work from waiting work. A thrall on an
+// SDK that predates the field reads as zero.
+func TestInFlightHandlersAreExposed(t *testing.T) {
+	l := &Lord{metrics: newLordMetrics()}
+	l.metrics.recordHeartbeat("web", wire.HeartbeatMetrics{MailboxDepth: 5, InFlight: 4,
+		Describe: &wire.ThrallDescribe{Concurrency: 4}})
+	body := scrape(t, l)
+	if v, ok := metricValue(t, body, `aether_in_flight{name="web"}`); !ok || v != 4 {
+		t.Fatalf("aether_in_flight = %v (present %v), want 4", v, ok)
+	}
+	if v, ok := metricValue(t, body, `aether_mailbox_depth{name="web"}`); !ok || v != 5 {
+		t.Fatalf("aether_mailbox_depth = %v (present %v), want 5", v, ok)
+	}
+	if d := l.metrics.describeFor("web"); d == nil || d.Concurrency != 4 {
+		t.Errorf("the declared concurrency was not kept: %+v", d)
+	}
+
+	l.metrics.recordHeartbeat("legacy", wire.HeartbeatMetrics{MailboxDepth: 1})
+	if v, ok := metricValue(t, scrape(t, l), `aether_in_flight{name="legacy"}`); !ok || v != 0 {
+		t.Fatalf("aether_in_flight without the field = %v (present %v), want 0", v, ok)
 	}
 }
 

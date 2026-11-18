@@ -283,6 +283,7 @@ func (m *fsmRunner[D]) dispatch(ev Event, trace string, respond func(wire.Envelo
 	if respond != nil && m.gate.drop(req, respond) {
 		return // a call whose caller has given up never becomes an event
 	}
+	m.stats.started()
 	defer m.stats.end(start)
 	m.dispatchLocked(ev, trace, respond, req)
 }
@@ -390,6 +391,7 @@ func (m *fsmRunner[D]) onTimeout(gen uint64, op string) {
 	defer m.stats.end(start)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stats.started()
 	if gen != m.timeoutGen {
 		return // superseded - a newer arm or transition happened first
 	}

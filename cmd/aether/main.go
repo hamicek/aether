@@ -233,6 +233,9 @@ func describeCmd(argv []string) {
 	}
 	fmt.Printf("%-12s %s\n", "call ops", orDash(strings.Join(entry.CallOps, ", ")))
 	fmt.Printf("%-12s %s\n", "cast ops", orDash(strings.Join(entry.CastOps, ", ")))
+	if entry.Concurrency > 1 {
+		fmt.Printf("%-12s up to %d calls at once\n", "concurrency", entry.Concurrency)
+	}
 	if len(entry.Metadata) > 0 {
 		keys := make([]string, 0, len(entry.Metadata))
 		for k := range entry.Metadata {

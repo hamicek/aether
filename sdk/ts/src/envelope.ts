@@ -66,12 +66,15 @@ export const ErrorType = {
 // reason and time of the most recent handler failure (empty until one happens). Fields are optional
 // so an empty value is omitted, matching the Go omitempty tags. Metadata is not here: it is a
 // deployment fact the lord fills in from the manifest, not something the thrall reports.
+// concurrency is how many handlers the thrall may run at once: omitted by a serialized thrall, set
+// only by a web thrall that serves requests concurrently.
 export interface ThrallDescribe {
   call_ops?: string[];
   cast_ops?: string[];
   version?: string;
   last_error?: string;
   last_error_ms?: number;
+  concurrency?: number;
 }
 
 // HeartbeatMetrics = a thrall's self-reported runtime samples, the payload of a heartbeat. Mirrors
@@ -79,11 +82,14 @@ export interface ThrallDescribe {
 // the duration of the most recent handler, processed_total the cumulative count of handled
 // messages, and expired_total the cumulative count of calls dropped unexecuted past their deadline
 // (omitted while zero, so the payload of a thrall that never dropped a call is unchanged).
+// in_flight is the number of handlers running at this instant (omitted while zero): mailbox_depth
+// counts every message received and not yet finished, so mailbox_depth - in_flight is waiting.
 export interface HeartbeatMetrics {
   mailbox_depth: number;
   mailbox_latency_ms: number;
   processed_total: number;
   expired_total?: number;
+  in_flight?: number;
 }
 
 const encoder = new TextEncoder();

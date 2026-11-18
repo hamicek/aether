@@ -1000,6 +1000,7 @@ func (l *Lord) setStatus(name string, pid int, status string) {
 		entry.CastOps = d.CastOps
 		entry.LastError = d.LastError
 		entry.LastErrorMs = d.LastErrorMs
+		entry.Concurrency = d.Concurrency
 	}
 	if ch := l.childByName(name); ch != nil {
 		entry.Metadata = ch.spec.Metadata

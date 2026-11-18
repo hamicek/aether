@@ -210,6 +210,7 @@ func (m *eventRunner) dispatch(ev Event, trace string) {
 	defer m.stats.end(start)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.stats.started()
 	m.ctx.Trace = orNewTrace(trace)
 	m.log.Debug("event", slog.String("op", ev.Op), slog.Int("handlers", len(m.def.Handlers)), slog.String("trace", m.ctx.Trace))
 	for i, h := range m.def.Handlers {

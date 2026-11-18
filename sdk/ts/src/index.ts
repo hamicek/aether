@@ -24,6 +24,7 @@ export { validate, decode, ValidationError } from "./schema";
 export type { Problem } from "./schema";
 export {
   OP_HTTP_REQUEST,
+  DEFAULT_WEB_CONCURRENCY,
   defWeb,
   startWeb,
   header,
@@ -34,4 +35,4 @@ export {
   bodyBytes,
   bodyText,
 } from "./http";
-export type { HTTPRequest, HTTPResponse, WebDef, WebHandler } from "./http";
+export type { HTTPRequest, HTTPResponse, WebDef, WebHandler, WebServer } from "./http";
