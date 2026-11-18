@@ -124,7 +124,8 @@ func (def WebDef[S]) concurrency() (int, error) {
 // HTTP, the way it answers its own "no":
 //
 //   - a handler that returns an error is answered with a 500, the error is logged with the
-//     request's trace and becomes the thrall's last error;
+//     request's trace and becomes the thrall's last error (no stack, and not counted: it is a
+//     failure the handler reported, not a crash);
 //   - a handler that panics is answered with a 500 too, the panic is logged with its trace and
 //     stack and counted (panics_total on the heartbeat, aether_panics_total on the lord), and the
 //     thrall keeps serving. With Handle the state the request would have returned is discarded,
@@ -166,9 +167,10 @@ func internalServerError() any {
 
 // webCallFn adapts a Handle-shape HTTP handler to a thrall CallFn: decode the http_request payload
 // into an HTTPRequest, run the handler, and return the HTTPResponse as the reply. A payload that
-// is not a valid HTTPRequest is a handler error (the caller sent something malformed), not an
-// escalation - one bad request must not restart the web thrall. Factored out of StartWeb so it is
-// unit-testable without a NATS connection.
+// is not a valid HTTPRequest is returned as an error, which StartWeb answers like any failure of
+// the handler: a 500, logged, recorded as the last error - never an escalation, one bad request
+// must not restart the web thrall. (The ingress builds the payload itself, so this takes a caller
+// that bypasses it.) Factored out of StartWeb so it is unit-testable without a NATS connection.
 func webCallFn[S any](handle WebHandler[S]) CallFn[S] {
 	return func(payload json.RawMessage, state S, ctx *Ctx) (any, S, error) {
 		req, err := decodeHTTPRequest(payload)

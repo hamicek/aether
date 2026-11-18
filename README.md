@@ -77,7 +77,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **Call deadline** | ✅ | every call says when its caller stops waiting; a thrall drops an expired call instead of executing it later (`aether_expired_total`). Go + TS + Python - see [Calling a thrall](#calling-a-thrall-the-client) |
 | **Behaviours** | ✅ | GenServer thrall (`Def` / `defThrall`), a state-machine thrall (`FSM` / `defFSM`, a gen_statem analogue - see [State machine](#state-machine-fsm-behaviour)) and an event manager (`EventManager` / `defEvent`, a gen_event analogue - see [Event manager](#event-manager-gen_event-behaviour)) |
 | **Supervision** | ✅ | `one_for_one`, `one_for_all`, `rest_for_one` + a restart-intensity window + backoff; `on_give_up = "exit"` ends the node (exit status 3) when a thrall is given up on, for the supervisor above to restart it |
-| **Graceful drain** | ✅ | `ctl:drain` -> the thrall finishes its mailbox -> `terminate` -> escalation to SIGTERM/SIGKILL |
+| **Graceful drain** | ✅ | `ctl:drain` -> the thrall stops reading, finishes the message in hand (a concurrent web thrall: every request it had taken) -> `terminate` -> escalation to SIGTERM/SIGKILL |
 | **Lord-liveness fencing** | ✅ | no thrall survives its lord: every thrall verifies a KV lease and self-terminates when its lord dies, even on an external SIGKILL where the process-group kill never runs |
 | **Observability** | ✅ | Structured logs (lord + all SDKs), a Prometheus `/metrics` endpoint, heartbeat miss detection, cross-process tracing - see [Observability](#observability) |
 | **Fleet health** | ✅ | `[observability] fleet_health` -> each lord publishes a curated health summary on `aether._fleet.>`; `aether fleet` aggregates a view of every lord across the bus, cluster, or leaf sites (opt-in, mechanism not domain; supervision stays node-local) - see [Observability](#observability) |
@@ -530,8 +530,10 @@ thrall.StartWeb(thrall.WebDef[*site]{
 ```
 
 A failing handler costs one request, in either shape: a returned error, a thrown exception or a
-panic is answered with a bare 500 by the web thrall itself, logged with the request's trace and the
-stack, counted (`aether_panics_total`), and the thrall keeps serving.
+panic is answered with a bare 500 by the web thrall itself, logged with the request's trace, and
+the thrall keeps serving. A Go panic and a TS or Python exception are logged with the stack and
+counted (`aether_panics_total`); an error a Go handler *returns* is logged and becomes the thrall's
+last error, without a stack and without the count.
 
 The shared value is never replaced by the runtime; what must change one request at a time belongs
 in an ordinary thrall the handler calls. Requests beyond the limit wait and are dropped when their

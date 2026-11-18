@@ -459,8 +459,10 @@ that call timed out. What a panic *should* cost is decided by what the thrall is
   panic always had), restart through `init` under the restart policy and intensity budget. What
   changed is that it now dies properly, the way an escalation does: the caller of the panicking
   call gets an **`escalated`** error reply at once (message `panic: <value>`) instead of waiting
-  out its timeout, the panic is logged through the thrall's logger with the op, the request's
-  trace and the stack, and the reason travels to the lord as `last_error` on the dying breath.
+  out its timeout, and the panic is logged through the thrall's logger with the op, the request's
+  trace and the stack. A GenServer also sends the reason to the lord as `last_error` on a dying
+  breath; a state machine reports no last error at all (its self-description is static), so for an
+  FSM the reason is in its log and in the caller's reply only.
   One difference from `Escalate` is intentional: a **durable cast that panics is not acked**. An
   escalation is the handler's decision about that message; a panic is a bug that says nothing
   about it, so delivery stays at-least-once and the cast is redelivered after the restart.
@@ -477,8 +479,13 @@ that call timed out. What a panic *should* cost is decided by what the thrall is
 
 The web rule is the same in all three SDKs: a web handler that fails - a Go panic or returned
 error, a thrown error or rejected promise in TS, a raised exception in Python - is answered as HTTP
-500 by the thrall, logged with trace and stack, and the process keeps serving; TS and Python count
-it in `panics_total` too, since there a crash and a failure are the same exception. This is a
+500 by the thrall, logged with the request's trace, recorded as `last_error`, and the process keeps
+serving. What is logged with a stack and counted in `panics_total` is the crash: a Go panic, and
+in TS and Python every such exception, since there a crash and a failure are the same thing. An
+error a Go handler *returns* is a failure the handler chose to report: it is logged without a
+stack and is not counted. A payload that is not an `http_request` at all takes the same road in
+Go (a 500, logged, `last_error`); the ingress builds that payload itself, so it takes a caller that
+bypasses the ingress to cause it. This is a
 change for the returned/thrown error: it used to be a `handler_error` reply, which the ingress
 could only render as a 502. A web thrall is HTTP-native - it answers its own "no" as a response,
 and now its own failures too - while `Refuse` and `Escalate` keep their meaning. The 500 comes
@@ -953,10 +960,15 @@ What stays true in the concurrent mode:
   to wait (the ingress stamps 5 s on every request), not by a count; a call without a deadline
   waits as long as it takes, as before. A hard cap on queued work is a separate concern (overload
   protection, deliberately not part of this).
-- **Drain.** A draining thrall stops reading, finishes every request it had already received -
-  those in their handlers and those still waiting (which run or expire) - flushes their replies,
-  and only then terminates. The serialized path now waits for its in-flight handler too, whether or
-  not the thrall has a `Terminate` hook.
+- **Drain.** A draining thrall stops reading at once - it closes its subscriptions, so a request
+  sent from then on is told immediately that nobody is listening (the ingress answers 503 with
+  `Retry-After`) instead of waiting for a reply that will not come. It then finishes every request
+  it had already taken - those in their handlers and those still waiting for a slot (which run or
+  expire) - flushes their replies, and only then terminates. The same in the three SDKs. For every
+  Go and Python thrall, not only web ones, drain now waits for the handler in hand whether or not
+  there is a `Terminate` hook - and for no more than that: an idle thrall stops immediately, and a
+  durable thrall stops after the cast it is handling, leaving the rest of its fetched batch
+  unacknowledged for redelivery rather than working through it past the lord's grace period.
 - **Metrics.** `mailbox_depth` counts requests received and not finished; the new `in_flight` is how
   many are in their handlers right now, so `mailbox_depth - in_flight` is the queue. `describe`
   carries `concurrency` for a concurrent web thrall (absent = serialized). On the lord:
