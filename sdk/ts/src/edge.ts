@@ -67,7 +67,7 @@ export async function startEdge(def: EdgeDef): Promise<void> {
     msgId: "", // the edge is an HTTP ingress, not a command handler; no per-message id is threaded
     singletonEpoch: fenceConfigFromEnv()?.epoch ?? 0,
     call: (target, op, payload = {}, opts = {}) => call(target, op, payload, { ...opts, trace: ctx.trace }),
-    cast: (target, op, payload = {}) => cast(target, op, payload, { trace: ctx.trace }),
+    cast: (target, op, payload = {}, opts = {}) => cast(target, op, payload, { ...opts, trace: ctx.trace }),
     castConfirmed: (target, op, payload = {}, opts = {}) => castConfirmed(target, op, payload, { ...opts, trace: ctx.trace }),
     append: (event, opts) => appendEvent(nc, env.app, name, event, opts),
     startChild: (spec, opts) => startChild(nc, spec, opts),

@@ -1,13 +1,14 @@
 import { AckPolicy, DeliverPolicy, nanos, type NatsConnection } from "nats";
-import { decode, encode, type Envelope, type ThrallDescribe } from "./envelope";
+import { decode, encode, ErrorType, type Envelope, type HeartbeatMetrics, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
-import { useConnection, startChild, stopChild, call, cast, castConfirmed, orNewTrace, type SpawnSpec, type CallOpts, type CastConfirmedOpts } from "./client";
+import { useConnection, startChild, stopChild, call, cast, castConfirmed, orNewTrace, type SpawnSpec, type CallOpts, type CastOpts, type CastConfirmedOpts } from "./client";
 import { newLogger, type Logger } from "./log";
 import { appendEvent, type AppendOpts } from "./rebuild";
 import { heartbeatIntervalMs } from "./heartbeat";
 import { startFencingIfSingleton, startLordLivenessFencing, fenceConfigFromEnv } from "./fencing";
 import { DedupCache, dedupKey } from "./dedup";
+import { deadlineSkewMs, expiredReply, overdueMs } from "./deadline";
 
 // Handler shapes hold the GenServer semantics:
 //   handleCall: (payload, state) => [reply, newState]
@@ -49,6 +50,56 @@ export function asEscalate(err: unknown): EscalateError | null {
   return err instanceof EscalateError ? err : null;
 }
 
+// RefuseError is the typed "no" of a handler: the request is understood and the thrall is healthy,
+// but a rule of its domain forbids what was asked (not enough funds, the day is already closed).
+// A handler throws it via refuse(). It is the third outcome beside a plain error ("this request
+// failed") and escalate() ("crash me"), and the only one of the three that is not a failure:
+//
+//   - the caller gets an error reply of type "refused" carrying code and reason, which its SDK
+//     surfaces as a typed error (in TS a CallError with refused === true);
+//   - the thrall's state is left as it was, exactly as for a plain error;
+//   - nothing is recorded as the thrall's last error, and the refusal counts as a handled message.
+//
+// code is a stable, machine-readable identifier that callers branch on, so it is part of the
+// thrall's contract: name it for the rule ("insufficient_funds"), never reword it. reason is for
+// people and may change freely. Mirrors the Go SDK's RefuseError.
+export class RefuseError extends Error {
+  readonly code: string;
+  readonly reason: string;
+  constructor(code: string, reason: string) {
+    super(`refused (${code}): ${reason}`);
+    this.name = "RefuseError";
+    this.code = code;
+    this.reason = reason;
+  }
+}
+
+// refuse declines the request being handled.
+//
+// A refusal is never forwarded implicitly: a handler that calls another thrall and lets that
+// call's CallError propagate gets a plain handler failure even when the other thrall refused,
+// because a code from someone else's contract must not pose as this thrall's answer. To pass a
+// downstream refusal on, say so: const r = asRefusal(err); if (r) refuse(r.code, r.reason).
+export function refuse(code: string, reason: string): never {
+  throw new RefuseError(code, reason);
+}
+
+// asRefuse returns the refusal if err is one, else null.
+export function asRefuse(err: unknown): RefuseError | null {
+  return err instanceof RefuseError ? err : null;
+}
+
+// refusedReply is the error reply that carries a refusal to the caller.
+export function refusedReply(req: Envelope, refusal: RefuseError): Envelope {
+  return {
+    v: 1,
+    id: req.id,
+    kind: "reply",
+    status: "error",
+    error: { type: ErrorType.refused, code: refusal.code, message: refusal.reason, retryable: false },
+  };
+}
+
 // exitProcess terminates the thrall process on escalation. A module-local seam (mirrors the Go
 // SDK's exitProcess var) so it stays swappable; production exits for real.
 let exitProcess: (code: number) => void = (code) => process.exit(code);
@@ -74,7 +125,7 @@ export interface Ctx {
   // resource reject a lower one - the write-side fencing token pattern (DESIGN §14).
   singletonEpoch: number;
   call: <R = unknown>(target: string, op: string, payload?: unknown, opts?: CallOpts) => Promise<R>;
-  cast: (target: string, op: string, payload?: unknown, opts?: { idempotencyKey?: string }) => void;
+  cast: (target: string, op: string, payload?: unknown, opts?: Omit<CastOpts, "trace">) => void;
   // castConfirmed resolves only once the cast is durably stored in the target's mailbox; see
   // castConfirmed in client.ts. Mirrors the Go SDK ctx.CastConfirmed.
   castConfirmed: (target: string, op: string, payload?: unknown, opts?: Omit<CastConfirmedOpts, "trace">) => Promise<void>;
@@ -150,23 +201,11 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     return tail;
   };
 
-  // Self-metrics reported on each heartbeat (mirrors the Go SDK mailboxStats): depth = messages
-  // currently held, lastMs = duration of the most recent handler, processed = cumulative count.
-  const stats = { depth: 0, processed: 0, lastMs: 0 };
-  const beginJob = (): number => {
-    stats.depth++;
-    return performance.now();
-  };
-  const endJob = (start: number): void => {
-    stats.lastMs = performance.now() - start;
-    stats.processed++;
-    stats.depth--;
-  };
-  const snapshot = () => ({
-    mailbox_depth: stats.depth,
-    mailbox_latency_ms: stats.lastMs,
-    processed_total: stats.processed,
-  });
+  // Self-metrics reported on each heartbeat; see MailboxStats.
+  const stats = new MailboxStats();
+  const snapshot = () => stats.snapshot();
+  // Turns away calls whose caller has stopped waiting, before their handler runs.
+  const gate = new DeadlineGate(stats, log);
 
   // The last handler failure, reported in the self-description. Set from a handler, read by the
   // heartbeat - JS is single-threaded, so a plain object needs no lock.
@@ -204,15 +243,16 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   // waiting in the promise chain - matching the Go/Python SDKs, where begin() runs before the
   // mailbox lock.
   const onCall = (e: Envelope, respond: (data: Uint8Array) => void): Promise<void> => {
-    const start = beginJob();
+    const start = stats.begin();
     return serialize(async () => {
+      if (gate.drop(e, (reply) => respond(encode(reply)))) return;
       ctx.trace = orNewTrace(e.trace);
       ctx.msgId = e.id ?? "";
       log.debug("handling call", { op: e.op, trace: ctx.trace });
       try {
         const handler = def.handleCall?.[e.op ?? ""];
         if (!handler) {
-          respond(encode(errReply(e, "unknown_op", `unknown call op: ${e.op}`)));
+          respond(encode(errReply(e, ErrorType.unknownOp, `unknown call op: ${e.op}`)));
           return;
         }
         const dkey = dedup ? dedupKey(e) : ""; // empty (no idem and no id) -> not deduped
@@ -235,18 +275,26 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
             // Reply the caller before we crash, so it learns of the restart instead of
             // hanging until timeout; the dying breath then flushes both the reply and the final
             // heartbeat (carrying the reason) before the process exits.
-            respond(encode(errReply(e, "escalated", esc.reason)));
+            respond(encode(errReply(e, ErrorType.escalated, esc.reason)));
             setLastError(`escalated: ${esc.reason}`);
             await dyingBreath();
             log.error("handler escalated - self-terminating for restart", { op: e.op, reason: esc.reason });
             exitProcess(1);
             return;
           }
+          const refusal = asRefuse(err);
+          if (refusal) {
+            // A refusal is the domain saying no, not the thrall failing: the caller gets the
+            // code, the state stays as it was, and nothing is recorded as the last error.
+            log.debug("call refused", { op: e.op, code: refusal.code, trace: ctx.trace });
+            respond(encode(refusedReply(e, refusal)));
+            return;
+          }
           setLastError(`handler_error: ${String(err)}`);
-          respond(encode(errReply(e, "handler_error", String(err))));
+          respond(encode(errReply(e, ErrorType.handler, String(err))));
         }
       } finally {
-        endJob(start);
+        stats.end(start);
       }
     });
   };
@@ -255,7 +303,7 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
   // non-durable core cast, which needs no ack. On escalation the poison cast is acked before
   // the crash, so it is not redelivered into a loop after the restart.
   const onCast = (e: Envelope, ackDurable?: () => Promise<void>): Promise<void> => {
-    const start = beginJob();
+    const start = stats.begin();
     return serialize(async () => {
       ctx.trace = orNewTrace(e.trace);
       ctx.msgId = e.id ?? "";
@@ -283,11 +331,18 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
             exitProcess(1);
             return;
           }
+          const refusal = asRefuse(err);
+          if (refusal) {
+            // Nobody waits for a cast, so a refused one is only noted: a normal outcome, not a
+            // failure, and the state stays as it was.
+            log.info("cast refused", { op: e.op, code: refusal.code, reason: refusal.reason });
+            return;
+          }
           setLastError(`handler_error: ${String(err)}`);
           log.error("cast handler failed", { op: e.op, err: String(err) });
         }
       } finally {
-        endJob(start);
+        stats.end(start);
       }
     });
   };
@@ -395,6 +450,65 @@ export async function consumeDurableCast(
     // cast is not redelivered; the happy path returns here and we ack in arrival order.
     await onCast(decode(m.data), async () => { await m.ackAck(); }); // process (serialized, FIFO) ...
     m.ack(); //                                                         ... and only then ack (at-least-once)
+  }
+}
+
+// MailboxStats collects the thrall's self-metrics reported on each heartbeat (mirrors the Go SDK
+// mailboxStats): depth = messages currently held, lastMs = duration of the most recent handler,
+// processed = cumulative count of handled messages, expired = cumulative count of calls dropped
+// unexecuted because their deadline had passed. begin/end bracket every handled message; a dropped
+// call ends with drop instead, so it is neither a processed message nor a latency sample.
+export class MailboxStats {
+  private depth = 0;
+  private processed = 0;
+  private expired = 0;
+  private lastMs = 0;
+
+  begin(): number {
+    this.depth++;
+    return performance.now();
+  }
+
+  end(start: number): void {
+    this.lastMs = performance.now() - start;
+    this.processed++;
+    this.depth--;
+  }
+
+  drop(): void {
+    this.expired++;
+    this.depth--;
+  }
+
+  // snapshot is the heartbeat payload. expired_total is omitted while zero, matching the Go
+  // omitempty tag, so a thrall that never dropped a call reports the shape it always did.
+  snapshot(): HeartbeatMetrics {
+    const m: HeartbeatMetrics = { mailbox_depth: this.depth, mailbox_latency_ms: this.lastMs, processed_total: this.processed };
+    if (this.expired > 0) m.expired_total = this.expired;
+    return m;
+  }
+}
+
+// DeadlineGate stands in front of a thrall's call handlers and turns away calls whose caller has
+// already stopped waiting (see deadline.ts). It is consulted when the call's turn in the serialized
+// mailbox comes, i.e. at the last moment before the handler would run.
+export class DeadlineGate {
+  private readonly skewMs = deadlineSkewMs();
+
+  constructor(
+    private readonly stats: MailboxStats,
+    private readonly log: Logger,
+  ) {}
+
+  // drop reports whether the call has expired. If it has, the call is accounted as dropped (not
+  // as processed), logged, and answered with "deadline_exceeded".
+  drop(e: Envelope, respond: (reply: Envelope) => void): boolean {
+    const overdue = overdueMs(e, Date.now(), this.skewMs);
+    if (overdue === undefined) return false;
+    this.stats.drop();
+    this.log.warn("dropping expired call - its caller stopped waiting", { op: e.op, trace: e.trace, overdue_ms: overdue });
+    respond(expiredReply(e, overdue));
+    return true;
   }
 }
 

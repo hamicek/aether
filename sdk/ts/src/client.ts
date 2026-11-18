@@ -1,6 +1,7 @@
 import type { NatsConnection, NatsError } from "nats";
-import { decode, encode, type Envelope } from "./envelope";
+import { decode, encode, ErrorType, type Envelope, type WireError } from "./envelope";
 import { subjects } from "./subjects";
+import { deadlineAfter } from "./deadline";
 
 export interface CallOpts {
   timeoutMs?: number;
@@ -10,21 +11,141 @@ export interface CallOpts {
   // Stable idempotency key. On an idempotent thrall a retry carrying the same key is not
   // re-processed: a duplicate call returns the first reply, a duplicate cast is skipped. See AE-077.
   idempotencyKey?: string;
+  // The app the target lives in: the message goes to aether.<app>.<target>.<verb> instead of the
+  // sender's own app. This is how an application reaches a shared thrall deployed in another app.
+  app?: string;
 }
 
-// Shared connection for client calls (set by start(), or set manually by a
-// standalone client via useConnection()).
+export type CastOpts = Pick<CallOpts, "trace" | "idempotencyKey" | "app">;
+
+// CallError = the error a call rejects with when the target answered with an error reply. It
+// carries the reply's error as the target sent it, so a caller tells the outcomes apart instead of
+// matching error text:
+//
+//   - type "refused": the thrall declined the request by a rule of its domain. `code` is the
+//     thrall's stable machine code for the rule and `reason` the human sentence. A normal answer,
+//     not a fault.
+//   - type "handler_error" / "unknown_op" / "escalated": the request failed in the thrall.
+//   - type "deadline_exceeded": the thrall got to the call after its deadline and dropped it
+//     unexecuted (`retryable` is true).
+//
+// A thrall built with an SDK that predates refusals reports everything as "handler_error" with an
+// empty code. A call that got no reply at all rejects with the NATS error (timeout, no responders),
+// not a CallError. `message` stays "<type>: <reason>", the text a failed call has always had.
+// Mirrors the Go SDK's CallError.
+export class CallError extends Error {
+  readonly type: string;
+  readonly code: string;
+  readonly reason: string;
+  readonly retryable: boolean;
+
+  constructor(error: WireError | undefined) {
+    const type = error?.type ?? ErrorType.handler;
+    const reason = error?.message ?? "error reply without detail";
+    super(`${type}: ${reason}`);
+    this.name = "CallError";
+    this.type = type;
+    this.code = error?.code ?? "";
+    this.reason = reason;
+    this.retryable = error?.retryable ?? false;
+  }
+
+  // refused = the target declined the request (as opposed to failing at it).
+  get refused(): boolean {
+    return this.type === ErrorType.refused;
+  }
+}
+
+// asRefusal returns the refusal behind err, or null when err is not one - a failure of the thrall,
+// a transport error, or anything else.
+export function asRefusal(err: unknown): CallError | null {
+  return err instanceof CallError && err.refused ? err : null;
+}
+
+// refusalCode returns the code of the refusal behind err, or "" when err is not a refusal. It makes
+// mapping refusals to outcomes a plain switch or table lookup on the code.
+export function refusalCode(err: unknown): string {
+  return asRefusal(err)?.code ?? "";
+}
+
+// Client calls and casts to thralls over a NATS connection. It needs nothing else: no lord, no
+// environment, no running thrall - so a gateway, a CLI, a test or a library can talk to the ether
+// with the same envelope a thrall's own ctx.call produces. `app` is the app it addresses by
+// default; `defaults.trace` is carried by every send that does not name its own. A Client is
+// immutable. Mirrors the Go SDK's Client.
+export class Client {
+  constructor(
+    private readonly nc: NatsConnection,
+    readonly app: string,
+    private readonly defaults: { trace?: string } = {},
+  ) {}
+
+  // with returns a copy of the client with another default app and/or trace, leaving this one
+  // untouched - e.g. binding a per-request trace to a long-lived client: client.with({ trace }).
+  with(overrides: { app?: string; trace?: string }): Client {
+    return new Client(this.nc, overrides.app || this.app, { trace: overrides.trace || this.defaults.trace });
+  }
+
+  // call = synchronous request/reply (GenServer.call). Resolves with the reply payload; rejects
+  // with a CallError when the target answered with an error reply, or with the NATS error when no
+  // reply arrived. The envelope carries the instant this call stops waiting, so a thrall that only
+  // gets to it later drops it instead of executing a request nobody is waiting for.
+  async call<R = unknown>(target: string, op: string, payload: unknown = {}, opts: CallOpts = {}): Promise<R> {
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS;
+    const now = Date.now();
+    const req: Envelope = {
+      v: 1,
+      id: nextId(),
+      trace: orNewTrace(opts.trace || this.defaults.trace),
+      idem: opts.idempotencyKey,
+      kind: "call",
+      to: target,
+      op,
+      payload,
+      ts: now,
+      deadline: deadlineAfter(now, timeoutMs),
+    };
+    const msg = await this.nc.request(subjects.call(opts.app || this.app, target), encode(req), { timeout: timeoutMs });
+    const reply = decode(msg.data);
+    if (reply.status === "error") throw new CallError(reply.error);
+    return reply.payload as R;
+  }
+
+  // cast = fire-and-forget (GenServer.cast): it says nothing about whether the target received
+  // or handled the message.
+  cast(target: string, op: string, payload: unknown = {}, opts: CastOpts = {}): void {
+    this.nc.publish(subjects.cast(opts.app || this.app, target), encode(castEnvelope(target, op, payload, this.sendOpts(opts))));
+  }
+
+  // castConfirmed = a cast to a durable thrall that resolves only once the message is durably
+  // stored in the target's mailbox; see castConfirmed below.
+  async castConfirmed(target: string, op: string, payload: unknown = {}, opts: CastConfirmedOpts = {}): Promise<void> {
+    await sendConfirmedCast(this.nc, opts.app || this.app, target, op, payload, this.sendOpts(opts));
+  }
+
+  private sendOpts<T extends CastOpts>(opts: T): T {
+    return { ...opts, trace: opts.trace || this.defaults.trace };
+  }
+}
+
+const DEFAULT_CALL_TIMEOUT_MS = 5000;
+
+// The connection of the thrall running in this process (set by start(), or manually by a
+// standalone script via useConnection()). It backs the module-level call/cast, which address the
+// app named by AETHER_APP. Code that is not a thrall should build its own Client instead.
 let shared: NatsConnection | null = null;
 
 export function useConnection(nc: NatsConnection): void {
   shared = nc;
 }
 
-function conn(): NatsConnection {
+// own is the client over the shared connection. The app is read per send, as it always was, so a
+// script may set AETHER_APP after useConnection().
+function own(): Client {
   if (!shared) {
     throw new Error("no connection - call start() or useConnection(nc)");
   }
-  return shared;
+  return new Client(shared, process.env.AETHER_APP ?? "");
 }
 
 let seq = 0;
@@ -42,32 +163,16 @@ export function orNewTrace(trace?: string): string {
   return trace && trace.length > 0 ? trace : newTrace();
 }
 
-function app(): string {
-  return process.env.AETHER_APP ?? "";
-}
-
-// call = synchronous request/reply with a timeout (GenServer.call).
-export async function call<R = unknown>(
-  target: string,
-  op: string,
-  payload: unknown = {},
-  opts: CallOpts = {},
-): Promise<R> {
-  const req: Envelope = { v: 1, id: nextId(), trace: orNewTrace(opts.trace), idem: opts.idempotencyKey, kind: "call", to: target, op, payload, ts: Date.now() };
-  const msg = await conn().request(subjects.call(app(), target), encode(req), {
-    timeout: opts.timeoutMs ?? 5000,
-  });
-  const reply = decode(msg.data);
-  if (reply.status === "error") {
-    throw new Error(`${reply.error?.type}: ${reply.error?.message}`);
-  }
-  return reply.payload as R;
+// call = synchronous request/reply with a timeout (GenServer.call) to another thrall, over this
+// process's shared connection. See Client.call for what it resolves and rejects with.
+export function call<R = unknown>(target: string, op: string, payload: unknown = {}, opts: CallOpts = {}): Promise<R> {
+  return own().call<R>(target, op, payload, opts);
 }
 
 // cast = fire-and-forget (GenServer.cast). Pass opts.trace to propagate a trace (Ctx.cast
 // does this); omitted -> a fresh trace is minted.
-export function cast(target: string, op: string, payload: unknown = {}, opts: { trace?: string; idempotencyKey?: string } = {}): void {
-  conn().publish(subjects.cast(app(), target), encode(castEnvelope(target, op, payload, opts)));
+export function cast(target: string, op: string, payload: unknown = {}, opts: CastOpts = {}): void {
+  own().cast(target, op, payload, opts);
 }
 
 // castEnvelope builds the envelope shared by the plain and the confirmed cast.
@@ -82,6 +187,8 @@ export interface CastConfirmedOpts {
   // Stable idempotency key, also sent as Nats-Msg-Id: a retry carrying the same key lands once
   // in the mailbox within its duplicate window.
   idempotencyKey?: string;
+  // The app the target lives in, when it is not the sender's own (see CallOpts.app).
+  app?: string;
 }
 
 // NotDurableError = a confirmed cast whose target has no durable mailbox. Nothing is sent: a
@@ -109,7 +216,7 @@ const knownMailboxes = new WeakMap<NatsConnection, Set<string>>();
 // a message that did land is deduplicated). A target without a mailbox rejects with
 // NotDurableError. Mirrors the Go SDK CastConfirmed.
 export async function castConfirmed(target: string, op: string, payload: unknown = {}, opts: CastConfirmedOpts = {}): Promise<void> {
-  await sendConfirmedCast(conn(), app(), target, op, payload, opts);
+  await own().castConfirmed(target, op, payload, opts);
 }
 
 // sendConfirmedCast is castConfirmed over an explicit connection and app.
@@ -175,9 +282,7 @@ async function lordControl(
   const req: Envelope = { v: 1, id: nextId(), kind: "ctl", op, payload, ts: Date.now() };
   const msg = await nc.request(subjects.lordCtl(), encode(req), { timeout: opts.timeoutMs ?? 5000 });
   const reply = decode(msg.data);
-  if (reply.status === "error") {
-    throw new Error(`${reply.error?.type}: ${reply.error?.message}`);
-  }
+  if (reply.status === "error") throw new CallError(reply.error);
   return reply.payload;
 }
 
