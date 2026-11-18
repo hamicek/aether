@@ -213,6 +213,7 @@ id of §13b) are the other optional fields of a request.
 | `unknown_op` | no call handler for the `op` | unaffected |
 | `escalated` | the handler asked to be crashed (§8) | restarts through `init` |
 | `deadline_exceeded` | the call's deadline had passed before the thrall got to it; nothing ran, hence `retryable: true` (§9c) | unaffected |
+| `reply_too_large` | the handler ran, but its reply does not fit one bus message (`max_payload`) and could not be sent; the caller is told instead of waiting out its timeout | alive, the handler's state change stands, recorded as its last error |
 
 An FSM thrall additionally answers `no_transition` and `guard_rejected` for an event its current
 state does not act on.
@@ -824,16 +825,60 @@ forwards the whole request, so adding a site is a route-table entry, not a new e
 in `internal/wire` (Go = source of truth; `HTTPRequest`/`HTTPResponse` with a base64 body for binary
 safety and `http.Header`-shaped headers), mirrored in the TS and Python SDKs with golden-fixture parity.
 Each SDK ships a helper (`StartWeb` / `startWeb` / `start_web`) so the author writes only the handler,
-plus ergonomic response constructors (HTML/text/JSON). The generic host->subject ingress that drives
-it is implemented as an **optional component** (`examples/http-ingress/`, implemented AE-092): a dumb
-forwarder on `thrall.StartEdge` that maps the `Host` header to a thrall and forwards the request over
-NATS, writing the reply back. It is **default-deny** (only hosts in its route table are reachable) and
-the route table sits behind a pluggable `RouteProvider`: a static file (`-routes`) or a dynamic
-site-registry client (`-registry`, AE-093) that resolves each Host against the commons site-registry
-thrall over NATS and caches the result for a TTL, so sites can be published at runtime behind the same
-interface. It does not replace models A/B: use `[[edge.http]]` to put
-HTTP in front of an existing thrall's operations, and the web thrall + ingress when the thrall itself
-is the web app.
+plus ergonomic response constructors (HTML/text/JSON). It does not replace models A/B: use
+`[[edge.http]]` to put HTTP in front of an existing thrall's operations, and the web thrall + ingress
+when the thrall itself is the web app.
+
+**The ingress (`cmd/http-ingress`, core in `internal/ingress`; AE-092/093, a component since AE-095).**
+The generic host->subject forwarder that puts web thralls on the network: an edge thrall
+(`thrall.StartEdge`) that owns the socket, resolves `Host` to a thrall, forwards the request as one
+call and writes the reply back. It started as an example; once a production site ran on it, it became
+a program of the repository with the properties a public front door needs. It is a separate binary
+rather than an `aether` subcommand because it is an ordinary thrall the lord runs through `cmd` - the
+lord should not carry an HTTP server it does not use - and its contract is the binary and its flags,
+which is why the Go code is internal. The design decisions:
+
+- **Dumb forwarder, default-deny.** No path routing, no middleware, no domain logic; a host reaches
+  the ether only if a `RouteProvider` admits it. TLS, certificates and public rate limiting belong to
+  the reverse proxy in front.
+- **A route lookup has three outcomes**, not two: found, authoritatively not found (404), and *could
+  not tell* (503). The site-registry provider keeps the registry's answers so that an outage does not
+  take the sites down: the last known answer of a host (routable or denied) is served for a bounded
+  time past its TTL, the registry is asked again only once a second while it is down, and routable
+  and denied hosts are cached apart, each under a cap, so a scan of random hosts can neither grow the
+  cache without limit nor evict real sites. The bound on staleness is the price: a site retired right
+  before an outage stays reachable for at most that long.
+- **Sizes follow the bus.** A request is one message and so is the reply, so the body limit is
+  *derived* from the connection's `max_payload` (minus a reserve for headers and envelope, times 3/4
+  for base64) instead of being an independent number that can disagree with it. Over the limit is a
+  413 before anything is sent, never a truncation; the header reserve is an estimate, so a request
+  that still does not fit is caught when the client library refuses the publish, with the same 413.
+  The reply side cannot be checked by the ingress - an oversized reply never leaves the thrall - so
+  the SDKs answer such a call with `reply_too_large` (§7) and the ingress turns that into a 502.
+  A thrall on an SDK that predates it drops the reply and the request ends as a 504.
+- **Every phase of a connection is bounded**: reading headers, reading the whole request, waiting
+  for the thrall, writing the response, idling between requests, and the number of connections served
+  at once (further ones wait in the accept queue - backpressure, not unbounded goroutines). The write
+  limit is counted from the moment the ingress has a response, so it is independent of the time a
+  thrall may take. The limits have safe defaults and can be tuned but not disabled.
+- **The call is an SDK call.** It carries the deadline (= the ingress timeout, so thrall and ingress
+  give up at the same moment, §9c) and a trace minted per request, which is the handler's `ctx.Trace`,
+  is in every log line and goes back to the browser in `X-Aether-Trace`. A `deadline_exceeded` reply
+  is the ingress's own timeout seen from the other side, hence the same 504.
+- **The ingress vouches for the request's origin.** `HTTPRequest` carries `host`, `scheme` and
+  `client_ip`, which only the holder of the connection can state. They come from the connection
+  itself; forwarding headers are consulted only when the peer is a configured trusted proxy (default
+  loopback), walking `X-Forwarded-For` from the right to the first address that is not a trusted
+  proxy. Client-sent `X-Forwarded-*` / `Forwarded` / `X-Real-IP` are dropped and the canonical three
+  rewritten from the established facts, so a thrall reading headers and one reading the fields get
+  the same answer. The fields were added later and are omitted when empty: an old thrall ignores them,
+  a new thrall behind an old ingress sees them empty, which means "not stated", never "trusted".
+- **It explains itself.** One access line per request (no query string, headers or bodies - that is
+  where secrets travel) and, before every response it produces itself, a failure line with a stable
+  cause and the error.
+
+Out of scope by design: WebSocket and streaming, replies split over several messages, path-prefix
+routing, mapping a thrall's refusal codes to statuses (a web thrall answers its own "no" as HTTP).
 
 **Live push to the browser (implemented, SSE).** The reverse flow: ether -> browser. A frontend opens a
 connection and the edge pushes events out to it as they cross the ether. `thrall.SSEStream` (Go SDK) is
