@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { join } from "path";
-import { connect, type NatsConnection } from "nats";
+import { connect, ErrorCode, type NatsConnection, type NatsError } from "nats";
 import { Client } from "./client";
 import { decode, encode, type Envelope, type HeartbeatMetrics, type ThrallDescribe } from "./envelope";
 import { OP_HTTP_REQUEST, bodyText, type HTTPRequest, type HTTPResponse } from "./http";
@@ -202,6 +202,18 @@ test("drain lets a request that is in its handler finish", async () => {
   const inFlight = get("web-drain", "/slow", "ms=600");
   await Bun.sleep(100);
   nc!.publish(subjects.ctl("web-drain"), encode({ v: 1, kind: "ctl", op: "drain" }));
+  await Bun.sleep(100);
+  // A draining thrall has stopped reading: a new request learns at once that nobody is listening
+  // (the ingress answers 503), instead of waiting out its timeout.
+  const asked = performance.now();
+  let refused: unknown;
+  try {
+    await get("web-drain", "/fast");
+  } catch (err) {
+    refused = err;
+  }
+  expect((refused as NatsError | undefined)?.code).toBe(ErrorCode.NoResponders);
+  expect(performance.now() - asked).toBeLessThan(1000);
   const finished = await inFlight;
   expect(bodyText(finished.resp)).toBe("slow");
   expect(await proc.exited).toBe(0);

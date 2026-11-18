@@ -181,25 +181,28 @@ class CallPoolTest(unittest.IsolatedAsyncioTestCase):
         await pool.drain()
         self.assertEqual((stats.snapshot()["mailbox_depth"], stats.snapshot()["processed_total"]), (0, 4))
 
-    async def test_drain_waits_and_takes_no_new_calls(self):
+    async def test_drain_waits_for_every_call_it_was_given(self):
         pool, _ = self._pool(1)
-        running, waiting, refused = _Held(), _Held(), _Held()
+        running, waiting, late = _Held(), _Held(), _Held()
         pool.submit(_call("running"), None, running.handle)
         pool.submit(_call("waiting"), None, waiting.handle)
         await self._settle()
 
         drain = asyncio.ensure_future(pool.drain())
         await self._settle()
-        pool.submit(_call("after-drain"), None, refused.handle)
+        # The thrall stops reading before it drains; a call it had already taken is still served.
+        pool.submit(_call("taken-before-the-stop"), None, late.handle)
         await self._settle()
-        self.assertFalse(refused.started)
         self.assertFalse(drain.done())
 
         running.release()
         await self._settle()
         self.assertTrue(waiting.started)  # a call that was already waiting still gets its turn
-        self.assertFalse(drain.done())
         waiting.release()
+        await self._settle()
+        self.assertTrue(late.started)
+        self.assertFalse(drain.done())
+        late.release()
         await asyncio.wait_for(drain, timeout=2)
 
     async def test_failing_handler_frees_its_slot(self):
@@ -443,6 +446,13 @@ class WebDispatchTest(unittest.IsolatedAsyncioTestCase):
                 in_flight = asyncio.ensure_future(self._get(label, "/slow", "ms=600"))
                 await asyncio.sleep(0.1)
                 await self.nc.publish(aether._sub_ctl(label), json.dumps({"v": 1, "kind": "ctl", "op": "drain"}).encode())
+                await asyncio.sleep(0.1)
+                # A draining thrall has stopped reading: a new request learns at once that nobody
+                # is listening (the ingress answers 503), instead of waiting out its timeout.
+                started = time.monotonic()
+                with self.assertRaises(NoRespondersError):
+                    await self._get(label, "/fast")
+                self.assertLess(time.monotonic() - started, 1.0)
                 body, _ = await in_flight
                 self.assertEqual(body, "slow")
                 self.assertEqual(await asyncio.to_thread(proc.wait, 5), 0)

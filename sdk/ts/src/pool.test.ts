@@ -114,7 +114,7 @@ test("a call that already expired while waiting for its slot is not run", async 
   expect(replies[0]?.error?.type).toBe("deadline_exceeded");
 });
 
-test("drain waits for running and waiting calls and takes no new ones", async () => {
+test("drain waits for every call it was given, including one that arrives while it drains", async () => {
   const { pool } = newPool(1);
   const running = held();
   const waiting = held();
@@ -124,17 +124,21 @@ test("drain waits for running and waiting calls and takes no new ones", async ()
 
   let drained = false;
   const drain = pool.drain().then(() => (drained = true));
-  const refused = held();
-  await pool.submit(call("after-drain"), () => {}, refused.handle);
-  expect(refused.started()).toBe(false);
+  // The thrall stops reading before it drains; a call it had already taken is still served.
+  const late = held();
+  void pool.submit(call("taken-before-the-stop"), () => {}, late.handle);
 
   await Bun.sleep(20);
   expect(drained).toBe(false);
   running.release();
   await Bun.sleep(0);
   expect(waiting.started()).toBe(true); // a call that was already waiting still gets its turn
-  expect(drained).toBe(false);
   waiting.release();
+  await Bun.sleep(0);
+  await Bun.sleep(0);
+  expect(late.started()).toBe(true);
+  expect(drained).toBe(false);
+  late.release();
   await drain;
   expect(drained).toBe(true);
 });

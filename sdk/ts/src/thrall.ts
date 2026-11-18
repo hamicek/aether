@@ -1,4 +1,4 @@
-import { AckPolicy, DeliverPolicy, ErrorCode, nanos, type NatsConnection, type NatsError } from "nats";
+import { AckPolicy, DeliverPolicy, ErrorCode, nanos, type NatsConnection, type NatsError, type Subscription } from "nats";
 import { decode, encode, ErrorType, type Envelope, type HeartbeatMetrics, type ThrallDescribe } from "./envelope";
 import { subjects } from "./subjects";
 import { open, readEnv, type Env } from "./connection";
@@ -385,14 +385,19 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
             return;
           }
         }
+        // Only the handler is guarded: a reply that cannot be sent is not the handler failing, and
+        // must not be answered (or counted) as if it were.
+        let reply: unknown;
         try {
-          const [reply, next] = await handler(e.payload, state, ctx);
+          const [result, next] = await handler(e.payload, state, ctx);
+          reply = result;
           state = next;
-          if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
-          send(okReply(e, reply));
         } catch (err) {
           await answerFailedCall(e, ctx.trace, err, send);
+          return;
         }
+        if (dkey) dedup!.put(dkey, reply); // cache only a successful reply
+        send(okReply(e, reply));
       } finally {
         stats.end(start);
       }
@@ -419,12 +424,14 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
           send(errReply(e, ErrorType.unknownOp, `unknown call op: ${e.op}`));
           return;
         }
+        let reply: unknown;
         try {
-          const [reply] = await handler(e.payload, shared, reqCtx);
-          send(okReply(e, reply));
+          [reply] = await handler(e.payload, shared, reqCtx);
         } catch (err) {
           await answerFailedCall(e, reqCtx.trace, err, send);
+          return;
         }
+        send(okReply(e, reply)); // outside the guard: a send that fails is not a handler failure
       });
       // The handler answers its own failures, so a rejection here happened while answering (the
       // bus went away mid-reply). It is logged; nobody awaits this promise, and an unhandled
@@ -482,14 +489,16 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     });
   };
 
+  // The core subscriptions this thrall reads its messages from; a drain closes them first.
+  const inbound: Subscription[] = [];
   if (durable) {
     // Durable thrall: call/info over core (synchronous), cast via JetStream (survives a crash).
-    subscribeVerb(nc, subjects.call(env.app, name), (e, msg) => onCall(e, (d) => msg.respond(d)));
-    subscribeVerb(nc, subjects.info(env.app, name), () => {}); // TODO handleInfo
+    inbound.push(subscribeVerb(nc, subjects.call(env.app, name), (e, msg) => onCall(e, (d) => msg.respond(d))));
+    inbound.push(subscribeVerb(nc, subjects.info(env.app, name), () => {})); // TODO handleInfo
     void consumeDurableCast(nc, env.app, name, onCast);
   } else {
     // Non-durable thrall: a single wildcard subscription over call/cast/info (FIFO).
-    subscribeData(nc, env.app, name, onCall, onCast);
+    inbound.push(subscribeData(nc, env.app, name, onCall, onCast));
   }
 
   // ctl: controlled shutdown from the lord (drain / shutdown)
@@ -498,8 +507,11 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
     for await (const msg of ctlSub) {
       const e = decode(msg.data);
       if (e.op === "drain" || e.op === "shutdown") {
-        // Finish what was already received: the pooled calls that are running or waiting for a
-        // slot (new ones are no longer taken), then the mailbox.
+        // Stop reading first, as the Go SDK does: with the subscriptions closed nothing new is
+        // taken (a caller is told at once that nobody is listening, instead of waiting for a
+        // reply that will not come). Then finish what was already taken: the pooled calls that
+        // are running or waiting for a slot, then the mailbox.
+        for (const sub of inbound) sub.unsubscribe();
         await pool?.drain();
         await tail;
         await def.terminate?.(e.op, state);
@@ -521,7 +533,7 @@ export function subscribeData(
   name: string,
   onCall: (e: Envelope, respond: (d: Uint8Array) => void) => void,
   onCast: (e: Envelope) => void,
-): void {
+): Subscription {
   const sub = nc.subscribe(subjects.data(app, name));
   void (async () => {
     for await (const msg of sub) {
@@ -531,6 +543,7 @@ export function subscribeData(
       else if (verb === "cast") onCast(e);
     }
   })();
+  return sub;
 }
 
 // subscribeVerb: a core subscription on one specific subject.
@@ -538,13 +551,14 @@ export function subscribeVerb(
   nc: NatsConnection,
   subject: string,
   handle: (e: Envelope, msg: { respond: (d: Uint8Array) => void }) => void,
-): void {
+): Subscription {
   const sub = nc.subscribe(subject);
   void (async () => {
     for await (const msg of sub) {
       handle(decode(msg.data), msg);
     }
   })();
+  return sub;
 }
 
 // Durable consumer tuning (mirrors the Go/Python SDKs). Unlike those two, the TS SDK never
@@ -694,7 +708,6 @@ export class CallPool {
   private active = 0;
   private readonly waiting: Array<{ grant: (taken: boolean) => void; timer?: ReturnType<typeof setTimeout> }> = [];
   private readonly pending = new Set<Promise<void>>();
-  private draining = false;
 
   constructor(
     private readonly limit: number,
@@ -706,7 +719,6 @@ export class CallPool {
   // waiting; otherwise the call is dropped and respond carries the deadline_exceeded reply. The
   // returned promise settles when the call is finished or dropped; it rejects only if handle does.
   submit(e: Envelope, respond: (reply: Envelope) => void, handle: () => Promise<void>): Promise<void> {
-    if (this.draining) return Promise.resolve(); // a draining thrall takes no new calls
     const done = this.serve(e, respond, handle).finally(() => this.pending.delete(done));
     this.pending.add(done);
     return done;
@@ -765,10 +777,10 @@ export class CallPool {
     next.grant(true);
   }
 
-  // drain stops taking new calls and resolves once every call already submitted has finished or
-  // been dropped.
+  // drain resolves once every submitted call has finished or been dropped. It does not turn
+  // calls away: the thrall stops reading before it drains, and a call that was already taken is
+  // served like any other.
   async drain(): Promise<void> {
-    this.draining = true;
     while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
   }
 }

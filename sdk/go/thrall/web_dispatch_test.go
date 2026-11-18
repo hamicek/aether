@@ -389,7 +389,15 @@ func TestWebDrainWaitsForInFlightRequests(t *testing.T) {
 			select {
 			case err := <-stopped:
 				t.Fatalf("the thrall stopped with a request still in its handler (err %v)", err)
-			case <-time.After(1200 * time.Millisecond): // well past the reader's 500 ms poll
+			case <-time.After(300 * time.Millisecond):
+			}
+			// A draining thrall has stopped reading: a new request learns at once that nobody is
+			// listening (the ingress answers 503), instead of waiting out its timeout. The same
+			// in the TypeScript and Python SDKs.
+			asked := time.Now()
+			late := awaitOutcome(t, "a request sent during the drain", get(client, "web", "/fast", clientTimeout))
+			if !errors.Is(late.err, nats.ErrNoResponders) || time.Since(asked) > time.Second {
+				t.Errorf("a request sent during the drain = %+v after %v, want an immediate %v", late, time.Since(asked), nats.ErrNoResponders)
 			}
 
 			g.letGo(name)

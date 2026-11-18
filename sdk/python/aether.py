@@ -612,14 +612,11 @@ class _CallPool:
         self._active = 0
         self._waiting: deque = deque()  # futures of calls waiting for a slot, oldest first
         self._pending: set = set()  # the task of every call submitted and not yet finished
-        self._draining = False
 
     def submit(self, e: dict, respond: Callable[[dict], Any], handle: Callable[[], Any]) -> None:
         """Take one received call and return at once. handle runs on the call's own task when a
         slot is free and the call's caller is still waiting; otherwise the call is dropped and
         respond is awaited with the deadline_exceeded reply."""
-        if self._draining:
-            return  # a draining thrall takes no new calls
         task = asyncio.ensure_future(self._serve(e, respond, handle, self._stats.begin()))
         self._pending.add(task)
         task.add_done_callback(lambda done: self._finished(done, e))
@@ -699,9 +696,9 @@ class _CallPool:
         self._active -= 1
 
     async def drain(self) -> None:
-        """Stop taking new calls and return once every call already submitted has finished or
-        been dropped."""
-        self._draining = True
+        """Return once every submitted call has finished or been dropped. It does not turn calls
+        away: the thrall stops reading before it drains, and a call that was already taken is
+        served like any other."""
         while self._pending:
             await asyncio.gather(*list(self._pending), return_exceptions=True)
 
@@ -1252,13 +1249,17 @@ async def start(defn: ThrallDef) -> None:
                         # A duplicate call: return the first reply instead of re-running the handler.
                         await respond(msg, e, _ok_reply(e, cached))
                         return
+                # Only the handler is guarded: a reply that cannot be sent is not the handler
+                # failing, and must not be answered (or counted) as if it were.
                 try:
-                    reply, state = await _maybe(handler(e.get("payload"), state, ctx))
-                    if dkey:
-                        dedup.put(dkey, reply)  # cache only a successful reply
-                    await respond(msg, e, _ok_reply(e, reply))
+                    reply, next_state = await _maybe(handler(e.get("payload"), state, ctx))
                 except Exception as ex:  # noqa: BLE001
                     await answer_failed_call(msg, e, ctx.trace, ex)
+                    return
+                state = next_state
+                if dkey:
+                    dedup.put(dkey, reply)  # cache only a successful reply
+                await respond(msg, e, _ok_reply(e, reply))
         finally:
             if ran:
                 stats.end(start)
@@ -1283,9 +1284,11 @@ async def start(defn: ThrallDef) -> None:
                 return
             try:
                 reply, _ = await _maybe(handler(e.get("payload"), shared, req_ctx))
-                await respond(msg, e, _ok_reply(e, reply))
             except Exception as ex:  # noqa: BLE001
                 await answer_failed_call(msg, e, req_ctx.trace, ex)
+                return
+            # Outside the guard: a send that fails is not a handler failure.
+            await respond(msg, e, _ok_reply(e, reply))
 
         pool.submit(e, lambda reply: respond(msg, e, reply), handle)
 
@@ -1345,11 +1348,13 @@ async def start(defn: ThrallDef) -> None:
                 stats.abandon()
 
     tasks: list[asyncio.Task] = []
+    inbound: list = []  # the core subscriptions messages are read from; a drain closes them first
 
     if durable:
         # Durable: call/info over core (synchronous), cast via a durable JetStream consumer.
         call_sub = await nc.subscribe(_sub_call(app, name))
         info_sub = await nc.subscribe(_sub_info(app, name))
+        inbound += [call_sub, info_sub]
 
         async def call_loop() -> None:
             async for msg in call_sub.messages:
@@ -1364,6 +1369,7 @@ async def start(defn: ThrallDef) -> None:
     else:
         # Non-durable: a single wildcard subscription (call/cast/info) -> FIFO.
         data_sub = await nc.subscribe(_sub_data(app, name))
+        inbound.append(data_sub)
 
         async def data_loop() -> None:
             async for msg in data_sub.messages:
@@ -1383,9 +1389,13 @@ async def start(defn: ThrallDef) -> None:
         async for msg in ctl_sub.messages:
             e = _decode(msg.data)
             if e.get("op") in ("drain", "shutdown"):
-                # Finish what was already received before terminating: the pooled calls that are
-                # running or waiting for a slot (new ones are no longer taken), then the handler
-                # holding the mailbox. Their replies are flushed before the connection goes.
+                # Stop reading first, as the Go SDK does: with the subscriptions closed nothing new
+                # is taken (a caller is told at once that nobody is listening, instead of waiting
+                # for a reply that will not come). Then finish what was already taken - the pooled
+                # calls that are running or waiting for a slot, then the handler holding the
+                # mailbox - and flush the replies before the connection goes.
+                for sub in inbound:
+                    await sub.unsubscribe()
                 if pool is not None:
                     await pool.drain()
                 async with lock:
