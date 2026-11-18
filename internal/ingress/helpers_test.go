@@ -193,7 +193,8 @@ type response struct {
 	header http.Header
 }
 
-// do sends one request with the given Host header and optional extra headers ("Name: value").
+// do sends one request with the given Host header and optional extra headers ("Name: value"). It is
+// safe to call from a goroutine other than the test's.
 func do(t *testing.T, method, url, host string, body io.Reader, headers ...string) response {
 	t.Helper()
 	req, err := http.NewRequest(method, url, body)
@@ -210,7 +211,10 @@ func do(t *testing.T, method, url, host string, body io.Reader, headers ...strin
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s (Host %s): %v", method, url, host, err)
+		// Errorf, not Fatalf: tests send requests from goroutines of their own, where FailNow is not
+		// allowed. The zero response fails whatever the caller asserts next.
+		t.Errorf("%s %s (Host %s): %v", method, url, host, err)
+		return response{}
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)

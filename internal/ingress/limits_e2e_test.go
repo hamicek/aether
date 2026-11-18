@@ -176,6 +176,58 @@ func TestSlowClientsAreCutOff(t *testing.T) {
 	}
 }
 
+// TestWriteDeadlineOfOneResponseDoesNotOutliveIt guards a keep-alive connection against the write
+// deadline of an earlier response. The ingress bounds the writing of each response on its own, and
+// that deadline sits on the connection. It relies on the HTTP server clearing it when the response
+// is finished: if it stayed, a connection that idled past it would fail the first thing the server
+// writes for the next request - which, for a client that asks before sending a body, is
+// "100 Continue", written before the handler gets to set a new deadline.
+func TestWriteDeadlineOfOneResponseDoesNotOutliveIt(t *testing.T) {
+	srv := embeddedNATS(t)
+	nc := connect(t, srv)
+	handled := countingThrall(t, srv, "blog")
+	const writeTimeout = 100 * time.Millisecond
+	handler := ingress.NewHandler(nc, ingress.StaticRoutes{"blog.test": "blog"}, ingress.Options{App: testApp, WriteTimeout: writeTimeout})
+	addr := serve(t, handler, ingress.ServerOptions{IdleTimeout: time.Minute}, 16)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: blog.test\r\n\r\n")
+	first, err := http.ReadResponse(reader, nil)
+	if err != nil || first.StatusCode != http.StatusOK {
+		t.Fatalf("first request: %v", err)
+	}
+	io.Copy(io.Discard, first.Body)
+	first.Body.Close()
+
+	time.Sleep(3 * writeTimeout) // the first response's write deadline is long past
+
+	fmt.Fprint(conn, "POST /upload HTTP/1.1\r\nHost: blog.test\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n")
+	interim, err := http.ReadResponse(reader, nil)
+	if err != nil || interim.StatusCode != http.StatusContinue {
+		t.Fatalf("the server must invite the body with 100 Continue, got %v, %v", interim, err)
+	}
+	fmt.Fprint(conn, "hello")
+	second, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("second request on the same connection: %v", err)
+	}
+	body, _ := io.ReadAll(second.Body)
+	second.Body.Close()
+	if second.StatusCode != http.StatusOK || string(body) != "5" {
+		t.Errorf("second request: status %d, body %q; want the thrall's answer to a 5-byte body", second.StatusCode, body)
+	}
+	if got := handled.Load(); got != 2 {
+		t.Errorf("the thrall handled %d requests, want 2", got)
+	}
+}
+
 // TestConnectionCapMakesFurtherClientsWait proves the cap on concurrent connections end to end: with
 // the single slot held by an open keep-alive connection, a second client is not served until the
 // first one goes away - and then it is.

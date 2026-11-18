@@ -45,9 +45,9 @@ type Config struct {
 	TrustedProxies TrustedProxies
 }
 
-// ParseFlags reads the ingress command line. Usage and parse errors are written to out; the
-// returned error is flag.ErrHelp when the caller asked for help, so a program can tell "printed
-// usage" from "bad command line". A limit that would switch a protection off (a zero timeout, no
+// ParseFlags reads the ingress command line. The flag package writes usage (and a malformed flag) to
+// out; the returned error is flag.ErrHelp when the caller asked for help, so a program can tell
+// "printed usage" from "bad command line". A limit that would switch a protection off (a zero timeout, no
 // connection cap) is rejected: every limit has a safe default and can be tuned, not removed.
 func ParseFlags(args []string, out io.Writer) (Config, error) {
 	var cfg Config
@@ -74,14 +74,14 @@ func ParseFlags(args []string, out io.Writer) (Config, error) {
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
-	err := cfg.validate()
-	if err == nil {
-		cfg.TrustedProxies, err = ParseTrustedProxies(*trustedProxies)
-	}
-	if err != nil {
-		fmt.Fprintln(out, err)
+	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
+	trusted, err := ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TrustedProxies = trusted
 	return cfg, nil
 }
 
@@ -164,17 +164,23 @@ func Run(args []string) error {
 				"trusted_proxies", fmt.Sprint(cfg.TrustedProxies))
 			return nil
 		},
-		// Run owns the socket until Stop (a drain) shuts the server down.
+		// Run owns the socket. It ends when the lord drains the ingress (stop is closed): requests in
+		// flight get a moment to finish, and what is still open after that is cut. A server that
+		// stops by itself is a failure, and the lord restarts the ingress.
 		Run: func(ctx *thrall.Ctx, stop <-chan struct{}) error {
-			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				return err
+			served := make(chan error, 1)
+			go func() { served <- srv.Serve(ln) }()
+			select {
+			case err := <-served:
+				return fmt.Errorf("ingress: http server stopped: %w", err)
+			case <-stop:
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+				defer cancel()
+				if err := srv.Shutdown(shutdownCtx); err != nil {
+					_ = srv.Close()
+				}
+				return nil
 			}
-			return nil
-		},
-		Stop: func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-			defer cancel()
-			_ = srv.Shutdown(shutdownCtx)
 		},
 		Version: Version,
 	})

@@ -13,12 +13,14 @@ cmd  = "../../bin/blog"
 restart = "permanent"
 scope   = "local"
 
-# The ingress: a generic HTTP front door that maps the Host header to a web thrall and forwards the
-# request over NATS, writing the reply back. It owns the OS socket, so it runs as a singleton (one
-# active instance; failover via the KV lock + fencing). The route table is a static file for now
-# (a dynamic site-registry provider is Wave 1); default-deny - only hosts in routes.json are served.
+# The ingress (cmd/http-ingress): the HTTP front door that maps the Host header to a web thrall and
+# forwards the request over NATS, writing the reply back. It owns the OS socket, so it runs as a
+# singleton (one active instance; failover via the KV lock + fencing). The route table here is a
+# static file (-registry resolves hosts against a site-registry thrall instead); default-deny - only
+# hosts in routes.json are served. It binds loopback: in a real deployment a reverse proxy that
+# terminates TLS sits in front of it.
 [[thrall]]
 name = "ingress"
-cmd  = "../../bin/http-ingress -addr :7391 -routes routes.json"
+cmd  = "../../bin/http-ingress -addr 127.0.0.1:7391 -routes routes.json"
 restart = "permanent"
 scope   = "singleton"

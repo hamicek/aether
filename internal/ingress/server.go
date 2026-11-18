@@ -23,7 +23,9 @@ type ServerOptions struct {
 // connection's life bounded: reading the headers, reading the whole request, and sitting idle
 // between requests. Writing the response is bounded by the handler (Options.WriteTimeout), which
 // starts that clock when it has a response to write rather than when the request arrived - so the
-// write limit does not have to be added up with the time a thrall is allowed to take.
+// write limit does not have to be added up with the time a thrall is allowed to take. The deadline
+// it sets lasts for that one response: net/http clears a connection's write deadline once a
+// response is finished, so it does not carry over to the next request on a keep-alive connection.
 func NewServer(handler http.Handler, opts ServerOptions) *http.Server {
 	if opts.ReadHeaderTimeout <= 0 {
 		opts.ReadHeaderTimeout = DefaultReadHeaderTimeout
