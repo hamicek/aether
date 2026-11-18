@@ -62,6 +62,10 @@ func goldenCases() map[string]Envelope {
 		"hb_concurrent": {V: 1, Kind: KindHB, To: "web", TS: 1700000000009,
 			Payload: mustHeartbeatMetrics(HeartbeatMetrics{MailboxDepth: 5, MailboxLatencyMs: 12.5, ProcessedTotal: 40, InFlight: 4,
 				Describe: &ThrallDescribe{CallOps: []string{"http_request"}, Version: "1.0.0", Concurrency: 4}})},
+		// A web thrall that contained two handler crashes: counted, and the latest is its last error.
+		"hb_panics": {V: 1, Kind: KindHB, To: "web", TS: 1700000000010,
+			Payload: mustHeartbeatMetrics(HeartbeatMetrics{ProcessedTotal: 12, PanicsTotal: 2,
+				Describe: &ThrallDescribe{CallOps: []string{"http_request"}, LastError: "panic: index out of range", LastErrorMs: 1700000000009}})},
 	}
 }
 

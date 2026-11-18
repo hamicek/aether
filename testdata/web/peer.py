@@ -22,6 +22,15 @@ async def respond(req, ctx, count):
         return aether.text_response(200, ctx.trace)
     if req.path == "/hits":
         return aether.text_response(200, str(count))
+    if req.path == "/throw":
+        raise RuntimeError("handler bug")
+    if req.path == "/reject":
+        await asyncio.sleep(0.01)
+        raise RuntimeError("rejected later")
+    if req.path == "/nothing":
+        return None  # a handler that forgot its return
+    if req.path == "/refuse":
+        raise aether.Refuse("not_for_you", "no")
     return aether.text_response(404, "not found")
 
 

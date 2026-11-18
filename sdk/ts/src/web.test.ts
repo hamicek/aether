@@ -206,3 +206,47 @@ test("drain lets a request that is in its handler finish", async () => {
   expect(bodyText(finished.resp)).toBe("slow");
   expect(await proc.exited).toBe(0);
 }, 20000);
+
+for (const [shape, concurrency] of [
+  ["serve", 4],
+  ["handle", undefined],
+] as const) {
+  test(`${shape}: a failing handler costs one request, not the process`, async () => {
+    if (!hasServer) return;
+    const name = `web-fail-${shape}`;
+    const proc = await startWebPeer(name, shape, concurrency);
+    const before = Number(bodyText((await get(name, "/hits")).resp));
+
+    // A throw, a promise rejected after an await, and a handler that returned nothing.
+    for (const path of ["/throw", "/reject", "/nothing"]) {
+      const { resp } = await get(name, path);
+      expect(resp.status).toBe(500);
+      expect(bodyText(resp)).toBe("Internal Server Error"); // nothing about the inside
+      expect(bodyText((await get(name, "/fast")).resp)).toBe("fast"); // the next request is served
+    }
+
+    const beat = await heartbeat(name, (m) => m.panics_total === 3);
+    expect(beat.describe?.last_error).toBe("handler_error: TypeError: the web handler did not return an HTTPResponse");
+    expect(beat.mailbox_depth).toBe(0);
+    expect(proc.exitCode).toBeNull(); // still running
+
+    if (shape === "handle") {
+      // The failing requests left the threaded state alone: only the three /fast were counted.
+      expect(Number(bodyText((await get(name, "/hits")).resp))).toBe(before + 4);
+    }
+  }, 20000);
+}
+
+test("a refusal from a web handler stays a typed error reply", async () => {
+  if (!hasServer) return;
+  await startWebPeer("web-refuse", "serve", 4);
+  let caught: unknown;
+  try {
+    await get("web-refuse", "/refuse");
+  } catch (err) {
+    caught = err;
+  }
+  expect((caught as { code?: string }).code).toBe("not_for_you");
+  const beat = await heartbeat("web-refuse", (m) => m.mailbox_depth === 0);
+  expect(beat.panics_total).toBeUndefined(); // a refusal is not a failure
+}, 20000);

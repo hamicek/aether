@@ -370,6 +370,38 @@ class WebDispatchTest(unittest.IsolatedAsyncioTestCase):
                 beat = await self._heartbeat(label, lambda m: m.get("mailbox_depth") == 0)
                 self.assertNotIn("concurrency", beat.get("describe", {}))  # a serialized thrall declares none
 
+    async def test_failing_handler_costs_one_request_not_the_process(self):
+        for label, shape, concurrency in (("fail-serve", "serve", 4), ("fail-handle", "handle", None)):
+            with self.subTest(shape=label):
+                proc = await self._start_web_peer(label, shape, concurrency)
+                before = int((await self._get(label, "/hits"))[0])
+
+                # A raise, a raise after an await, and a handler that returned nothing.
+                for path in ("/throw", "/reject", "/nothing"):
+                    reply = await self.client.call(label, aether.OP_HTTP_REQUEST,
+                                                   {"method": "GET", "path": path}, timeout=5)
+                    resp = aether.HTTPResponse.from_wire(reply)
+                    self.assertEqual((resp.status, resp.body_text()), (500, "Internal Server Error"))
+                    self.assertEqual((await self._get(label, "/fast"))[0], "fast")  # the next one is served
+
+                beat = await self._heartbeat(label, lambda m: m.get("panics_total") == 3)
+                self.assertEqual(beat["describe"]["last_error"],
+                                 "handler_error: the web handler did not return an HTTPResponse")
+                self.assertEqual(beat["mailbox_depth"], 0)
+                self.assertIsNone(proc.poll())  # still running
+
+                if shape == "handle":
+                    # The failing requests left the threaded state alone: only the three /fast counted.
+                    self.assertEqual(int((await self._get(label, "/hits"))[0]), before + 4)
+
+    async def test_refusal_from_a_web_handler_stays_a_typed_error(self):
+        await self._start_web_peer("web", "serve", 4)
+        with self.assertRaises(aether.CallError) as raised:
+            await self._get("web", "/refuse")
+        self.assertEqual(aether.refusal_code(raised.exception), "not_for_you")
+        beat = await self._heartbeat("web", lambda m: m.get("mailbox_depth") == 0)
+        self.assertNotIn("panics_total", beat)  # a refusal is not a failure
+
     async def test_handle_threads_its_state(self):
         await self._start_web_peer("web", "handle")
         first = int((await self._get("web", "/hits"))[0])

@@ -67,6 +67,11 @@ func runProbe() {
 			"call_escalate": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) {
 				return nil, s, thrall.Escalate("call asked to crash")
 			},
+			// call_panic is a bug in a call handler: the thrall crashes, but the caller must get an
+			// "escalated" error reply first, as it does for a deliberate escalation.
+			"call_panic": func(_ json.RawMessage, s int, _ *thrall.Ctx) (any, int, error) {
+				panic("call handler bug")
+			},
 		},
 		HandleCast: map[string]thrall.CastFn[int]{
 			"inc":   func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) { return s + 1, nil },
@@ -81,6 +86,11 @@ func runProbe() {
 			// which reaches for a raw os.Exit).
 			"escalate": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) {
 				return s, thrall.Escalate("cast asked to crash")
+			},
+			// panic is a bug in a cast handler. Unlike escalate it says nothing about the message,
+			// so a durable cast must stay unacknowledged.
+			"panic": func(_ json.RawMessage, s int, _ *thrall.Ctx) (int, error) {
+				panic("cast handler bug")
 			},
 			// emit_trace publishes the trace of the message currently being handled to a
 			// per-thrall subject, so a test can observe what reached the handler via ctx.
@@ -384,6 +394,72 @@ func TestEscalateCallerGetsError(t *testing.T) {
 		v, ok := tryCallInt(nc, app, "probe", "pid")
 		return ok && v != pid1
 	})
+}
+
+// A panic in a call handler is a crash like any other - the lord restarts the thrall through init -
+// but the caller is answered "escalated" at once instead of waiting out its timeout. (That the
+// panic also rides the dying heartbeat as the last error is asserted in the SDK's own tests.)
+func TestPanicCallerGetsErrorAndThrallRestarts(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	startLord(t, eth, manifest(t, app, "one_for_one", spec("probe", "permanent", "local")))
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+	cast(t, nc, app, "probe", "inc")
+
+	errType, ok := callErrType(nc, app, "probe", "call_panic")
+	if !ok {
+		t.Fatal("expected an error reply from a panicking call, got none (caller hung until timeout?)")
+	}
+	if errType != "escalated" {
+		t.Fatalf("error reply type = %q, want %q", errType, "escalated")
+	}
+
+	waitFor(t, 10*time.Second, "restart with a fresh pid after a call panic", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		return ok && v != pid1
+	})
+	if got := callInt(t, nc, app, "probe", "get"); got != 0 {
+		t.Fatalf("state after a panic-restart = %d, want a clean 0 from init", got)
+	}
+}
+
+// A durable cast whose handler panics stays unacknowledged. A panic is a bug, not a decision about
+// that message (contrast Escalate, which acks before the crash), so delivery stays at-least-once:
+// after the restart the cast is still ack-pending and will be redelivered when AckWait runs out.
+func TestPanicDurableCastStaysPending(t *testing.T) {
+	const app = "itest"
+	eth := startEmbedded(t)
+	m := &Manifest{
+		App:      app,
+		Strategy: "one_for_one",
+		Thralls:  []ThrallSpec{{Name: "probe", Cmd: probeCmd(t), Restart: "permanent", Scope: "local", Durable: true}},
+	}
+	startLord(t, eth, m)
+	nc := eth.Conn()
+	waitReady(t, eth, "probe")
+
+	pid1 := callInt(t, nc, app, "probe", "pid")
+	cast(t, nc, app, "probe", "panic")
+
+	waitFor(t, 10*time.Second, "durable thrall restarts after a cast panic", func() bool {
+		v, ok := tryCallInt(nc, app, "probe", "pid")
+		return ok && v != pid1
+	})
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	ci, err := js.ConsumerInfo(wire.Stream(app, "probe"), "probe")
+	if err != nil {
+		t.Fatalf("ConsumerInfo: %v", err)
+	}
+	if ci.NumAckPending != 1 {
+		t.Fatalf("ack-pending after a cast panic = %d, want 1 (the cast must not be acknowledged)", ci.NumAckPending)
+	}
 }
 
 // A durable cast that escalates must not be left pending for redelivery (which would crash the

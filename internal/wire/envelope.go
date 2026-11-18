@@ -143,12 +143,18 @@ func (e Envelope) Expired(now time.Time, skew time.Duration) (overdue time.Durat
 // received and not yet finished, so mailbox_depth - in_flight is what is waiting for its turn. A
 // serialized thrall reports 0 or 1 here; a concurrent web thrall up to its concurrency (see
 // ThrallDescribe.Concurrency). Omitted while zero.
+//
+// panics_total is the cumulative count of handler crashes the thrall contained and survived: a
+// panic in a Go web handler, an exception out of a TS or Python web handler. Each cost one request
+// a 500, not the process. An ordinary thrall never reports it - a panic there ends the process,
+// which the lord counts as a restart. Omitted while zero.
 type HeartbeatMetrics struct {
 	MailboxDepth     int     `json:"mailbox_depth"`
 	MailboxLatencyMs float64 `json:"mailbox_latency_ms"`
 	ProcessedTotal   uint64  `json:"processed_total"`
 	ExpiredTotal     uint64  `json:"expired_total,omitempty"`
 	InFlight         int     `json:"in_flight,omitempty"`
+	PanicsTotal      uint64  `json:"panics_total,omitempty"`
 	// Describe is the thrall's self-description (its operations, version and last failure). It is
 	// optional so an older SDK - or a heartbeat that predates the feature - omits it entirely and
 	// the lord's liveness path is unaffected. Static fields (ops, version) repeat on every beat by

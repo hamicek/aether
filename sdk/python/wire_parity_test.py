@@ -72,6 +72,13 @@ CASES = {
                                   "describe": {"call_ops": ["http_request"], "version": "1.0.0",
                                                "concurrency": 4}},
                       "ts": 1700000000009},
+    "hb_panics": {"v": 1, "kind": "hb", "to": "web",
+                  "payload": {"mailbox_depth": 0, "mailbox_latency_ms": 0, "processed_total": 12,
+                              "panics_total": 2,
+                              "describe": {"call_ops": ["http_request"],
+                                           "last_error": "panic: index out of range",
+                                           "last_error_ms": 1700000000009}},
+                  "ts": 1700000000010},
 }
 
 

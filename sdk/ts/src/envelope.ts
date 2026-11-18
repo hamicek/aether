@@ -84,12 +84,16 @@ export interface ThrallDescribe {
 // (omitted while zero, so the payload of a thrall that never dropped a call is unchanged).
 // in_flight is the number of handlers running at this instant (omitted while zero): mailbox_depth
 // counts every message received and not yet finished, so mailbox_depth - in_flight is waiting.
+// panics_total is the cumulative count of handler crashes the thrall contained and survived - an
+// exception out of a web handler, answered with a 500 (omitted while zero; an ordinary thrall
+// never reports it).
 export interface HeartbeatMetrics {
   mailbox_depth: number;
   mailbox_latency_ms: number;
   processed_total: number;
   expired_total?: number;
   in_flight?: number;
+  panics_total?: number;
 }
 
 const encoder = new TextEncoder();

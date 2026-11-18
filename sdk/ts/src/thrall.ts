@@ -177,20 +177,35 @@ export function defThrall<S>(def: ThrallDef<S>): ThrallDef<S> {
 // SERIALIZED is the concurrency of a GenServer: one message at a time.
 export const SERIALIZED = 1;
 
-// The concurrency of a definition travels with it under a key this module keeps to itself, so it
-// is not a field a thrall author can set: the only way to get a definition that runs its calls
-// concurrently is defWeb with a serve handler (http.ts), whose shape has no state to thread.
-const concurrencyKey = Symbol("aether.concurrency");
+// Dispatch is how a thrall's calls are run. The default - SERIALIZED, no failureReply - is the
+// GenServer every thrall is; the web helper is the only one that asks for anything else.
+export interface Dispatch {
+  // concurrency is how many call handlers may run at once (see start).
+  concurrency: number;
+  // failureReply, when set, is the payload a caller is answered with - as a successful reply -
+  // when a call handler throws anything but a refusal or an escalation. Unset is the GenServer
+  // rule: a thrown error is a handler_error reply.
+  failureReply?: () => unknown;
+}
 
-// withConcurrency marks def as serving up to n calls at once. For the web helper only - it is not
-// exported from the package.
-export function withConcurrency<S>(def: ThrallDef<S>, n: number): ThrallDef<S> {
-  return Object.defineProperty(def, concurrencyKey, { value: n, enumerable: false });
+// The dispatch of a definition travels with it under a key this module keeps to itself, so it is
+// not a field a thrall author can set: the only way to get a definition that runs its calls
+// concurrently is defWeb with a serve handler (http.ts), whose shape has no state to thread.
+const dispatchKey = Symbol("aether.dispatch");
+
+// withDispatch marks how def's calls are run. For the web helper only - it is not exported from
+// the package.
+export function withDispatch<S>(def: ThrallDef<S>, dispatch: Dispatch): ThrallDef<S> {
+  return Object.defineProperty(def, dispatchKey, { value: dispatch, enumerable: false });
+}
+
+function dispatchOf<S>(def: ThrallDef<S>): Dispatch {
+  return (def as { [dispatchKey]?: Dispatch })[dispatchKey] ?? { concurrency: SERIALIZED };
 }
 
 // concurrencyOf is how many call handlers def runs at once: SERIALIZED unless defWeb said otherwise.
 export function concurrencyOf<S>(def: ThrallDef<S>): number {
-  return (def as { [concurrencyKey]?: number })[concurrencyKey] ?? SERIALIZED;
+  return dispatchOf(def).concurrency;
 }
 
 // start connects the thrall to the ether and runs its lifecycle.
@@ -202,7 +217,7 @@ export function concurrencyOf<S>(def: ThrallDef<S>): number {
 // shared by every handler that the runtime never replaces (a handler's returned state is ignored,
 // which is why the only way in is a handler shape that has none).
 export async function start<S>(def: ThrallDef<S>): Promise<void> {
-  const concurrency = concurrencyOf(def);
+  const { concurrency, failureReply } = dispatchOf(def);
   const env: Env = readEnv();
   const name = def.name || env.name;
   if (typeof def.init !== "function") throw new Error(`thrall ${name}: init is required`);
@@ -329,6 +344,20 @@ export async function start<S>(def: ThrallDef<S>): Promise<void> {
       return;
     }
     setLastError(`handler_error: ${String(err)}`);
+    if (failureReply) {
+      // A web thrall answers its own failures as HTTP. An exception is the one way a handler here
+      // can fail, a bug and a deliberate throw alike, so it is contained, counted and logged with
+      // the request's trace and the stack - and the thrall carries on.
+      stats.panicked();
+      log.error("handler failed - the request is answered with a failure, the thrall carries on", {
+        op: e.op,
+        trace,
+        err: String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      send(okReply(e, failureReply()));
+      return;
+    }
     send(errReply(e, ErrorType.handler, String(err)));
   };
 
@@ -576,6 +605,7 @@ export class MailboxStats {
   private running = 0;
   private processed = 0;
   private expired = 0;
+  private panics = 0; // handler crashes contained by a web thrall
   private lastMs = 0;
 
   begin(): number {
@@ -600,12 +630,18 @@ export class MailboxStats {
     this.depth--;
   }
 
+  // panicked counts a handler crash the thrall contained (the message itself still ends with end).
+  panicked(): void {
+    this.panics++;
+  }
+
   // snapshot is the heartbeat payload. expired_total and in_flight are omitted while zero, matching
   // the Go omitempty tags, so an idle thrall that never dropped a call reports the shape it always did.
   snapshot(): HeartbeatMetrics {
     const m: HeartbeatMetrics = { mailbox_depth: this.depth, mailbox_latency_ms: this.lastMs, processed_total: this.processed };
     if (this.expired > 0) m.expired_total = this.expired;
     if (this.running > 0) m.in_flight = this.running;
+    if (this.panics > 0) m.panics_total = this.panics;
     return m;
   }
 }

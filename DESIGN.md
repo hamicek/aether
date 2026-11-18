@@ -445,6 +445,48 @@ crash. The poison cast is consumed once and the restart is clean - it is not red
 that would crash every restart until restart-intensity gives up (which is what an unacked exit would
 cause, since durable delivery is at-least-once with redelivery on crash).
 
+### A panic is not an outcome - what it costs depends on the thrall
+
+A Go handler can also blow up without choosing to: a nil map, an index out of range. (TS and Python
+have no such fourth outcome - a bug there surfaces as a thrown error, the first bullet above.) The
+SDK used to do nothing about it, so the process died with a raw stack on stderr and the caller of
+that call timed out. What a panic *should* cost is decided by what the thrall is:
+
+- **An ordinary thrall (GenServer, FSM) still crashes - deliberately.** Its state is whatever its
+  handlers made of it, and a handler that panicked half way may have left it half changed (a map
+  mutated in place, a call to another thrall already sent). Continuing on that state is exactly what
+  *let it crash* exists to avoid, so the semantics stay: abnormal exit (status 2, as an unrecovered
+  panic always had), restart through `init` under the restart policy and intensity budget. What
+  changed is that it now dies properly, the way an escalation does: the caller of the panicking
+  call gets an **`escalated`** error reply at once (message `panic: <value>`) instead of waiting
+  out its timeout, the panic is logged through the thrall's logger with the op, the request's
+  trace and the stack, and the reason travels to the lord as `last_error` on the dying breath.
+  One difference from `Escalate` is intentional: a **durable cast that panics is not acked**. An
+  escalation is the handler's decision about that message; a panic is a bug that says nothing
+  about it, so delivery stays at-least-once and the cast is redelivered after the restart.
+- **A web thrall survives - one request pays.** Requests are independent of each other, and a
+  gateway that dies takes every user's request with the one that hit the bug (four such requests
+  in five seconds and the lord gave up on the gateway for good, §9). So `StartWeb` contains it: the
+  request is answered with a bare **500** by the web thrall itself, the panic is logged with trace
+  and stack, counted in `panics_total` (`aether_panics_total{name}`), recorded as `last_error`,
+  and the thrall keeps serving. With `Handle` the state the request would have returned is
+  discarded, so the next request gets the one from before it (anything the handler changed in place
+  through a pointer or a map stays changed); with `Serve` the shared value is whatever the handler
+  had made of it (release locks with `defer`).
+- **An event manager** already isolated a panicking handler from the others (§12); unchanged.
+
+The web rule is the same in all three SDKs: a web handler that fails - a Go panic or returned
+error, a thrown error or rejected promise in TS, a raised exception in Python - is answered as HTTP
+500 by the thrall, logged with trace and stack, and the process keeps serving; TS and Python count
+it in `panics_total` too, since there a crash and a failure are the same exception. This is a
+change for the returned/thrown error: it used to be a `handler_error` reply, which the ingress
+could only render as a 502. A web thrall is HTTP-native - it answers its own "no" as a response,
+and now its own failures too - while `Refuse` and `Escalate` keep their meaning. The 500 comes
+from the SDK, not the ingress, so the ingress stays a dumb forwarder and its own statuses (502
+for an error reply, 504, 503) mean what they meant. Only the handler's own invocation is covered:
+a goroutine, promise or task the handler started and did not wait for fails outside the request
+and still ends the process.
+
 ---
 
 ## 9. Manifest - aether.toml

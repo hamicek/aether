@@ -93,7 +93,7 @@ Everything below is implemented and exercised for real (see the manifests in `ex
 | **HTTP edge (ingress)** | ✅ | `[[edge.http]]` -> a built-in HTTP server maps routes to a thrall op (call/cast) with no code, supervised as a singleton thrall - see [HTTP edge](#http-edge-ingress) |
 | **HTTP ingress for web thralls** | ✅ | `http-ingress` -> a Host-routed front door: forwards a whole HTTP request as one call to a **web thrall** (a thrall that *is* the web server and owns no port), with timeouts, a connection cap, a body limit the bus can carry, serve-stale routing and trustworthy client facts - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
 | **Concurrent web thrall** | ✅ | a web thrall written as `Serve` handles up to `Concurrency` requests at once (default 32) over a value built once and shared; `Handle` stays serialized and threads its state. Queued requests expire by their deadline, drain waits for in-flight ones, the heartbeat reports `in_flight`. Go + TS + Python - see [HTTP ingress for web thralls](#http-ingress-for-web-thralls) |
-| **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
+| **Let it crash** | ✅ | `Escalate(reason)` from a handler -> typed OTP crash: the thrall exits abnormally and the lord restarts it through `init` per policy, no manual `panic`/`os.Exit`. A Go panic crashes an ordinary thrall the same way (the caller is answered first); a web thrall contains it as a 500. Go + TS + Python - see [A thrall in TS](#a-thrall-in-ts-example) |
 | **Idempotence** | ✅ | opt-in per thrall -> dedup a call/cast by an idempotency key: a duplicate cast is skipped, a duplicate call returns the first reply. In-memory (the thrall's lifetime), complements the event-log command-key. Go + TS + Python - see [Durability](#durability) |
 
 Restart policy per thrall: `permanent` / `transient` / `temporary`.
@@ -213,6 +213,13 @@ return s, thrall.Escalate("balance underflow")     // Go
 ```python
 raise aether.Escalate("balance underflow")         # Python
 ```
+
+A **panic** in a Go handler (a bug, not a choice) follows the same road for an ordinary thrall: the
+process still crashes and is restarted through `init` - its state can no longer be trusted - but
+the caller of the panicking call gets the `"escalated"` reply at once, and the panic is logged with
+its trace and stack and reported as the thrall's last error. A **web thrall** is the exception: it
+contains the panic and answers that one request with a 500 (see
+[HTTP ingress for web thralls](#http-ingress-for-web-thralls)). Rationale: [DESIGN.md §8](./DESIGN.md).
 
 ### Refusing a request
 
@@ -511,6 +518,10 @@ thrall.StartWeb(thrall.WebDef[*site]{
 })
 ```
 
+A failing handler costs one request, in either shape: a returned error, a thrown exception or a
+panic is answered with a bare 500 by the web thrall itself, logged with the request's trace and the
+stack, counted (`aether_panics_total`), and the thrall keeps serving.
+
 The shared value is never replaced by the runtime; what must change one request at a time belongs
 in an ordinary thrall the handler calls. Requests beyond the limit wait and are dropped when their
 caller's deadline passes. TS (`serve`, `concurrency`) and Python (`serve=`, `concurrency=`) are the
@@ -546,7 +557,8 @@ The ingress is an ordinary edge thrall (`thrall.StartEdge`), so the lord supervi
 | 408 | the request body did not arrive within `-read-timeout` |
 | 413 | the body is over the limit, or the request does not fit one bus message |
 | 431 | the request line and headers are over `-max-header-bytes` |
-| 502 | the thrall answered with an error, with no usable status, or with a response too large for the bus |
+| 500 | (from the web thrall, not the ingress) its handler failed - returned an error, threw or panicked; the thrall logged it under the request's trace and keeps serving |
+| 502 | the thrall answered with an error reply (a refusal, an escalation), with no usable status, or with a response too large for the bus |
 | 503 | the thrall is not running, or the route table cannot be reached (with `Retry-After`) |
 | 504 | no reply within `-timeout` - also when the thrall dropped the call past its deadline |
 
@@ -784,6 +796,7 @@ works the same embedded or external. Exposed series:
 | `aether_in_flight{name}` | gauge | handlers a thrall is running right now (self-reported); `mailbox_depth - in_flight` is what waits. 0 or 1 for a serialized thrall, up to its concurrency for a concurrent web thrall |
 | `aether_mailbox_latency_ms{name}` | gauge | most recent handler duration (self-reported) |
 | `aether_processed_total{name}` | counter | messages a thrall has processed (self-reported) |
+| `aether_panics_total{name}` | counter | handler crashes a **web** thrall contained (self-reported): each cost one request a 500, not the process. Any value above zero is a bug to find - the thrall's log has the trace and the stack |
 | `aether_expired_total{name}` | counter | calls a thrall dropped unexecuted because their caller's deadline had passed (self-reported); a steady climb means callers time out behind a slow handler, or the node's clock is off |
 | `aether_durable_backlog{name}` | gauge | pending casts in a durable thrall's stream (JetStream `num_pending`) |
 | `aether_thrall_rss_bytes{name}` | gauge | thrall resident memory, summed over its process group |

@@ -1,5 +1,5 @@
 // The web thrall test peer, TypeScript flavour. See README.md in this directory.
-import { startWeb, textResponse, type Ctx, type HTTPRequest, type HTTPResponse } from "../../sdk/ts/src/index";
+import { refuse, startWeb, textResponse, type Ctx, type HTTPRequest, type HTTPResponse } from "../../sdk/ts/src/index";
 
 interface Counter {
   hits: number;
@@ -20,6 +20,15 @@ async function respond(req: HTTPRequest, ctx: Ctx, count: number): Promise<HTTPR
       return textResponse(200, ctx.trace);
     case "/hits":
       return textResponse(200, String(count));
+    case "/throw":
+      throw new Error("handler bug");
+    case "/reject":
+      await Bun.sleep(10);
+      return Promise.reject(new Error("rejected later"));
+    case "/nothing":
+      return undefined as unknown as HTTPResponse; // a handler that forgot its return
+    case "/refuse":
+      refuse("not_for_you", "no");
     default:
       return textResponse(404, "not found");
   }

@@ -46,7 +46,8 @@ type mailboxStats struct {
 	running   atomic.Int64
 	processed atomic.Uint64
 	expired   atomic.Uint64
-	lastNs    atomic.Int64 // duration of the most recent handler, in nanoseconds
+	panics    atomic.Uint64 // handler crashes contained by a web thrall
+	lastNs    atomic.Int64  // duration of the most recent handler, in nanoseconds
 }
 
 func (s *mailboxStats) begin() time.Time {
@@ -83,6 +84,7 @@ func (s *mailboxStats) snapshot() wire.HeartbeatMetrics {
 		ProcessedTotal:   s.processed.Load(),
 		ExpiredTotal:     s.expired.Load(),
 		InFlight:         int(running),
+		PanicsTotal:      s.panics.Load(),
 	}
 }
 
@@ -187,19 +189,32 @@ func connectOptions(name string) ([]nats.Option, error) {
 }
 
 func Start[S any](def Def[S]) error {
-	return run(def, serialized)
+	return run(def, dispatch{concurrency: serialized})
 }
 
 // serialized is the concurrency of a GenServer: one message at a time.
 const serialized = 1
 
-// run is the lifecycle behind Start and StartWeb. concurrency is how many call handlers may run
-// at once. At serialized it is the GenServer every thrall is: one mailbox, one handler at a time,
-// each handler's returned state replacing the previous one. Above it - reachable only through
-// WebDef.Serve - calls leave the mailbox for a callPool, and the state Init returned becomes a
-// value shared by every handler that the runtime never replaces (a handler's returned state is
-// ignored, which is why the only public way in is a handler shape that has none).
-func run[S any](def Def[S], concurrency int) error {
+// dispatch is how a thrall's calls are run. Its zero-ish value - serialized, no failureReply - is
+// the GenServer every thrall is; StartWeb is the only caller that asks for anything else.
+type dispatch struct {
+	// concurrency is how many call handlers may run at once. At serialized: one mailbox, one
+	// handler at a time, each handler's returned state replacing the previous one. Above it -
+	// reachable only through WebDef.Serve - calls leave the mailbox for a callPool, and the state
+	// Init returned becomes a value shared by every handler that the runtime never replaces (a
+	// handler's returned state is ignored, which is why the only public way in is a handler shape
+	// that has none).
+	concurrency int
+	// failureReply, when set, is the payload a caller is answered with - as a successful reply -
+	// when a call handler fails: it returned a plain error, or it panicked. The thrall then
+	// survives a panic. Nil is the GenServer rule: a plain error is a handler_error reply and a
+	// panic ends the process (see panic.go).
+	failureReply func() any
+}
+
+// run is the lifecycle behind Start and StartWeb.
+func run[S any](def Def[S], how dispatch) error {
+	concurrency := how.concurrency
 	url := os.Getenv("AETHER_NATS_URL")
 	app := os.Getenv("AETHER_APP")
 	envName := os.Getenv("AETHER_NAME")
@@ -297,8 +312,32 @@ func run[S any](def Def[S], concurrency int) error {
 			return true
 		}
 		lastErr.set("handler_error: " + herr.Error())
+		if how.failureReply != nil {
+			// A web thrall answers its own failures as HTTP: nobody downstream has to guess what
+			// an error reply means, and the failure is on record here, with the request's trace.
+			log.Error("handler failed", slog.String("op", e.Op), slog.String("trace", trace), slog.Any("err", herr))
+			respond(okReply(e, how.failureReply()))
+			return true
+		}
 		respond(errReply(e, wire.ErrHandler, herr.Error()))
 		return true
+	}
+
+	// answerPanickedCall deals with a call handler that panicked (see panic.go for the rule).
+	// A web thrall answers the one request and lives on; any other thrall tells the caller and
+	// then crashes, the same way an escalation does.
+	answerPanickedCall := func(e wire.Envelope, trace string, p *handlerPanic, respond func(wire.Envelope)) {
+		lastErr.set(p.reason())
+		if how.failureReply != nil {
+			stats.panics.Add(1)
+			logPanic(log, "handler panicked - the request is answered with a failure, the thrall carries on", e.Op, trace, p)
+			respond(okReply(e, how.failureReply()))
+			return
+		}
+		logPanic(log, "handler panicked - self-terminating for restart", e.Op, trace, p)
+		respond(errReply(e, wire.ErrEscalated, p.reason()))
+		dyingBreath() // flushes the reply too, and lets the lord record the reason
+		exitProcess(exitPanic)
 	}
 
 	processCall := func(msg *nats.Msg) {
@@ -334,7 +373,15 @@ func run[S any](def Def[S], concurrency int) error {
 				return
 			}
 		}
-		reply, next, herr := h(e.Payload, state, ctx)
+		var (
+			reply any
+			next  S
+			herr  error
+		)
+		if p := guard(func() { reply, next, herr = h(e.Payload, state, ctx) }); p != nil {
+			answerPanickedCall(e, ctx.Trace, p, respond)
+			return
+		}
 		if answerFailedCall(e, ctx.Trace, herr, respond) {
 			return
 		}
@@ -374,7 +421,14 @@ func run[S any](def Def[S], concurrency int) error {
 					respond(errReply(e, wire.ErrUnknownOp, "unknown call op: "+e.Op))
 					return
 				}
-				reply, _, herr := h(e.Payload, shared, &reqCtx)
+				var (
+					reply any
+					herr  error
+				)
+				if p := guard(func() { reply, _, herr = h(e.Payload, shared, &reqCtx) }); p != nil {
+					answerPanickedCall(e, reqCtx.Trace, p, respond)
+					return
+				}
 				if answerFailedCall(e, reqCtx.Trace, herr, respond) {
 					return
 				}
@@ -412,7 +466,20 @@ func run[S any](def Def[S], concurrency int) error {
 				return // already processed; a durable cast is acked by the consume loop
 			}
 		}
-		next, herr := h(e.Payload, state, ctx)
+		var (
+			next S
+			herr error
+		)
+		if p := guard(func() { next, herr = h(e.Payload, state, ctx) }); p != nil {
+			// Nobody waits for a cast, so there is no one to answer; the thrall crashes as it
+			// would have. The cast is deliberately not acked: a panic is a bug, not a decision
+			// about this message, so a durable cast stays at-least-once and is redelivered.
+			lastErr.set(p.reason())
+			logPanic(log, "cast handler panicked - self-terminating for restart", e.Op, ctx.Trace, p)
+			dyingBreath()
+			exitProcess(exitPanic)
+			return
+		}
 		if esc, ok := asEscalate(herr); ok {
 			// Ack the poison cast before crashing so JetStream does not redeliver it into a
 			// crash loop; a non-durable cast (ackDurable nil) is simply dropped, as it is today.

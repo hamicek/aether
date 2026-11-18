@@ -14,7 +14,7 @@
 // X-Forwarded-* headers. An ingress that predates them leaves them out; a missing value means "not
 // stated", never a trusted default - do not rate-limit or authorize on a missing client_ip.
 
-import { SERIALIZED, defThrall, start, withConcurrency, type CallHandler, type Ctx, type ThrallDef } from "./thrall";
+import { SERIALIZED, defThrall, start, withDispatch, type CallHandler, type Ctx, type ThrallDef } from "./thrall";
 
 export const OP_HTTP_REQUEST = "http_request";
 
@@ -156,15 +156,43 @@ export function defWeb<S>(def: WebDef<S>): ThrallDef<S> {
   // handler has no next state: the shared value is handed back as it came, whether its requests
   // run through the pool or (at concurrency 1) through the mailbox.
   const handler: CallHandler<S> = def.serve
-    ? async (payload, shared, ctx) => [await def.serve!(payload as HTTPRequest, shared, ctx), shared]
-    : async (payload, state, ctx) => await def.handle!(payload as HTTPRequest, state, ctx);
+    ? async (payload, shared, ctx) => [asResponse(await def.serve!(payload as HTTPRequest, shared, ctx)), shared]
+    : async (payload, state, ctx) => {
+        const [resp, next] = await def.handle!(payload as HTTPRequest, state, ctx);
+        return [asResponse(resp), next];
+      };
   const thrall = defThrall<S>({
     name: def.name ?? "",
     init,
     version: def.version,
     handleCall: { [OP_HTTP_REQUEST]: handler },
   });
-  return withConcurrency(thrall, concurrency);
+  return withDispatch(thrall, { concurrency, failureReply: internalServerError });
+}
+
+// A failing handler costs one request, in either shape. A web thrall answers its own failures as
+// HTTP, the way it answers its own "no": a handler that throws (or whose promise rejects, or that
+// returns something that is not a response) is answered with a 500, the error is logged with the
+// request's trace and its stack, counted (panics_total on the heartbeat, aether_panics_total on
+// the lord) and becomes the thrall's last error - and the thrall keeps serving. With handle the
+// state stays what it was before the request. refuse() and escalate() keep their meaning: an
+// error reply of that type, and for escalate the crash it asks for. Only the handler's own promise
+// is covered: a promise the handler started and did not await fails outside the request, and an
+// unhandled rejection still ends the process, as it does for any thrall.
+
+// internalServerError is that 500: bare, saying nothing about the inside of the node. The cause is
+// in the thrall's log under the request's trace, which the ingress returns as X-Aether-Trace.
+function internalServerError(): HTTPResponse {
+  return textResponse(500, "Internal Server Error");
+}
+
+// asResponse insists that a handler returned a response. Without it a handler that forgot its
+// return would send an empty reply, which the ingress can only report as an invalid upstream.
+function asResponse(resp: unknown): HTTPResponse {
+  if (typeof resp !== "object" || resp === null || typeof (resp as HTTPResponse).status !== "number") {
+    throw new TypeError("the web handler did not return an HTTPResponse");
+  }
+  return resp as HTTPResponse;
 }
 
 // startWeb connects a web thrall to the ether and runs its lifecycle - a thin wrapper over start.

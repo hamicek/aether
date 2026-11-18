@@ -13,6 +13,7 @@ package thrall
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/hamicek/aether/internal/wire"
 )
@@ -118,6 +119,22 @@ func (def WebDef[S]) concurrency() (int, error) {
 // http_request handler on the ordinary thrall lifecycle, so everything a thrall gets (heartbeat,
 // the deadline gate, drain, fencing) applies; what differs between the two handler shapes is only
 // whether the requests go through the serialized mailbox or run concurrently.
+//
+// A failing handler costs one request, in either shape. A web thrall answers its own failures as
+// HTTP, the way it answers its own "no":
+//
+//   - a handler that returns an error is answered with a 500, the error is logged with the
+//     request's trace and becomes the thrall's last error;
+//   - a handler that panics is answered with a 500 too, the panic is logged with its trace and
+//     stack and counted (panics_total on the heartbeat, aether_panics_total on the lord), and the
+//     thrall keeps serving. With Handle the state the request would have returned is discarded,
+//     so the next request gets the one from before it (what the handler changed in place, through
+//     a pointer or a map, stays changed); with Serve the shared value is whatever the handler had
+//     made of it, so a handler that mutates shared state under a lock should release it with defer;
+//   - Refuse and Escalate keep their meaning: an error reply of that type (the ingress answers
+//     502), and for Escalate the crash it asks for.
+//
+// This differs from an ordinary thrall on purpose - see panic.go.
 func StartWeb[S any](def WebDef[S]) error {
 	concurrency, err := def.concurrency()
 	if err != nil {
@@ -136,7 +153,15 @@ func StartWeb[S any](def WebDef[S]) error {
 		Init:       init,
 		HandleCall: map[string]CallFn[S]{wire.OpHTTPRequest: handler},
 		Version:    def.Version,
-	}, concurrency)
+	}, dispatch{concurrency: concurrency, failureReply: internalServerError})
+}
+
+// internalServerError is what a web thrall answers when its handler fails - it returned an error,
+// or it panicked: a bare 500 that says nothing about the inside of the node. The cause is in the
+// thrall's log under the request's trace, which the ingress returns to the client as
+// X-Aether-Trace, so the two can be matched up.
+func internalServerError() any {
+	return TextResponse(http.StatusInternalServerError, http.StatusText(http.StatusInternalServerError))
 }
 
 // webCallFn adapts a Handle-shape HTTP handler to a thrall CallFn: decode the http_request payload

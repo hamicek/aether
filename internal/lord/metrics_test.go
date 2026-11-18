@@ -211,6 +211,23 @@ func TestInFlightHandlersAreExposed(t *testing.T) {
 	}
 }
 
+// TestContainedPanicsAreExposed: handler crashes a web thrall survived are a counter of their
+// own, apart from restarts - a thrall can be up the whole time and still be failing requests.
+func TestContainedPanicsAreExposed(t *testing.T) {
+	l := &Lord{metrics: newLordMetrics()}
+	l.metrics.recordHeartbeat("web", wire.HeartbeatMetrics{ProcessedTotal: 12, PanicsTotal: 2})
+	if v, ok := metricValue(t, scrape(t, l), `aether_panics_total{name="web"}`); !ok || v != 2 {
+		t.Fatalf("aether_panics_total = %v (present %v), want 2", v, ok)
+	}
+	if got := l.metrics.snapshot()["web"].Panics; got != 2 {
+		t.Errorf("snapshot panics = %d, want 2", got)
+	}
+	l.metrics.recordHeartbeat("legacy", wire.HeartbeatMetrics{ProcessedTotal: 1})
+	if v, ok := metricValue(t, scrape(t, l), `aether_panics_total{name="legacy"}`); !ok || v != 0 {
+		t.Fatalf("aether_panics_total without the field = %v (present %v), want 0", v, ok)
+	}
+}
+
 // TestExpiredCallsAreExposed covers the deadline-drop counter: a thrall's self-reported count of
 // calls it dropped unexecuted shows up on /metrics, a heartbeat without the field (an SDK that
 // predates it) reads as zero, and the series goes away with the thrall like every per-name series.

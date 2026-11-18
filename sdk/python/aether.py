@@ -16,6 +16,7 @@ import os
 import ssl
 import sys
 import time
+import traceback
 import weakref
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -102,6 +103,7 @@ class _MailboxStats:
         self.running = 0
         self.processed = 0
         self.expired = 0
+        self.panics = 0  # handler crashes contained by a web thrall
         self.last_ms = 0.0
 
     def begin(self) -> float:
@@ -122,6 +124,10 @@ class _MailboxStats:
         """The message left without its turn coming (its task was cancelled while it waited)."""
         self.depth -= 1
 
+    def panicked(self) -> None:
+        """Count a handler crash the thrall contained (the message itself still ends with end)."""
+        self.panics += 1
+
     def drop(self) -> None:
         self.expired += 1
         self.depth -= 1
@@ -138,6 +144,8 @@ class _MailboxStats:
             m["expired_total"] = self.expired
         if self.running > 0:
             m["in_flight"] = self.running
+        if self.panics > 0:
+            m["panics_total"] = self.panics
         return m
 
 
@@ -1070,6 +1078,10 @@ class ThrallDef:
     # the previous one), and the only definition that runs above that is the one def_web builds
     # for a serve handler, whose shape has no state to thread.
     _concurrency: int = field(default=1, repr=False)
+    # When set, the payload a caller is answered with - as a successful reply - when a call handler
+    # raises anything but Refuse or Escalate. None is the GenServer rule: a raised error is a
+    # handler_error reply. Set only by def_web, like _concurrency.
+    _failure_reply: Optional[Callable[[], Any]] = field(default=None, repr=False)
 
 
 def def_thrall(name, init, handle_call=None, handle_cast=None, terminate=None,
@@ -1191,6 +1203,16 @@ async def start(defn: ThrallDef) -> None:
             await respond(msg, e, _refused_reply(e, ex))
             return
         _set_last_error(f"handler_error: {ex}")
+        if defn._failure_reply is not None:
+            # A web thrall answers its own failures as HTTP. An exception is the one way a handler
+            # here can fail, a bug and a deliberate raise alike, so it is contained, counted and
+            # logged with the request's trace and the traceback - and the thrall carries on.
+            stats.panicked()
+            ctx.log.error("handler failed - the request is answered with a failure, the thrall carries on",
+                          op=e.get("op"), trace=trace, err=repr(ex),
+                          stack="".join(traceback.format_exception(type(ex), ex, ex.__traceback__)))
+            await respond(msg, e, _ok_reply(e, defn._failure_reply()))
+            return
         await respond(msg, e, _err_reply(e, ERR_HANDLER, str(ex)))
 
     async def process_call(e: dict, msg) -> None:
@@ -1556,9 +1578,24 @@ def _web_call_handler(handle: WebHandler) -> CallHandler:
     async def _handler(payload: Any, state: Any, ctx: "Ctx"):
         req = HTTPRequest.from_wire(payload or {})
         resp, next_state = await _maybe(handle(req, state, ctx))
-        return resp.to_wire(), next_state
+        return _as_response(resp).to_wire(), next_state
 
     return _handler
+
+
+def _as_response(resp: Any) -> "HTTPResponse":
+    """Insist that a web handler returned a response. Without it a handler that forgot its return
+    would fail on an attribute of None, which says nothing about what went wrong."""
+    if not isinstance(resp, HTTPResponse):
+        raise TypeError("the web handler did not return an HTTPResponse")
+    return resp
+
+
+def _internal_server_error() -> dict:
+    """What a web thrall answers when its handler fails: a bare 500 that says nothing about the
+    inside of the node. The cause is in the thrall's log under the request's trace, which the
+    ingress returns to the client as X-Aether-Trace."""
+    return text_response(500, "Internal Server Error").to_wire()
 
 
 def _web_serve_handler(serve: WebServer) -> CallHandler:
@@ -1568,7 +1605,7 @@ def _web_serve_handler(serve: WebServer) -> CallHandler:
     async def _handler(payload: Any, shared: Any, ctx: "Ctx"):
         req = HTTPRequest.from_wire(payload or {})
         resp = await _maybe(serve(req, shared, ctx))
-        return resp.to_wire(), shared
+        return _as_response(resp).to_wire(), shared
 
     return _handler
 
@@ -1600,12 +1637,22 @@ def def_web(name="", init=None, handle=None, version="", serve=None, concurrency
     means DEFAULT_WEB_CONCURRENCY; 1 serializes the requests through the mailbox, exactly as handle
     does. It applies to serve only: with handle it is a mistake this function refuses rather than
     ignores. The definition carries the result, so start(def_web(...)) and start_web(...) are the
-    same thing."""
+    same thing.
+
+    A failing handler costs one request, in either shape. A web thrall answers its own failures as
+    HTTP, the way it answers its own "no": a handler that raises (or returns something that is not
+    an HTTPResponse) is answered with a 500, the error is logged with the request's trace and its
+    traceback, counted (panics_total on the heartbeat, aether_panics_total on the lord) and becomes
+    the thrall's last error - and the thrall keeps serving. With handle the state stays what it was
+    before the request. Refuse and Escalate keep their meaning: an error reply of that type, and
+    for Escalate the crash it asks for. Only the handler's own coroutine is covered: a task the
+    handler started and did not await fails outside the request."""
     limit = _web_concurrency(name, handle, serve, concurrency)
     init_fn = init if init is not None else (lambda ctx: None)
     handler = _web_serve_handler(serve) if serve is not None else _web_call_handler(handle)
     defn = def_thrall(name=name, init=init_fn, handle_call={OP_HTTP_REQUEST: handler}, version=version)
     defn._concurrency = limit
+    defn._failure_reply = _internal_server_error
     return defn
 
 

@@ -6,7 +6,8 @@ the `omitempty` fields (`minimal`), an error reply (`reply_error`), a call with 
 (`call_deadline`), a refusal (`reply_refused`), the reply to a call dropped past its deadline
 (`reply_deadline_exceeded`), the reply sent in place of one too large for a bus message
 (`reply_too_large`), a heartbeat reporting dropped calls (`hb_expired`) and the heartbeat of a
-concurrent web thrall (`hb_concurrent`: handlers in flight and the declared concurrency).
+concurrent web thrall (`hb_concurrent`: handlers in flight and the declared concurrency) and of a
+web thrall that contained handler crashes (`hb_panics`).
 
 **Go is the source of truth.** Regenerate after any intentional contract change:
 

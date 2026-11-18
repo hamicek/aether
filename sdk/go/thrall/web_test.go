@@ -47,6 +47,8 @@ func TestWebCallFnRejectsMalformedPayload(t *testing.T) {
 	}
 }
 
+// The adapter itself passes the handler's error on; it is the dispatch that answers it (as a 500
+// from the web thrall - see TestWebHandlerFailuresAreAnsweredAsHTTP).
 func TestWebCallFnPropagatesHandlerError(t *testing.T) {
 	const sentinel = "handler blew up"
 	fn := webCallFn(func(HTTPRequest, struct{}, *Ctx) (HTTPResponse, struct{}, error) {
