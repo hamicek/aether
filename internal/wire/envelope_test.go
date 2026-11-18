@@ -251,3 +251,29 @@ func TestExpired(t *testing.T) {
 		}
 	}
 }
+
+// TestExpiredHandlesAnyDeadline: the judgement holds for every instant the wire can carry. A
+// deadline far in the future is not expired - not even one so far that the difference would
+// overflow a Duration - and an ancient one is.
+func TestExpiredHandlesAnyDeadline(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	skew := 250 * time.Millisecond
+	live := map[string]int64{
+		"a minute away":       now.Add(time.Minute).UnixMilli(),
+		"a month away":        now.Add(30 * 24 * time.Hour).UnixMilli(),
+		"a thousand years":    now.UnixMilli() + 1000*365*24*3600*1000,
+		"the largest instant": 1<<63 - 1,
+		"within the skew":     now.Add(-skew).UnixMilli(),
+	}
+	for name, deadline := range live {
+		if overdue, expired := (Envelope{Deadline: deadline}).Expired(now, skew); expired || overdue > skew {
+			t.Errorf("%s: expired = %v, overdue = %v; want a live call", name, expired, overdue)
+		}
+	}
+	if overdue, expired := (Envelope{Deadline: 1}).Expired(now, skew); !expired || overdue <= 0 {
+		t.Errorf("an ancient deadline: expired = %v, overdue = %v; want expired with a positive overdue", expired, overdue)
+	}
+	if overdue, expired := (Envelope{Deadline: now.Add(-time.Second).UnixMilli()}).Expired(now, skew); !expired || overdue != time.Second {
+		t.Errorf("a deadline a second ago: expired = %v, overdue = %v", expired, overdue)
+	}
+}

@@ -4,6 +4,7 @@ package wire
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 )
 
@@ -123,8 +124,23 @@ func (e Envelope) Expired(now time.Time, skew time.Duration) (overdue time.Durat
 	if e.Deadline <= 0 {
 		return 0, false
 	}
-	overdue = time.Duration(now.UnixMilli()-e.Deadline) * time.Millisecond
-	return overdue, overdue > skew
+	// Judged in milliseconds, the unit of the wire: a deadline far in the future is a large
+	// negative difference, and scaling that to a Duration first would overflow into "expired".
+	overdueMs := now.UnixMilli() - e.Deadline
+	return millis(overdueMs), overdueMs > skew.Milliseconds()
+}
+
+// millis converts a count of milliseconds to a Duration, saturating instead of overflowing.
+func millis(ms int64) time.Duration {
+	const limit = int64(math.MaxInt64 / int64(time.Millisecond))
+	switch {
+	case ms > limit:
+		return time.Duration(math.MaxInt64)
+	case ms < -limit:
+		return time.Duration(math.MinInt64)
+	default:
+		return time.Duration(ms) * time.Millisecond
+	}
 }
 
 // HeartbeatMetrics are a thrall's self-reported runtime samples, carried in the payload of a

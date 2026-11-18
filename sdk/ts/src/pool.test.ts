@@ -152,3 +152,30 @@ test("a handler that throws frees its slot", async () => {
   await nextDone;
   expect(stats.snapshot()).toMatchObject({ mailbox_depth: 0, processed_total: 2 });
 });
+
+test("a far-future deadline waits for a slot instead of reading as expired", async () => {
+  const { pool, stats } = newPool(1);
+  const busy = held();
+  const busyDone = pool.submit(call("busy"), () => {}, busy.handle);
+  // A month away, past what a timer can hold (2^31 ms), and the largest safe integer.
+  const far = [Date.now() + 30 * 24 * 3600 * 1000, Date.now() + 2 ** 40, Number.MAX_SAFE_INTEGER];
+  const waiting = far.map(() => held());
+  const replies: Envelope[] = [];
+  const done = far.map((deadline, i) => pool.submit(call(`far-${i}`, deadline), (r) => replies.push(r), waiting[i]!.handle));
+  await Bun.sleep(50);
+
+  expect(replies).toEqual([]); // none was dropped
+  expect(stats.snapshot()).toMatchObject({ mailbox_depth: 4, in_flight: 1 });
+  expect(stats.snapshot().expired_total).toBeUndefined();
+
+  busy.release();
+  await busyDone;
+  for (const w of waiting) {
+    await Bun.sleep(0);
+    expect(w.started()).toBe(true);
+    w.release();
+    await Bun.sleep(0);
+  }
+  await Promise.all(done);
+  expect(stats.snapshot()).toMatchObject({ mailbox_depth: 0, processed_total: 4 });
+});

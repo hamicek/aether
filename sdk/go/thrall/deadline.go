@@ -66,11 +66,23 @@ func (g deadlineGate) expire(e wire.Envelope, overdue time.Duration, respond fun
 	}))
 }
 
+// maxQueuedWait is the longest a waiting call is given a timer for. A deadline further away than
+// this is not worth timing - and must not be: the arithmetic on a far-future instant overflows,
+// and an overflowed timer fires at once. Such a call waits like one without a deadline; the gate
+// still judges it when its turn comes.
+const maxQueuedWait = 24 * time.Hour
+
 // expiresIn is how long from now the gate would start dropping the call: its deadline plus the
-// skew tolerance. ok is false for a call without a deadline, which never expires.
+// skew tolerance. ok is false for a call that needs no timer: one without a deadline, which never
+// expires, or one whose deadline is more than maxQueuedWait away.
 func (g deadlineGate) expiresIn(e wire.Envelope, now time.Time) (wait time.Duration, ok bool) {
 	if e.Deadline <= 0 {
 		return 0, false
 	}
-	return time.UnixMilli(e.Deadline).Add(g.skew).Sub(now), true
+	// In milliseconds, where the subtraction cannot overflow for any deadline on the wire.
+	remainingMs := e.Deadline - now.UnixMilli()
+	if remainingMs > maxQueuedWait.Milliseconds() {
+		return 0, false
+	}
+	return time.Duration(remainingMs)*time.Millisecond + g.skew, true
 }

@@ -153,6 +153,34 @@ class CallPoolTest(unittest.IsolatedAsyncioTestCase):
         nxt.release()
         await pool.drain()
 
+    async def test_far_future_deadline_waits_for_a_slot(self):
+        pool, stats = self._pool(1)
+        busy = _Held()
+        replies = []
+
+        async def respond(reply):
+            replies.append(reply)
+
+        pool.submit(_call("busy"), respond, busy.handle)
+        # A month away, past what a 32-bit timer holds, and the largest 64-bit instant.
+        far = [_now_ms() + 30 * 24 * 3600 * 1000, _now_ms() + 2 ** 40, 2 ** 63 - 1]
+        waiting = [_Held() for _ in far]
+        for i, deadline in enumerate(far):
+            pool.submit(_call(f"far-{i}", deadline), respond, waiting[i].handle)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(replies, [])  # none was dropped
+        self.assertNotIn("expired_total", stats.snapshot())
+        self.assertEqual((stats.snapshot()["mailbox_depth"], stats.snapshot()["in_flight"]), (4, 1))
+
+        busy.release()
+        for w in waiting:
+            await self._settle()
+            self.assertTrue(w.started)
+            w.release()
+        await pool.drain()
+        self.assertEqual((stats.snapshot()["mailbox_depth"], stats.snapshot()["processed_total"]), (0, 4))
+
     async def test_drain_waits_and_takes_no_new_calls(self):
         pool, _ = self._pool(1)
         running, waiting, refused = _Held(), _Held(), _Held()

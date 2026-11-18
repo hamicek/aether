@@ -506,3 +506,53 @@ func TestIdleDrainIsImmediate(t *testing.T) {
 		})
 	}
 }
+
+// TestWebServeFarFutureDeadlineWaitsForASlot: a deadline far beyond any real timeout must not be
+// read as already passed. A request carrying one, arriving while every slot is taken, waits and
+// is served when a slot comes free - whatever the size of the number.
+func TestWebServeFarFutureDeadlineWaitsForASlot(t *testing.T) {
+	eth := dispatchEther(t)
+	nc := eth.Conn()
+	s := &site{gate: newGate()}
+	runThrall(t, eth, "ae", "web", func() error { return StartWeb(serveDef(s, 2)) })
+	client := NewClient(nc, "ae")
+
+	// Two requests take both slots; the far-future ones then have to wait.
+	busy := []<-chan outcome{get(client, "web", "/slow/a", clientTimeout), get(client, "web", "/slow/b", clientTimeout)}
+	s.gate.awaitEntered(t, "a")
+	s.gate.awaitEntered(t, "b")
+
+	payload, _ := json.Marshal(HTTPRequest{Method: "GET", Path: "/fast"})
+	deadlines := map[string]int64{
+		"a month away":            time.Now().Add(30 * 24 * time.Hour).UnixMilli(),
+		"past what a timer holds": time.Now().UnixMilli() + (1 << 40),
+		"the largest instant":     1<<63 - 1,
+	}
+	replies := make(chan wire.Envelope, len(deadlines))
+	for name, deadline := range deadlines {
+		e := wire.Envelope{V: 1, ID: nats.NewInbox(), Kind: wire.KindCall, To: "web", Op: OpHTTPRequest,
+			Trace: name, Payload: payload, TS: time.Now().UnixMilli(), Deadline: deadline}
+		go func() { replies <- rawCall(t, nc, "ae", e) }()
+	}
+	select {
+	case reply := <-replies:
+		t.Fatalf("a request with a far-future deadline was answered while both slots were taken: %+v (error %+v)", reply.Status, reply.Error)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	s.gate.letGo("a")
+	s.gate.letGo("b")
+	for range deadlines {
+		select {
+		case reply := <-replies:
+			if reply.Status != wire.StatusOK {
+				t.Errorf("a request with a far-future deadline = %+v, want it served", reply.Error)
+			}
+		case <-time.After(clientTimeout):
+			t.Fatal("a request with a far-future deadline was never served")
+		}
+	}
+	for i, done := range busy {
+		mustOK(t, "busy request "+strconv.Itoa(i), awaitOutcome(t, "busy request", done))
+	}
+}

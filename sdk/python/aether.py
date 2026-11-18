@@ -576,11 +576,21 @@ class _DeadlineGate:
 
     def expires_in_ms(self, e: dict) -> Optional[int]:
         """How long from now this gate would start dropping the call (its deadline plus the skew
-        tolerance), or None for a call without a deadline, which never expires."""
+        tolerance), or None for a call that needs no timer: one without a deadline, which never
+        expires, or one whose deadline is more than _MAX_QUEUED_WAIT_MS away."""
         deadline = e.get("deadline")
         if not isinstance(deadline, (int, float)) or deadline <= 0:
             return None
-        return int(deadline) + self._skew_ms - int(time.time() * 1000)
+        remaining = int(deadline) - int(time.time() * 1000)
+        if remaining > _MAX_QUEUED_WAIT_MS:
+            return None
+        return remaining + self._skew_ms
+
+
+# The longest a waiting call is given a timer for (24 hours). A deadline further away is not worth
+# timing; such a call waits like one without a deadline, and the gate still judges it when its turn
+# comes. The same bound as the Go and TS SDKs, where a longer timer would misfire.
+_MAX_QUEUED_WAIT_MS = 24 * 60 * 60 * 1000
 
 
 class _CallPool:
