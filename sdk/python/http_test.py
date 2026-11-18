@@ -33,6 +33,10 @@ CASES = {
     "req_query_multi": aether.HTTPRequest(
         method="GET", path="/search", query="q=cats&q=dogs&safe=1",
         headers={"Accept": ["text/html"], "X-Tag": ["a", "b"]}),
+    "req_facts": aether.HTTPRequest(
+        method="POST", path="/api/login", host="shop.example", scheme="https", client_ip="203.0.113.7",
+        headers={"X-Forwarded-For": ["203.0.113.7"], "X-Forwarded-Proto": ["https"]},
+        body="eyJ1c2VyIjoiYW5uIn0="),
     "resp_html": aether.HTTPResponse(
         status=200, headers={"Content-Type": ["text/html; charset=utf-8"]}, body="PGgxPmhpPC9oMT4="),
     "resp_json": aether.HTTPResponse(
@@ -55,6 +59,18 @@ class HTTPParity(unittest.TestCase):
                 raw = json.loads(golden(name))
                 cls = aether.HTTPRequest if name.startswith("req_") else aether.HTTPResponse
                 self.assertEqual(cls.from_wire(raw).to_wire(), raw)
+
+    def test_request_facts_are_additive(self):
+        # A request from an ingress that predates the facts decodes with them empty ("not stated"),
+        # and a handler written before the facts existed still reads everything it knew from a
+        # request that carries them.
+        old = aether.HTTPRequest.from_wire({"method": "GET", "path": "/", "query": "a=1"})
+        self.assertEqual((old.host, old.scheme, old.client_ip), ("", "", ""))
+        self.assertEqual(old.to_wire(), {"method": "GET", "path": "/", "query": "a=1"})
+
+        new = aether.HTTPRequest.from_wire(json.loads(golden("req_facts")))
+        self.assertEqual((new.host, new.scheme, new.client_ip), ("shop.example", "https", "203.0.113.7"))
+        self.assertEqual((new.method, new.path, new.body_text()), ("POST", "/api/login", '{"user":"ann"}'))
 
     def test_binary_body_round_trips(self):
         body = bytes(range(256))

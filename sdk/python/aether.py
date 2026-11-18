@@ -1157,6 +1157,13 @@ def run(defn: ThrallDef) -> None:
 # marshals to base64), so the contract is binary-safe and identical across languages. Headers
 # mirror http.Header (a key maps to one or more values). Query is the raw query string without the
 # leading '?'.
+#
+# host, scheme and client_ip are the facts only the ingress can vouch for: the host the request was
+# addressed to (as the client sent it, port included when there was one), "http" or "https" as the
+# client reached the site, and the client's IP address (no port). The ingress derives them from its
+# own connection and from the reverse proxies it is configured to trust, so read these rather than
+# X-Forwarded-* headers. An ingress that predates them leaves them out; an empty value means "not
+# stated", never a trusted default - do not rate-limit or authorize on an empty client_ip.
 
 OP_HTTP_REQUEST = "http_request"
 
@@ -1168,6 +1175,9 @@ class HTTPRequest:
     query: str = ""
     headers: dict[str, list[str]] = field(default_factory=dict)
     body: str = ""  # base64
+    host: str = ""
+    scheme: str = ""
+    client_ip: str = ""
 
     @staticmethod
     def from_wire(d: dict) -> "HTTPRequest":
@@ -1177,12 +1187,21 @@ class HTTPRequest:
             query=d.get("query", "") or "",
             headers=d.get("headers", {}) or {},
             body=d.get("body", "") or "",
+            host=d.get("host", "") or "",
+            scheme=d.get("scheme", "") or "",
+            client_ip=d.get("client_ip", "") or "",
         )
 
     def to_wire(self) -> dict:
         out: dict = {"method": self.method, "path": self.path}
         if self.query:
             out["query"] = self.query
+        if self.host:
+            out["host"] = self.host
+        if self.scheme:
+            out["scheme"] = self.scheme
+        if self.client_ip:
+            out["client_ip"] = self.client_ip
         if self.headers:
             out["headers"] = self.headers
         if self.body:

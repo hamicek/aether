@@ -25,12 +25,25 @@ const OpHTTPRequest = "http_request"
 // values, so a repeated header such as Set-Cookie is preserved). Query is the raw query string
 // without the leading '?' (lossless; the thrall parses it if it cares). The fields with omitempty
 // are absent on the wire when empty, matching the TS/Python mirrors.
+//
+// Host, Scheme and ClientIP are the facts about the request that only the ingress can vouch for,
+// because it is the one holding the connection: which host the request was addressed to (the Host
+// it was routed by, as the client sent it, port included when there was one), whether the client
+// reached the site over "http" or "https", and the client's IP address (no port). The ingress
+// derives them from its own connection and from the forwarding headers of the reverse proxies it
+// is configured to trust - never from what an arbitrary client claims - so a thrall should read
+// these fields rather than X-Forwarded-* headers. They were added after the first version of the
+// contract: an ingress that predates them leaves them empty, and an empty value means "not
+// stated", never "trusted default" - do not rate-limit or authorize on an empty ClientIP.
 type HTTPRequest struct {
-	Method  string              `json:"method"`
-	Path    string              `json:"path"`
-	Query   string              `json:"query,omitempty"`
-	Headers map[string][]string `json:"headers,omitempty"`
-	Body    []byte              `json:"body,omitempty"`
+	Method   string              `json:"method"`
+	Path     string              `json:"path"`
+	Query    string              `json:"query,omitempty"`
+	Host     string              `json:"host,omitempty"`
+	Scheme   string              `json:"scheme,omitempty"`
+	ClientIP string              `json:"client_ip,omitempty"`
+	Headers  map[string][]string `json:"headers,omitempty"`
+	Body     []byte              `json:"body,omitempty"`
 }
 
 // HTTPResponse is the reply payload of an http_request call: the status, headers and body the
