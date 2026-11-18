@@ -116,9 +116,11 @@ internal/
   obs/                structured logging + the metric registry (Prometheus exposition)
   soak/               bounded latency/leak metric primitives for the soak suite
   wire/               envelope + subject/stream conventions (Go side, shared with the SDKs)
-sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM + defEvent/startEvent, call, cast
-sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm + def_event/start_event/run_event
-sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine) + thrall.EventManager/StartEvent (event manager)
+sdk/ts/               @hamicek/aether (Bun/TS): defThrall/start + defFSM/startFSM + defEvent/startEvent, call, cast, Client (calling from anywhere)
+sdk/python/           aether.py: def_thrall/start/run + FSM/start_fsm/run_fsm + def_event/start_event/run_event, Client
+sdk/go/thrall/        thrall.Def[S]/Start (GenServer) + thrall.FSM[D]/StartFSM (state machine) + thrall.EventManager/StartEvent (event manager) + thrall.Client/CallInto (calling from anywhere) + the re-exported wire contract
+testdata/wire/        golden envelopes shared by the Go/TS/Python/C# parity tests (the wire contract's drift check)
+testdata/crosslang/   the same test thrall in TS and Python, for the cross-language round trip
 sdk/csharp/           Aether: thin C# client (envelope + subjects + Cast + Consume/durable mailbox + heartbeat), not a full SDK
 examples/counter/     counter (TS/Py/Go) + gateway + a manifest per scenario
 examples/fsm/         state-machine (FSM) behaviour demo - a turnstile

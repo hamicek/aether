@@ -69,6 +69,11 @@ type Caller interface {
 	Call(target, op string, payload any, timeout time.Duration, opts ...SendOption) (json.RawMessage, error)
 }
 
+var (
+	_ Caller = (*Client)(nil)
+	_ Caller = (*Ctx)(nil)
+)
+
 // Client calls and casts to thralls over a NATS connection. It needs nothing else: no lord, no
 // environment, no running thrall - so a gateway, a CLI, a test or a library can talk to the ether
 // with the same envelope a thrall's own Ctx.Call produces. A Client is immutable and safe for
