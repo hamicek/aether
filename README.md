@@ -856,7 +856,9 @@ exposing it on a network needs authentication (a follow-up).
 **Fleet health (across lords).** The observer dashboard is per-lord; for a view of **every lord on
 the bus**, opt in with `fleet_health = true` and each lord publishes a curated summary of itself on
 `aether._fleet.<app>.<lord_id>`. `aether fleet [--watch]` (a reusable aggregator) assembles the whole
-fleet from those summaries - which lords are live or stale, their thralls and states - from one
+fleet from those summaries - which lords are live or stale, their thralls, states and the verbs each
+thrall declares (call/cast, named as `aether describe` names them; a thrall declaring none reads as a
+dash, and a long list is truncated in the table while `describe` keeps it complete) - from one
 place. It is deliberately a separate subject from supervision: `_fleet` is a curated summary meant to
 be seen across lords, whereas the raw `aether._lord.>` channels are node-local. The payload is a JSON
 contract, so an application dashboard can consume it in any language; a *domain* dashboard
