@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -352,7 +353,7 @@ func fleetCmd(argv []string) {
 
 	if !*watch {
 		time.Sleep(*collect)
-		printFleet(agg.Snapshot())
+		printFleet(os.Stdout, agg.Snapshot())
 		return
 	}
 
@@ -366,19 +367,19 @@ func fleetCmd(argv []string) {
 			return
 		case <-t.C:
 			fmt.Printf("\n=== fleet @ %s ===\n", time.Now().Format("15:04:05"))
-			printFleet(agg.Snapshot())
+			printFleet(os.Stdout, agg.Snapshot())
 		}
 	}
 }
 
 // printFleet renders one row per node: app, lord id, live/stale, thrall count (ready of total),
 // and how long ago its last summary arrived.
-func printFleet(nodes []fleet.NodeView) {
+func printFleet(w io.Writer, nodes []fleet.NodeView) {
 	if len(nodes) == 0 {
-		fmt.Println("no lords publishing fleet health (is [observability] fleet_health = true?)")
+		fmt.Fprintln(w, "no lords publishing fleet health (is [observability] fleet_health = true?)")
 		return
 	}
-	fmt.Printf("%-16s %-24s %-6s %-14s %s\n", "APP", "LORD", "STATE", "THRALLS", "LAST")
+	fmt.Fprintf(w, "%-16s %-24s %-6s %-14s %s\n", "APP", "LORD", "STATE", "THRALLS", "LAST")
 	now := time.Now()
 	for _, n := range nodes {
 		ready := 0
@@ -392,7 +393,7 @@ func printFleet(nodes []fleet.NodeView) {
 			state = "STALE"
 		}
 		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
-		fmt.Printf("%-16s %-24s %-6s %-14s %s ago\n",
+		fmt.Fprintf(w, "%-16s %-24s %-6s %-14s %s ago\n",
 			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
 		// Per-thrall detail: the version and status that node reports, and a compact last-error
 		// marker when one is set - so a fleet-wide rollout or failure is visible without an ssh.
@@ -406,7 +407,7 @@ func printFleet(nodes []fleet.NodeView) {
 			if th.LastError != "" {
 				line += "  ! " + truncate(th.LastError, 40)
 			}
-			fmt.Println(line)
+			fmt.Fprintln(w, line)
 		}
 	}
 }

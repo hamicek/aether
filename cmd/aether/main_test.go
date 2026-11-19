@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/hamicek/aether/internal/fleet"
 	"github.com/hamicek/aether/internal/natstest"
 	"github.com/hamicek/aether/internal/wire"
 )
@@ -125,5 +128,91 @@ func TestDescribeErrorReply(t *testing.T) {
 		if got := describeErrorReply(tc.err); got != tc.want {
 			t.Errorf("describeErrorReply(%+v) = %q, want %q", tc.err, got, tc.want)
 		}
+	}
+}
+
+// fleetFixture builds two nodes: a live one with two thralls (one with a rollout mismatch and a
+// last error) and a stale one with a single down thrall reporting no version. The order inside a
+// node is deliberately not alphabetical, so the tests also pin printFleet's sorting.
+func fleetFixture(now int64) []fleet.NodeView {
+	return []fleet.NodeView{
+		{
+			Health: fleet.Health{
+				App:        "demo",
+				LordID:     "hub-1",
+				IntervalMs: 5000,
+				Thralls: []fleet.ThrallHealth{
+					{Name: "zeta", Status: "ready", Version: "1.0.0", LastError: "boom"},
+					{Name: "alpha", Status: "ready", Version: "1.3.0", ExpectedVersion: "1.4.0"},
+				},
+			},
+			LastSeen: now,
+		},
+		{
+			Health: fleet.Health{
+				App:        "demo",
+				LordID:     "site-2",
+				IntervalMs: 5000,
+				Thralls:    []fleet.ThrallHealth{{Name: "only", Status: "down"}},
+			},
+			Stale:    true,
+			LastSeen: now,
+		},
+	}
+}
+
+// TestPrintFleetFormat pins the one-row-per-node layout: a header, a node line with ready/total,
+// and one indented line per thrall with its status, version (dash when absent), rollout mismatch
+// and a last-error marker.
+func TestPrintFleetFormat(t *testing.T) {
+	var buf bytes.Buffer
+	printFleet(&buf, fleetFixture(time.Now().UnixMilli()))
+	got := buf.String()
+
+	for _, want := range []string{
+		"APP",
+		"LAST",
+		"hub-1",
+		"site-2",
+		"2 (2 ready)",
+		"1 (0 ready)",
+		"STALE",
+		"! version mismatch (want 1.4.0)",
+		"! boom",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fleet output missing %q\n---\n%s", want, got)
+		}
+	}
+
+	// Thralls are sorted by name inside a node, so a shifted fixture order stays stable.
+	if strings.Index(got, "alpha") > strings.Index(got, "zeta") {
+		t.Errorf("thralls not sorted by name:\n%s", got)
+	}
+
+	// Header + one line per node + one line per thrall; no blank or duplicated lines.
+	if n := len(strings.Split(strings.TrimRight(got, "\n"), "\n")); n != 6 {
+		t.Errorf("got %d lines, want 6 (header + 2 nodes + 3 thralls)\n---\n%s", n, got)
+	}
+
+	// A thrall that reports no version reads as a dash, never as an empty column.
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "only") && !strings.HasSuffix(strings.TrimRight(line, " "), "-") {
+			t.Errorf("thrall without a version should end its line with a dash: %q", line)
+		}
+	}
+}
+
+// TestPrintFleetEmpty: with nothing on the bus the command says so explicitly instead of printing
+// a bare header.
+func TestPrintFleetEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	printFleet(&buf, nil)
+	got := buf.String()
+	if !strings.Contains(got, "no lords publishing fleet health") {
+		t.Errorf("empty fleet message missing:\n%s", got)
+	}
+	if strings.Contains(got, "APP") {
+		t.Errorf("empty fleet should print no header:\n%s", got)
 	}
 }
