@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -352,7 +353,7 @@ func fleetCmd(argv []string) {
 
 	if !*watch {
 		time.Sleep(*collect)
-		printFleet(agg.Snapshot())
+		printFleet(os.Stdout, agg.Snapshot())
 		return
 	}
 
@@ -366,19 +367,19 @@ func fleetCmd(argv []string) {
 			return
 		case <-t.C:
 			fmt.Printf("\n=== fleet @ %s ===\n", time.Now().Format("15:04:05"))
-			printFleet(agg.Snapshot())
+			printFleet(os.Stdout, agg.Snapshot())
 		}
 	}
 }
 
 // printFleet renders one row per node: app, lord id, live/stale, thrall count (ready of total),
 // and how long ago its last summary arrived.
-func printFleet(nodes []fleet.NodeView) {
+func printFleet(w io.Writer, nodes []fleet.NodeView) {
 	if len(nodes) == 0 {
-		fmt.Println("no lords publishing fleet health (is [observability] fleet_health = true?)")
+		fmt.Fprintln(w, "no lords publishing fleet health (is [observability] fleet_health = true?)")
 		return
 	}
-	fmt.Printf("%-16s %-24s %-6s %-14s %s\n", "APP", "LORD", "STATE", "THRALLS", "LAST")
+	fmt.Fprintf(w, "%-16s %-24s %-6s %-14s %s\n", "APP", "LORD", "STATE", "THRALLS", "LAST")
 	now := time.Now()
 	for _, n := range nodes {
 		ready := 0
@@ -392,8 +393,9 @@ func printFleet(nodes []fleet.NodeView) {
 			state = "STALE"
 		}
 		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
-		fmt.Printf("%-16s %-24s %-6s %-14s %s ago\n",
+		nodeLine := fmt.Sprintf("%-16s %-24s %-6s %-14s %s ago",
 			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
+		fmt.Fprintln(w, sanitizePrintable(nodeLine))
 		// Per-thrall detail: the version and status that node reports, and a compact last-error
 		// marker when one is set - so a fleet-wide rollout or failure is visible without an ssh.
 		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
@@ -406,9 +408,86 @@ func printFleet(nodes []fleet.NodeView) {
 			if th.LastError != "" {
 				line += "  ! " + truncate(th.LastError, 40)
 			}
-			fmt.Println(line)
+			// Verbs go last: the alert markers above keep a stable column, so a rollout or a failure
+			// is still something the eye can scan down.
+			line += "  " + formatVerbs(th.CallOps, th.CastOps)
+			fmt.Fprintln(w, sanitizePrintable(line))
 		}
 	}
+}
+
+// fleetVerbsLimit caps the rendered verbs at this many runes; the untruncated list stays available
+// in `aether describe`.
+const fleetVerbsLimit = 48
+
+// maxShownOps is how many op names one section shows before it summarises the rest as "+N". Capping
+// on whole tokens keeps a long call list from swallowing the cast list behind a blind cut.
+const maxShownOps = 4
+
+// formatVerbs renders the handler maps a thrall declared on its heartbeat as
+// "call(get) cast(dec, inc)", using the same op names in the same order that `aether describe`
+// shows. A thrall that declares no per-op contract (an event manager, an older build) reads as a
+// dash rather than a blank column.
+func formatVerbs(call, cast []string) string {
+	var parts []string
+	if s := verbList("call", call); s != "" {
+		parts = append(parts, s)
+	}
+	if s := verbList("cast", cast); s != "" {
+		parts = append(parts, s)
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return truncate(strings.Join(parts, " "), fleetVerbsLimit)
+}
+
+// verbList renders one handler map as "label(a, b)". Past maxShownOps names it appends ", +N" so the
+// budget is spent on whole names. Empty names (a malformed payload) are skipped, so a bad entry
+// cannot render as a bare "label()" and look like a real, empty contract.
+func verbList(label string, ops []string) string {
+	names := make([]string, 0, len(ops))
+	for _, o := range ops {
+		if o != "" {
+			names = append(names, o)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	suffix := ""
+	if len(names) > maxShownOps {
+		suffix = fmt.Sprintf(", +%d", len(names)-maxShownOps)
+		names = names[:maxShownOps]
+	}
+	return label + "(" + strings.Join(names, ", ") + suffix + ")"
+}
+
+// sanitizePrintable replaces control characters in a rendered line. Thrall names, versions, op
+// names and error text all come off the bus, so a remote (or merely buggy) thrall could otherwise
+// emit an ANSI escape or a carriage return that repaints or scrambles the operator's table. One
+// rune becomes one '?', so column alignment survives the replacement.
+func sanitizePrintable(s string) string {
+	clean := true
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // truncate shortens a string to at most n runes, appending an ellipsis when it had to cut, so a
