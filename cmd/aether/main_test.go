@@ -143,7 +143,10 @@ func fleetFixture(now int64) []fleet.NodeView {
 				IntervalMs: 5000,
 				Thralls: []fleet.ThrallHealth{
 					{Name: "zeta", Status: "ready", Version: "1.0.0", LastError: "boom"},
-					{Name: "alpha", Status: "ready", Version: "1.3.0", ExpectedVersion: "1.4.0"},
+					{
+						Name: "alpha", Status: "ready", Version: "1.3.0", ExpectedVersion: "1.4.0",
+						CallOps: []string{"get"}, CastOps: []string{"dec", "inc"},
+					},
 				},
 			},
 			LastSeen: now,
@@ -179,6 +182,8 @@ func TestPrintFleetFormat(t *testing.T) {
 		"STALE",
 		"! version mismatch (want 1.4.0)",
 		"! boom",
+		"call(get) cast(dec, inc)",
+		"1.0.0  -  ! boom", // a thrall declaring no ops reads as a dash, not a gap
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fleet output missing %q\n---\n%s", want, got)
@@ -214,5 +219,41 @@ func TestPrintFleetEmpty(t *testing.T) {
 	}
 	if strings.Contains(got, "APP") {
 		t.Errorf("empty fleet should print no header:\n%s", got)
+	}
+}
+
+// TestFormatVerbs pins the rendered shape of a thrall's declared ops: describe's names, the thrall's
+// own order, the ", " separator, a dash when nothing is declared, and a hard cap so the fleet table
+// stays one screen wide.
+func TestFormatVerbs(t *testing.T) {
+	many := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		many = append(many, "op"+strings.Repeat("x", 3))
+	}
+	cases := []struct {
+		name string
+		call []string
+		cast []string
+		want string
+	}{
+		{"none", nil, nil, "-"},
+		{"empty slices", []string{}, []string{}, "-"},
+		{"call only", []string{"get"}, nil, "call(get)"},
+		{"cast only", nil, []string{"dec", "inc"}, "cast(dec, inc)"},
+		{"both", []string{"get"}, []string{"dec", "inc"}, "call(get) cast(dec, inc)"},
+		{"order preserved", []string{"b", "a"}, nil, "call(b, a)"},
+	}
+	for _, c := range cases {
+		if got := formatVerbs(c.call, c.cast); got != c.want {
+			t.Errorf("%s: formatVerbs(%v, %v) = %q, want %q", c.name, c.call, c.cast, got, c.want)
+		}
+	}
+
+	long := formatVerbs(many, nil)
+	if n := len([]rune(long)); n > fleetVerbsLimit {
+		t.Errorf("long verbs not capped: %d runes, want <= %d", n, fleetVerbsLimit)
+	}
+	if !strings.HasSuffix(long, "...") {
+		t.Errorf("capped verbs should end with an ellipsis: %q", long)
 	}
 }

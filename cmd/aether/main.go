@@ -400,7 +400,8 @@ func printFleet(w io.Writer, nodes []fleet.NodeView) {
 		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 		for _, th := range sorted {
-			line := fmt.Sprintf("    %-14s %-10s %s", th.Name, th.Status, orDash(th.Version))
+			line := fmt.Sprintf("    %-14s %-10s %s  %s",
+				th.Name, th.Status, orDash(th.Version), formatVerbs(th.CallOps, th.CastOps))
 			if versionMismatch(th.Version, th.ExpectedVersion) {
 				line += "  ! version mismatch (want " + th.ExpectedVersion + ")"
 			}
@@ -410,6 +411,28 @@ func printFleet(w io.Writer, nodes []fleet.NodeView) {
 			fmt.Fprintln(w, line)
 		}
 	}
+}
+
+// fleetVerbsLimit caps the rendered verbs so a thrall with many ops cannot push the fleet table
+// past one screen. The untruncated list stays available in `aether describe`.
+const fleetVerbsLimit = 48
+
+// formatVerbs renders the handler maps a thrall declared on its heartbeat, named the way
+// `aether describe` names them: "call(get) cast(dec, inc)". Order is the thrall's own, so the two
+// outputs stay transcribable. A thrall that declares no per-op contract (an event manager, an older
+// build) reads as a dash rather than a blank column.
+func formatVerbs(call, cast []string) string {
+	var parts []string
+	if len(call) > 0 {
+		parts = append(parts, "call("+strings.Join(call, ", ")+")")
+	}
+	if len(cast) > 0 {
+		parts = append(parts, "cast("+strings.Join(cast, ", ")+")")
+	}
+	if len(parts) == 0 {
+		return "-"
+	}
+	return truncate(strings.Join(parts, " "), fleetVerbsLimit)
 }
 
 // truncate shortens a string to at most n runes, appending an ellipsis when it had to cut, so a
