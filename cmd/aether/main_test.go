@@ -257,3 +257,52 @@ func TestFormatVerbs(t *testing.T) {
 		t.Errorf("capped verbs should end with an ellipsis: %q", long)
 	}
 }
+
+// TestSanitizePrintable: control characters never reach the terminal, and a replaced rune keeps the
+// column width so a padded table stays aligned.
+func TestSanitizePrintable(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"plain", "plain"},
+		{"zizkov", "zizkov"},
+		{"a\x1b[31mred", "a?[31mred"},
+		{"line\r\nbreak", "line??break"},
+		{"nul\x00", "nul?"},
+		{"del\x7f", "del?"},
+	}
+	for _, c := range cases {
+		if got := sanitizePrintable(c.in); got != c.want {
+			t.Errorf("sanitizePrintable(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+
+	in := "a\x1b[31m"
+	if a, b := len([]rune(in)), len([]rune(sanitizePrintable(in))); a != b {
+		t.Errorf("rune count changed: %d -> %d", a, b)
+	}
+}
+
+// TestPrintFleetSanitizesRemoteStrings: thrall names, op names and error text arrive from remote
+// thralls, so a control character there must not reach the operator's terminal.
+func TestPrintFleetSanitizesRemoteStrings(t *testing.T) {
+	nodes := []fleet.NodeView{{
+		Health: fleet.Health{
+			App: "demo", LordID: "hub-1", IntervalMs: 5000,
+			Thralls: []fleet.ThrallHealth{{
+				Name: "evil", Status: "ready", Version: "1.0.0",
+				CallOps: []string{"\x1b[2J"}, LastError: "bad\rthing",
+			}},
+		},
+		LastSeen: time.Now().UnixMilli(),
+	}}
+
+	var buf bytes.Buffer
+	printFleet(&buf, nodes)
+	got := buf.String()
+
+	if strings.ContainsAny(got, "\x1b\r") {
+		t.Errorf("control characters reached the output: %q", got)
+	}
+	if !strings.Contains(got, "call(?[2J)") {
+		t.Errorf("control characters should be replaced by '?':\n%s", got)
+	}
+}

@@ -393,8 +393,9 @@ func printFleet(w io.Writer, nodes []fleet.NodeView) {
 			state = "STALE"
 		}
 		age := now.Sub(time.UnixMilli(n.LastSeen)).Truncate(time.Second)
-		fmt.Fprintf(w, "%-16s %-24s %-6s %-14s %s ago\n",
+		nodeLine := fmt.Sprintf("%-16s %-24s %-6s %-14s %s ago",
 			n.App, n.LordID, state, fmt.Sprintf("%d (%d ready)", len(n.Thralls), ready), age)
+		fmt.Fprintln(w, sanitizePrintable(nodeLine))
 		// Per-thrall detail: the version and status that node reports, and a compact last-error
 		// marker when one is set - so a fleet-wide rollout or failure is visible without an ssh.
 		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
@@ -408,7 +409,7 @@ func printFleet(w io.Writer, nodes []fleet.NodeView) {
 			if th.LastError != "" {
 				line += "  ! " + truncate(th.LastError, 40)
 			}
-			fmt.Fprintln(w, line)
+			fmt.Fprintln(w, sanitizePrintable(line))
 		}
 	}
 }
@@ -433,6 +434,33 @@ func formatVerbs(call, cast []string) string {
 		return "-"
 	}
 	return truncate(strings.Join(parts, " "), fleetVerbsLimit)
+}
+
+// sanitizePrintable replaces control characters in a rendered line. Thrall names, versions, op
+// names and error text all come off the bus, so a remote (or merely buggy) thrall could otherwise
+// emit an ANSI escape or a carriage return that repaints or scrambles the operator's table. One
+// rune becomes one '?', so column alignment survives the replacement.
+func sanitizePrintable(s string) string {
+	clean := true
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			b.WriteByte('?')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // truncate shortens a string to at most n runes, appending an ellipsis when it had to cut, so a
