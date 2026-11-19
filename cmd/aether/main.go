@@ -401,39 +401,66 @@ func printFleet(w io.Writer, nodes []fleet.NodeView) {
 		sorted := append([]fleet.ThrallHealth(nil), n.Thralls...)
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 		for _, th := range sorted {
-			line := fmt.Sprintf("    %-14s %-10s %s  %s",
-				th.Name, th.Status, orDash(th.Version), formatVerbs(th.CallOps, th.CastOps))
+			line := fmt.Sprintf("    %-14s %-10s %s", th.Name, th.Status, orDash(th.Version))
 			if versionMismatch(th.Version, th.ExpectedVersion) {
 				line += "  ! version mismatch (want " + th.ExpectedVersion + ")"
 			}
 			if th.LastError != "" {
 				line += "  ! " + truncate(th.LastError, 40)
 			}
+			// Verbs go last: the alert markers above keep a stable column, so a rollout or a failure
+			// is still something the eye can scan down.
+			line += "  " + formatVerbs(th.CallOps, th.CastOps)
 			fmt.Fprintln(w, sanitizePrintable(line))
 		}
 	}
 }
 
-// fleetVerbsLimit caps the rendered verbs so a thrall with many ops cannot push the fleet table
-// past one screen. The untruncated list stays available in `aether describe`.
+// fleetVerbsLimit caps the rendered verbs at this many runes; the untruncated list stays available
+// in `aether describe`.
 const fleetVerbsLimit = 48
 
-// formatVerbs renders the handler maps a thrall declared on its heartbeat, named the way
-// `aether describe` names them: "call(get) cast(dec, inc)". Order is the thrall's own, so the two
-// outputs stay transcribable. A thrall that declares no per-op contract (an event manager, an older
-// build) reads as a dash rather than a blank column.
+// maxShownOps is how many op names one section shows before it summarises the rest as "+N". Capping
+// on whole tokens keeps a long call list from swallowing the cast list behind a blind cut.
+const maxShownOps = 4
+
+// formatVerbs renders the handler maps a thrall declared on its heartbeat as
+// "call(get) cast(dec, inc)", using the same op names in the same order that `aether describe`
+// shows. A thrall that declares no per-op contract (an event manager, an older build) reads as a
+// dash rather than a blank column.
 func formatVerbs(call, cast []string) string {
 	var parts []string
-	if len(call) > 0 {
-		parts = append(parts, "call("+strings.Join(call, ", ")+")")
+	if s := verbList("call", call); s != "" {
+		parts = append(parts, s)
 	}
-	if len(cast) > 0 {
-		parts = append(parts, "cast("+strings.Join(cast, ", ")+")")
+	if s := verbList("cast", cast); s != "" {
+		parts = append(parts, s)
 	}
 	if len(parts) == 0 {
 		return "-"
 	}
 	return truncate(strings.Join(parts, " "), fleetVerbsLimit)
+}
+
+// verbList renders one handler map as "label(a, b)". Past maxShownOps names it appends ", +N" so the
+// budget is spent on whole names. Empty names (a malformed payload) are skipped, so a bad entry
+// cannot render as a bare "label()" and look like a real, empty contract.
+func verbList(label string, ops []string) string {
+	names := make([]string, 0, len(ops))
+	for _, o := range ops {
+		if o != "" {
+			names = append(names, o)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	suffix := ""
+	if len(names) > maxShownOps {
+		suffix = fmt.Sprintf(", +%d", len(names)-maxShownOps)
+		names = names[:maxShownOps]
+	}
+	return label + "(" + strings.Join(names, ", ") + suffix + ")"
 }
 
 // sanitizePrintable replaces control characters in a rendered line. Thrall names, versions, op

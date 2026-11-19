@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -183,15 +184,20 @@ func TestPrintFleetFormat(t *testing.T) {
 		"! version mismatch (want 1.4.0)",
 		"! boom",
 		"call(get) cast(dec, inc)",
-		"1.0.0  -  ! boom", // a thrall declaring no ops reads as a dash, not a gap
+		"1.0.0  ! boom  -", // a thrall declaring no ops reads as a dash, not a gap
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("fleet output missing %q\n---\n%s", want, got)
 		}
 	}
 
-	// Thralls are sorted by name inside a node, so a shifted fixture order stays stable.
-	if strings.Index(got, "alpha") > strings.Index(got, "zeta") {
+	// Thralls are sorted by name inside a node, so a shifted fixture order stays stable. Both names
+	// must be present first: comparing -1 against a real index would prove nothing.
+	ai, zi := strings.Index(got, "alpha"), strings.Index(got, "zeta")
+	if ai < 0 || zi < 0 {
+		t.Fatalf("expected both fixture thralls in the output (alpha=%d, zeta=%d)\n---\n%s", ai, zi, got)
+	}
+	if ai > zi {
 		t.Errorf("thralls not sorted by name:\n%s", got)
 	}
 
@@ -223,13 +229,9 @@ func TestPrintFleetEmpty(t *testing.T) {
 }
 
 // TestFormatVerbs pins the rendered shape of a thrall's declared ops: describe's names, the thrall's
-// own order, the ", " separator, a dash when nothing is declared, and a hard cap so the fleet table
-// stays one screen wide.
+// own order, the ", " separator, a dash when nothing is declared, whole-token summarising past
+// maxShownOps, and a rune cap on very long names.
 func TestFormatVerbs(t *testing.T) {
-	many := make([]string, 0, 20)
-	for i := 0; i < 20; i++ {
-		many = append(many, "op"+strings.Repeat("x", 3))
-	}
 	cases := []struct {
 		name string
 		call []string
@@ -242,6 +244,8 @@ func TestFormatVerbs(t *testing.T) {
 		{"cast only", nil, []string{"dec", "inc"}, "cast(dec, inc)"},
 		{"both", []string{"get"}, []string{"dec", "inc"}, "call(get) cast(dec, inc)"},
 		{"order preserved", []string{"b", "a"}, nil, "call(b, a)"},
+		{"empty names skipped", []string{"", ""}, nil, "-"},
+		{"mixed empty names", []string{"", "get"}, nil, "call(get)"},
 	}
 	for _, c := range cases {
 		if got := formatVerbs(c.call, c.cast); got != c.want {
@@ -249,7 +253,18 @@ func TestFormatVerbs(t *testing.T) {
 		}
 	}
 
-	long := formatVerbs(many, nil)
+	// A long list is summarised on whole-token boundaries, so a long call list cannot swallow the
+	// cast list behind a blind cut.
+	ops := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		ops = append(ops, "op"+strconv.Itoa(i))
+	}
+	if got, want := formatVerbs(ops, []string{"zap"}), "call(op0, op1, op2, op3, +16) cast(zap)"; got != want {
+		t.Errorf("long call list = %q, want %q", got, want)
+	}
+
+	// Very long single names still hit the rune cap.
+	long := formatVerbs([]string{strings.Repeat("x", 200)}, nil)
 	if n := len([]rune(long)); n > fleetVerbsLimit {
 		t.Errorf("long verbs not capped: %d runes, want <= %d", n, fleetVerbsLimit)
 	}
@@ -304,5 +319,8 @@ func TestPrintFleetSanitizesRemoteStrings(t *testing.T) {
 	}
 	if !strings.Contains(got, "call(?[2J)") {
 		t.Errorf("control characters should be replaced by '?':\n%s", got)
+	}
+	if n := len(strings.Split(strings.TrimRight(got, "\n"), "\n")); n != 3 {
+		t.Errorf("control characters changed the line count: got %d, want 3 (header + node + thrall)\n---\n%s", n, got)
 	}
 }
